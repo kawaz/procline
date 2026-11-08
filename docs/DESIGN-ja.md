@@ -30,20 +30,20 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 ## 構成
 
-収集は OS ごとの crate に実装し、型と照合は OS に依存しない core に置きます。アプリが使うのは入口の procline だけで、これがビルドターゲットに応じて OS ごとの crate を読み込みます(`[target.'cfg(target_os = "macos")'.dependencies]`)。core 自体を入口にしないのは、OS ごとの crate が core の型に依存するので、core から読むと循環するためです。ACL は型だけに依存するので、Linux の収集を足してもそのまま使えます。名前は process lineage(プロセスとその祖先の列)から取っています(決定の記録: [DR-0001](decisions/DR-0001-crate-naming.md))。
+収集は OS ごとの crate に実装し、型と照合は OS に依存しない core に置きます。アプリが使うのは入口の procline だけで、これがビルドターゲットに応じて OS ごとの crate を読み込みます(`[target.'cfg(target_os = "macos")'.dependencies]`)。core 自体を入口にしないのは、OS ごとの crate が core の型に依存するので、core から読むと循環するためです。ACL は型だけに依存するので、Linux の収集を足してもそのまま使えます。`os.*` の語彙は OS ごとの crate が `procline_acl::Item` として提供するので、procline-macos は procline-acl にも依存します(procline-acl は core だけに依存するので循環しません)。名前は process lineage(プロセスとその祖先の列)から取っています(決定の記録: [DR-0001](decisions/DR-0001-crate-naming.md))。
 
 | crate | 中身 | 依存 |
 | --- | --- | --- |
 | procline | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
 | procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の信頼度の判定、表示用の無害化、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
-| procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、OS の世代(起動、スリープ、画面ロックなど)の提供 | core、Security framework、AppKit |
-| procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、rule の作成と grant の発行 | core |
+| procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、`os.*` の語彙の提供(`procline_macos::os_items()`) | core、procline-acl、Security framework、AppKit |
+| procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、OS 非依存の組み込みの語彙、rule の作成と grant の発行 | core |
 
-アプリ(cw、pam-passkey)は、必要なものだけを使います。pam-passkey は収集だけ、cw はすべてです。cw 固有の語彙(`app.unlock` など)は cw 側で定義して、`app.` の名前で procline-acl に登録します。
+アプリ(cw、pam-passkey)は、必要なものだけを使います。pam-passkey は収集だけ、cw はすべてです。cw は `procline_macos::os_items()` の `os.*` の項目を `Vocabulary::register` で登録します。cw 固有の語彙(`app.unlock` など)は cw 側で定義して、`app.` の名前で procline-acl に登録します。
 
 ## 収集する情報
 
-収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は、その項目を照合に使ったときのクラスで、その条件が承認した個体・コードをどれだけ特定するかで決まります(「強さ: クラスと深さ」)。
+収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。列は収集した起動の boot UUID(`kern.bootsessionuuid`、`ProcessChain.boot_uuid`)も持ちます。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は、その項目を照合に使ったときのクラスで、その条件が承認した個体・コードをどれだけ特定するかで決まります(「強さ: クラスと深さ」)。
 
 ### 識別子
 
@@ -52,9 +52,9 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む |
 | unique\_id / parent\_unique\_id | `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` の `p_uniqueid`、`p_puniqueid` | 強 | 起動ごとに一意な 64bit ID。祖先を確実に辿れる。`#ifdef PRIVATE` の SPI なので、取れなければ pid と起動時刻の組に落とす |
 | pid、起動時刻 | `proc_pidinfo(PROC_PIDTBSDINFO)` | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、接続後に exec した相手の検出に使える |
-| asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。`os.login_session` の pin 値に使う |
+| asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。起動ごとに再利用されるので、`os.login_session` の pin 値に boot UUID と組で使う |
 
-これらの識別子は収集の内部の分類で、ルールの語彙では audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれ(「matcher」)、asid は `os.login_session` の pin 値として内部で使われるだけで語彙には出ません。
+これらの識別子は収集の内部の分類で、ルールの語彙では audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれ(「matcher」)、asid は `os.login_session` の pin 値(`{boot_uuid, asid}`)として内部で使われるだけで語彙には出ません。
 
 ### プロセスの属性
 
@@ -64,8 +64,8 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | コード署名(識別子、Team ID、cdhash、署名者の証明書チェーン、ad-hoc・hardened runtime・platform binary の別、entitlements、公証) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid)、`SecCodeCheckValidity`、`SecCodeCopySigningInformation` | 強(検証が通ったときだけ) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所)、中(利用者が書ける場所) |
 | 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い) |
-| app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取る。実行パスから `.app` を遡って読む方法は表示用 | 強(`binary` の field。`team_id`・`signing_id` と組) |
-| 責任プロセス | `responsibility_get_pid_responsible_for_pid`(私的 API) | 中 |
+| app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取り、`Signature.bundle_id` に持つ(照合に使う)。実行パスから `.app` を遡って読む `ProcessInfo.bundle` は表示用 | 強(`binary` の field。`team_id`・`signing_id` と組) |
+| 責任プロセス | `responsibility_get_pid_responsible_for_pid`(私的 API)。pid でなく個体の識別(`ProcessInfo.responsible: Option<ProcessIdentity>`)で持つ | 中 |
 | プロセス名、argv、cwd、tty | `KERN_PROCARGS2`、`PROC_PIDVNODEPATHINFO`、`kinfo_proc` | 弱 |
 | env | `KERN_PROCARGS2`(同じ uid か root のみ) | 表示専用(伏せた後の値しか持たないので照合に使えない。方針は後述) |
 | アイコン | `NSWorkspace.icon(forFile:)` を 64px PNG に縮小 | 表示専用(照合に使わない) |
@@ -79,6 +79,7 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 | 信頼度 | 状態 | 表示 |
 | --- | --- | --- |
 | platform | Apple のプラットフォームバイナリ | 警告なし |
+| app\_store | App Store 配布(Apple 署名、公証チケット無し) | 警告なし |
 | notarized | Developer ID 署名で公証済み | 警告なし(署名者名と Team ID を併記) |
 | developer\_id | Developer ID 署名だが公証なし | ⚠️ 未公証 |
 | adhoc | ad-hoc 署名(Team ID なし) | ⚠️ ad-hoc |
@@ -102,7 +103,7 @@ env にはトークンなどの秘密が混ざるので、収集するかどう�
 | `allowlist` | 列挙した変数だけ(例: `PWD`、`SSH_CONNECTION`、`SUDO_COMMAND`) |
 | `all` | すべて。ただし伏せ字の規則を必ず通す |
 
-伏せ字は core に置き、2つの関数として差し替えられるようにします。対象の判定 `Fn(&str) -> bool`(変数名を受け取る)と、伏せ方 `Fn(&str, &str) -> String`(名前と値を受け取る)です。既定は、名前に `TOKEN`、`SECRET`、`PASS`、`KEY`、`CRED`、`AUTH`、`COOKIE`、`SESSION`、`PRIVATE`、`CERT`、`SALT`、`PWD`、`OTP` を含む変数(大文字小文字を区別しない)の値を伏せ、名前だけ残します。語の選び方は Rails の `filter_parameters` や Sentry の既定の伏せ字など、既存のリストに合わせます。`PWD` は作業ディレクトリの変数も巻き込みますが、作業ディレクトリは cwd の項目で取れるので困りません。外したいときは、既定の判定関数を包んで PWD を除く関数に差し替えます。収集結果の env は伏せた後の値しか持たないので、照合には使えません(表示専用)。
+伏せ字は core に置き、2つの関数として差し替えられるようにします(`Redaction` を `CollectOptions.redaction` で渡す)。対象の判定 `Fn(&str) -> bool`(変数名を受け取る)と、伏せ方 `Fn(&str, &str) -> String`(名前と値を受け取る)です。既定は、名前に `TOKEN`、`SECRET`、`PASS`、`KEY`、`CRED`、`AUTH`、`COOKIE`、`SESSION`、`PRIVATE`、`CERT`、`SALT`、`PWD`、`OTP` を含む変数(大文字小文字を区別しない)の値を伏せ、名前だけ残します。語の選び方は Rails の `filter_parameters` や Sentry の既定の伏せ字など、既存のリストに合わせます。`PWD` は作業ディレクトリの変数も巻き込みますが、作業ディレクトリは cwd の項目で取れるので困りません。外したいときは、既定の判定関数を包んで PWD を除く関数に差し替えます。収集結果の env は伏せた後の値しか持たないので、照合には使えません(表示専用)。
 
 ### 表示用の無害化
 
@@ -132,7 +133,7 @@ ACL は4つの部品でできています。subject、tag、rule は名前を付
 | rule | 誰が(subject)、何に(targets)、いつまで・どんなときに(conditions)、どうなるか(effect)。conditions は記号のまま | grant の元。「いつもの許可」を承認画面で選んで passkey 1回で適用 |
 | grant | rule を承認の瞬間の接続相手に適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの | 評価 |
 
-どの grant にも当たらなければ既定の effect(普通は `ask`)になり、拒否は許可より優先します。
+どの grant にも当たらなければ既定の effect(アプリが `Policy::load_verified` の `default_effect` で与える)になり、拒否は許可より優先します。
 
 ### subject
 
@@ -148,7 +149,7 @@ subject は1つのプロセスへの条件で、接続相手か祖先かを区�
 }
 ```
 
-この例は「上に claude-code がいて、さらにその上に `terminal-app` のタグが付いたプロセスがいる」プロセスで、対象自身の Team ID と signing identifier、claude-code の Team ID は承認したときの値に固定されます。
+この例は「上に claude-code がいて、さらにその上に `terminal-app` のタグが付いたプロセスがいる」プロセスで、対象自身の Team ID と signing identifier、claude-code の Team ID は承認したときの値に固定されます。tmux の中のシェルの祖先には端末 app は現れません。tmux server はデーモン化して launchd の子になるので、lineage は tmux server で切れます。
 
 | 要素 | 中身 |
 | --- | --- |
@@ -162,7 +163,7 @@ subject は1つのプロセスへの条件で、接続相手か祖先かを区�
 `ancestors` は部分列として照合します。
 
 - 列の順は対象に近い方からで、収集結果の列 `[対象, 親, 祖父, …]` と同じ向きです。
-- 各要素は、前の要素が当たった祖先より上で、この順に祖先のどこかに当たればよく、間に別の祖先が挟まってもかまいません。tmux、direnv、ラッパの有無で深さは安定しないので、「間に何も挟まらない」を区別する書き方は持ちません。
+- 各要素は、前の要素が当たった祖先より上で、この順に祖先のどこかに当たればよく、間に別の祖先が挟まってもかまいません。direnv やラッパの有無で深さは安定しないので、「間に何も挟まらない」を区別する書き方は持ちません。
 - 照合は近い側から貪欲に決めます。要素 1 を最も近い当たる祖先に、要素 2 をそのさらに上で最も近い当たる祖先に、と決めるので、要素の placeholder をどの祖先の値で埋めるかが一意に決まります。具体値もタグも無い要素(`{"match": {"binary": {"team_id": true}}}` だけ)は、その値を持つ最も近い祖先に当たります。
 - 要素の中に `ancestors` は入れ子にせず、要素を名前で参照することもしません。深い条件はタグの定義に閉じ込めます。
 
@@ -197,6 +198,7 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 - タグの定義に placeholder(`true`)は書けません(「rule」)。
 - タグの定義もルールと同じ署名付きの一覧に入れます。同じ uid のプロセスが定義を書き換えられると、そのタグを条件にしたルールが全部広がるためです。
 - タグの定義が別のタグを参照してもよく、循環は読み込み時にエラーにします。
+- 列が途切れていると、祖先への条件を持つタグは有無を判定できないことがあります。そうしたタグは `TaggedChain.undecidable_tags` に入り、承認画面は「付いていない」と区別して見せます(「評価」)。
 
 ### rule
 
@@ -217,7 +219,7 @@ rule は静的な定義です。conditions は記号のまま書き、世代や�
 | id | rule の名前。grant が `rule_id` で指す |
 | effect | `allow`(無認証で通す)、`deny`(拒否)、`ask`(アプリの再認証を求める) |
 | subject | 上の subject。名前で参照してもよい |
-| targets | ルールが効く対象(キーの glob、タグ)。対象の語彙はアプリが決める。不要なアプリは省略する |
+| targets | ルールが効く対象の列。要素は対象(`Target` の文字列)に対する glob。対象の語彙はアプリが決める。空の `targets` は全対象に当たる |
 | conditions | 条件の名前の列(すべて AND)。寿命型と状態型があり、どちらかは語彙が決める(下記) |
 
 subject の値は、具体値か placeholder(`true`)のどちらかです(決定の記録: [DR-0007](decisions/DR-0007-pin-placeholders-and-ordered-ancestors.md))。
@@ -232,7 +234,7 @@ subject の値は、具体値か placeholder(`true`)のどちらかです(決定
 - 単純項目(`cwd`、`uid`、`path` …)も `true` で、実値を完全一致で pin します。
 - これにより「いつもの許可」は 1 つの rule で済み、アプリごとに別の rule を保存しなくてよくなります。
 
-placeholder を書けるのは rule の inline の subject だけです(決定の記録: [DR-0008](decisions/DR-0008-evaluation-semantics.md))。タグの定義、名前付きの subject、読み込み時に自動で永続の grant になる rule(下記)に `true` があれば、読み込みはエラーにします(`LoadError::InvalidValue`)。
+placeholder を書けるのは rule の inline の subject だけです(決定の記録: [DR-0008](decisions/DR-0008-evaluation-semantics.md))。タグの定義と名前付きの subject に `true` があれば、読み込みはエラーにします(`LoadError::InvalidValue`)。placeholder を含む rule は、読み込み時に自動で grant にならず、承認を経てだけ grant になります(下記)。
 
 条件には2つの種類があり、どちらかは語彙に登録するときに決まります。ルールには `conditions` に名前を並べるだけで、種類ごとに置き場を分けません(すべて AND)。
 
@@ -243,7 +245,7 @@ placeholder を書けるのは rule の inline の subject だけです(決定�
 
 `uses`(消費型)も寿命型です。一度 0 になれば戻りません。種類はルールを書く人ではなく語彙が知っているので、承認画面や trace では各条件の横に種類を出し、読む人にどちらの意味かを見せます。
 
-静的な rule を評価に直接使うことはしません。評価が見るのは grant だけです。一覧の rule のうち寿命型・消費型の condition を持たないものは、読み込み時に自動で永続の grant になります。手書きの deny を「許可する」操作なしに効かせるためです。寿命型・消費型を含む rule は、承認を経てだけ grant になります。
+静的な rule を評価に直接使うことはしません。評価が見るのは grant だけです。一覧の rule のうち、寿命型・消費型の condition を持たず、placeholder を含まず、pin に chain や観測値を要する condition(`os.login_session` 等)も含まないものは、読み込み時に自動で永続の grant になります。手書きの deny を「許可する」操作なしに効かせるためです。それ以外の rule は、承認を経てだけ grant になります。
 
 ### grant
 
@@ -274,7 +276,7 @@ grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適�
 - subject に placeholder は残りません(残っていれば読み込みエラー)。埋める値が無ければ(署名が無いのに `team_id: true` など)grant は作れません(`GrantError::ValueUnavailable`)。
 - grant は自己完結です。effect、targets、pin 済みの conditions、placeholder を解決した subject を自分で持ち、元の rule の id を `rule_id` として持ちます(表示と掃除に使う)。rule が後で変わっても、既存の grant は変わりません。
 - grant の subject は inline の subject です。rule の subject が名前で参照していれば、grant を作るときに展開します。subject の中のタグ名の参照だけは、名前のまま残します。タグの定義は署名付きの一覧にあり、その更新は意図した変更なので、既存の grant にも及んでよいためです。
-- 寿命型・消費型の condition を持たない rule から作った grant は pin 値が無く、失効しません(永続の grant)。deny は普通こちらです。
+- 寿命型・消費型の condition を持たない rule から作った grant は失効しません(永続の grant)。deny は普通こちらです。
 - `Policy::grant` は grant を返すだけで、メモリ上の Policy には入れません。アプリが署名して永続化し、書けてから `Policy::add_grant` で入れたときに効き始めます(「保存」)。
 
 保存した rule がそのまま再適用の対象になります。placeholder があるので、同じ rule を別のアプリの承認にも使えます。承認画面に rule の一覧を出し、選んで passkey を1回通せば grant ができます。承認画面でその場で条件を選んで許可する流れは「rule を組み立て、すぐ grant にする」の 2 段です。rule を一覧に保存するかは利用者が選び、保存しなければ使い捨ての rule になります。
@@ -311,9 +313,9 @@ rule の値が placeholder(`true`)の項目や field は、grant で実値の完
 
 `process`、`binary`、`os.session` は構造を持つ値で、完全一致だけにします(`binary` はどの field も完全一致)。署名の条件は、署名の検証が通ったときだけ一致とみなします。ad-hoc 署名は Team ID が空なので、Team ID の条件には決して一致しません。
 
-**`process`** は「この個体のプロセス」を表す項目です(決定の記録: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md))。rule では `true`(承認したその個体を pin)か具体値の複合を書き、grant では `Policy::grant` がその時点で取れた識別子と boot UUID(`kern.bootsessionuuid`)を全部持たせた複合値になります(例 `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。照合は両側に揃っている識別子を全部比べ、全部一致したときだけ当たります。最悪でも pid と起動時刻の組の一致を見ます。ルールを書く人は、どの識別子で比べたかを気にしません。クラスは強です。`match` にも `ancestors` の中にも書けるので、「このターミナルのタブのシェルの子孫」が書けます。pin したプロセスが終わればそのプロセスは列に居なくなり、grant は当たらなくなります。列に居るプロセスの寿命はこれで表せます。終わったプロセスを指す grant の削除は掃除(アプリ)の責務です。UI では「このプロセスだけ」の 1 選択肢として出します。
+**`process`** は「この個体のプロセス」を表す項目です(決定の記録: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md))。rule では `true`(承認したその個体を pin)か具体値の複合を書き、grant では `Policy::grant` がその時点で取れた識別子と boot UUID(`kern.bootsessionuuid`)を全部持たせた複合値になります(例 `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。照合は両側に揃っている識別子を全部比べ、全部一致したときだけ当たります。最悪でも pid と起動時刻の組の一致を見ます。ルールを書く人は、どの識別子で比べたかを気にしません。クラスは強です。`match` にも `ancestors` の中にも書けるので、「このターミナルのタブのシェルの子孫」が書けます。pin したプロセスが終わればそのプロセスは列に居なくなり、grant は当たらなくなります。列に居るプロセスの寿命はこれで表せます。終わったプロセスを指す grant の削除は掃除(アプリ)の責務です。UI では「このプロセスだけ」の 1 選択肢として出します。`process` は個体の同一性で、exec で中身のコードが変わっても同じ個体です。コードの同一性は `binary` が担うので、コードも固定したいときは `binary` と併用して pin します。
 
-**`binary`** は「このプロセスのコード」を表す項目です。値は任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` です(例 `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`)。field の値は文字列か placeholder の `true` で、grant ではどれも文字列です。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id`、`signing_id`、`bundle_id` は署名と署名で封印された Info.plist の値そのままです。真偽値を値に取る field は無いので、`true` は placeholder の意味だけを持ちます。照合は値にある field をそれぞれ検証し、全部が一致したときだけ当たります(AND)。署名由来の field(`team_id`、`signing_id`、`bundle_id`、`cdhash`)は、署名の検証が通ったときだけ一致とみなします。署名が有効なことは署名由来の field の照合の性質なので、それだけを表す項目は持ちません。クラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中です。
+**`binary`** は「このプロセスのコード」を表す項目です。値は任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` です(例 `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`)。field の値は文字列か placeholder の `true` で、grant ではどれも文字列です。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id`、`signing_id`、`bundle_id` は署名と署名で封印された Info.plist の値そのままです(`bundle_id` の照合元は `Signature.bundle_id`)。真偽値を値に取る field は無いので、`true` は placeholder の意味だけを持ちます。照合は値にある field をそれぞれ検証し、全部が一致したときだけ当たります(AND)。署名由来の field(`team_id`、`signing_id`、`bundle_id`、`cdhash`)は、署名の検証が通ったときだけ一致とみなします。署名が有効なことは署名由来の field の照合の性質なので、それだけを表す項目は持ちません。クラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中です。Apple の OS バイナリ(Terminal.app、`/bin/zsh` 等)は Team ID を持たないので、`binary` ではなく root 所有の `path` で書きます(強)。
 
 値の妥当性の規則は `binary` の中に閉じています。
 
@@ -346,6 +348,9 @@ register(key, impl)
 
 登録先は procline-acl の `Vocabulary` で、matcher の項目、scope、条件が同じ器に入ります。登録の時点で検査するのは、key の重複と名前空間だけです。
 
+- `Vocabulary::builtin()` は OS 非依存の項目だけを持ちます。matcher の項目(`process`、`binary`、`uid`、`gid`、`path`、`cwd`、`argv`、`name`、`tty`、`responsible`)、`until`、`age`、`uses`、`time.window` です。
+- `os.*` の項目(`os.session`、`os.console_user`、`os.login_session`、`os.not_remote`、`os.console_active`)は procline-macos が `Item` として提供し(`procline_macos::os_items() -> Vec<procline_acl::Item>`)、アプリが `register` で登録します。
+
 名前空間は項目のカテゴリで揃えます。
 
 - 接頭辞なし: 対象プロセス自身の属性(`process`、`binary`、`uid`、`gid`、`path`、`cwd`、`argv`、`name`、`tty`、`responsible` …)。subject は「そのプロセスへの条件」なので無印にする。
@@ -355,7 +360,7 @@ register(key, impl)
 値の形と妥当性は項目自身が持ちます。key をまたぐ依存は持たず、構造が要るものは 1 つの key の値に構造を持たせます(`process`、`binary`、`os.session`)。
 
 - builder(承認画面からルールを作る `SubjectBuilder` / `RuleBuilder`)は収集結果を持たず、利用者が選んだもの(`process`、`binary` の field の組み合わせ、`os.session` の段階)から、選ばれた field を `true` で置いた subject を組む。実値は `Policy::grant` が `Matcher::resolve` で埋める。`binary` は妥当性の規則を満たすように field を揃え、`os.session` の段階は rule の条件の引数として書く(世代は grant を作るときに pin する)。
-- 読み込み(`Policy::load_verified`、`Policy::load_grant`)は、項目の実装(`Matcher::validate`、`Condition::validate_args`)が検査して不正な値(未知の field を含む)をエラーにする。placeholder を書けない場所(grant、タグの定義、名前付きの subject、自動で永続の grant になる rule)に placeholder があれば、それも不正な値としてエラーにする(`LoadError::InvalidValue`)。参照先の無いタグ名・subject 名は `LoadError::UnknownTag` / `LoadError::UnknownSubject`。
+- 読み込み(`Policy::load_verified`、`Policy::load_grant`)は、項目の実装(`Matcher::validate`、`Condition::validate_args`)が検査して不正な値(未知の field を含む)をエラーにする。placeholder を書けない場所(grant、タグの定義、名前付きの subject)に placeholder があれば、それも不正な値としてエラーにする(`LoadError::InvalidValue`)。参照先の無いタグ名・subject 名は `LoadError::UnknownTag` / `LoadError::UnknownSubject`。
 - UI(アプリ側)は key ごとに 1 つの選択肢を出し、その中で値の段階や field の組み合わせを選ばせる。
 - アプリの項目を組み込みの項目と組で使いたいときは、同じ `match` に並べる(AND)。
 
@@ -388,31 +393,32 @@ register(key, impl)
 評価の対象は grant です(決定の記録: [DR-0008](decisions/DR-0008-evaluation-semantics.md))。評価は、条件単位の真偽を決める段階と、grant 単位の採否を決める段階を分けます。
 
 1. 各 grant の条件を判定する。
+   - 観測に失敗した condition(`EvalContext` のその key が `Err(ObserveError)`)を使う grant は、その評価では判定できない。id を `Decision.undecidable` に載せ、許可にも失効にもしない。
    - 寿命型の `check` が偽になった grant は、その評価でその場で失効を確定し、`Decision.expired` に id を載せる。失効は一度確定したら戻らない(時計の巻き戻しや観測の回復で復活しない)。
    - targets が対象に当たらない grant を除く。
    - 各 grant の subject を照合し、状態型の `check` を取る。subject の `match` と `tags` は対象自身と、`ancestors` は列を近い側から貪欲に部分列として照合する。
-   - 列が途切れている(`ProcessChain.truncated` が `Some`)とき、`ancestors` を持つ grant は判定できない。定義が `ancestors` を持つタグも、途切れた列ではその有無を判定できないので、そのタグを subject に持つ grant も同じく判定できない。それらの id を `Decision.undecidable` に載せ、効果の決定には使わない。
+   - 列が途切れている(`ProcessChain.truncated` が `Some`)とき: subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、途切れた列で subject が当たらなかった grant は判定できない。その id を `Decision.undecidable` に載せ、効果の決定には使わない。subject は当たったが状態型の `check` が偽の grant は、全列でも偽なので判定できなかったとは扱わない。
 2. effect を決める。順序は deny > allow > ask。
    - `deny` が 1 つでも当たれば拒否。
    - `allow` が当たれば許可。当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順。他の grant で通るのに、限りある `uses` を減らさないため。
    - `ask` が当たれば `Effect::Ask`(アプリの再認証)。`Decision.grant_id` は採用した ask の grant の id。
-   - 何も当たらなければ既定の effect。
+   - 何も当たらなければ既定の effect(`Policy::load_verified` の `default_effect`)。`Decision.grant_id` は None。
 3. 採用された grant にだけ、各 condition の `advance` をかける。1 つでも新しい pin 値を返せば、pin 値を差し替えた新しい grant を作る(grant は immutable)。
 4. アプリが、変わった grant を署名して永続化し、書けてから結果(allow)を使う。
 
 評価の結果(`Decision`)は effect だけでなく、採用された grant の id と、各条件がどの項目に一致したか(trace)を返します。画面の「なぜ通ったか、なぜ聞かれたか」に使います。`Decision.trace` は接続相手に返しません(どの条件で落ちたかが見えるため)。手順 3 で grant が変わったときは、その新版も返します(`updated_grant`)。
 
-評価の入口は 2 つです。`evaluate` は手順 3 まで行い、`updated_grant` を返すだけで、メモリ上の grant は差し替えません。`explain` は trace の表示用で、`advance` をかけず、`updated_grant` は常に空です。
+評価の入口は 2 つです。`evaluate` は手順 3 まで行い、`updated_grant` を返すだけで、メモリ上の grant は差し替えません。`explain` は trace の表示用で、`advance` をかけず、`updated_grant` は常に空です。`explain` も `expired` を載せますが、失効を確定しません(アプリは `explain` の `expired` を削除に使いません)。
 
 - アプリは `updated_grant` を署名して永続化し、書けてから `Policy::add_grant`(同じ id なら置換)でメモリ上の grant を差し替え、値を渡します。書けなかったときは allow を使いません。
-- アプリは `expired` の grant を `Policy::remove_grant` と保存先から消します。`uses` が 0 になった grant も、次の評価で失効が確定してここに載ります。
+- アプリは `evaluate` の `expired` の grant を `Policy::remove_grant` と保存先から消します。`uses` が 0 になった grant も、次の評価で失効が確定してここに載ります。
 - `undecidable` があるとき、判定できない deny があるのに allow を通してよいかはアプリが決めます。crate は事実を返します。
 
 ## scope: grant の寿命
 
 寿命型の条件(以下 scope)は、grant を作るときにその時点の世代(epoch)を pin し、評価のたびに今の世代と pin 値を比べて、違えばその grant は永久に失効します。「解錠している間」ではなく「この解錠の回の間」になるので、一度ロックして解錠し直しても grant が生き返りません。
 
-この形にすると、どの scope も「一度終われば戻らない」ことが自動的に保証され、アプリが足すのも condition の trait の実装 1 つで済みます(「条件の実装」)。grant を作るときに今の世代を観測できなければ grant を作れず(`PinError::Unobservable`)、評価のときに観測できなければ `check` が偽になって失効が確定します。どちらも安全側に倒れるためです。
+この形にすると、どの scope も「一度終われば戻らない」ことが自動的に保証され、アプリが足すのも condition の trait の実装 1 つで済みます(「条件の実装」)。grant を作るときに今の世代を観測できなければ grant を作れず(`PinError::Unobservable`)、評価のときに期間の外で観測値が無ければ(`observe` が `Ok(None)`)`check` が偽になって失効が確定します。どちらも安全側に倒れるためです。観測そのものに失敗したとき(`observe` が `Err`)は、期間の外とは区別し、その評価ではその grant を判定できないものとします(許可にも失効にもしない。「評価」)。
 
 scope は複数並べられ、すべてが生きている間だけ grant が効きます(AND)。「24時間、ただし再起動まで」のように組み合わせます。
 
@@ -426,6 +432,8 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 | `os.session` | 選んだ段階以下のどれかの期間の終わり。`boot` は再起動、`awake` はスリープ・ハイバネーション、`unlocked` は画面ロック(手動、離席の自動ロック、スクリーンセーバー) | `boot` は `kern.bootsessionuuid`、`awake` は直近の起床の時刻(`kern.waketime`)、`unlocked` は直近の解錠の時刻 |
 | `os.console_user` | ユーザーの切り替え | ユーザーの切り替えの事象固有の値 |
 
+`until`、`age`、`uses` は procline-acl の `Vocabulary::builtin()` に入り、`os.*` は procline-macos の `os_items()` が提供します(「項目の登録」)。
+
 世代は事象固有の値(起動の UUID、起床・解錠の時刻など)です。デーモンの再起動と無関係に一意なので、再起動を跨いで読み直した grant も正しく判定できます。
 
 `os.session` の段階の名前は期間の名前です。
@@ -437,7 +445,7 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 
 ### アプリが足す語彙
 
-アプリ固有の語彙は `app.` の名前空間に置きます。名前空間は組み込み(`os.`、`time.` など)と `app.` だけで、アプリが自由に作ることはしません。評価するアプリは常に1つなので複数の名前空間は要らず、自由にすると今後 crate に足す名前空間とぶつかり得るためです。cw なら次のようなものです。
+アプリ固有の語彙は `app.` の名前空間に置きます。名前空間は crate 群が使うもの(`os.`、`time.` など)と `app.` だけで、アプリが自由に作ることはしません。評価するアプリは常に1つなので複数の名前空間は要らず、自由にすると今後 crate に足す名前空間とぶつかり得るためです。cw なら次のようなものです。
 
 - `app.unlock`: vault を開いた回。手動ロックや vkey\_ttl 切れで終わる。
 - `app.passphrase`: P を発行した回。Sealed になると終わる。
@@ -454,8 +462,7 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 | --- | --- |
 | `os.not_remote` | 接続相手の asid がコンソールのセッションのもの。判定は asid だけで行う(祖先の有無は double-fork で変えられるので使わない) |
 | `os.console_active` | 画面がロックされていない |
-| `os.login_session` | 接続相手の asid が grant を作ったときと同じ(作成時の asid を pin 値に持つ。ログアウトの検知は約束しない) |
-| `os.tty` | 接続相手が指定の tty を持つ |
+| `os.login_session` | 接続相手のログインセッションが grant を作ったときと同じ(作成時の boot UUID と asid の組 `{boot_uuid, asid}` を pin 値に持つ。asid は起動ごとに再利用されるので boot UUID と組にする。ログアウトの検知は約束しない) |
 | `time.window` | 指定の曜日・時間帯 |
 
 「自宅の Wi-Fi にいる間」のような場所の条件は、アプリが必要に応じて足します。
@@ -468,14 +475,14 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 /// この condition の観測値。EvalContext::capture が評価の最初に 1 回だけ観測し、評価の途中で変わらない
 pub struct Observed<'a> {
     pub now: SystemTime,
-    pub value: Option<&'a Value>,   // observe() の結果。無ければ None
+    pub value: Result<Option<&'a Value>, &'a ObserveError>,   // observe() の結果そのまま。Err なら Policy は check を呼ばず判定不能にし、pin は PinError::Unobservable を返す
 }
 
 trait Condition {
     fn kind(&self) -> ConditionKind;                                   // Lifetime / State
-    /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition は None
-    fn observe(&self) -> Option<Value>;
-    /// grant を作るときに 1 回。pin 値を返す。接続相手の asid のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、接続相手に依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
+    /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition と期間の外は Ok(None)(寿命型なら check が偽になり失効が確定する)。観測に失敗したとき(sysctl や IOKit の呼び出しの失敗)は Err で、その condition を使う grant はその評価で判定できない
+    fn observe(&self) -> Result<Option<Value>, ObserveError>;
+    /// grant を作るときに 1 回。pin 値を返す。os.login_session の {boot_uuid, asid} のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、接続相手に依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
     fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;
     /// 判定。副作用なし
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
@@ -486,6 +493,7 @@ trait Condition {
 }
 
 enum PinError { Unobservable, InvalidArgs { reason: String } }
+struct ObserveError { reason: String }
 ```
 
 | 項目 | observe | pin | check | advance |
@@ -495,12 +503,12 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 | `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
 | `uses` | None | args の N | pinned > 0 | pinned − 1 |
 | 状態型(`os.console_active` 等) | 今の状態(観測するものがあれば) | None | observed / args / chain を見る | None |
-| 状態型 `os.login_session` | None | chain の接続相手の asid | chain の接続相手の asid == pinned | None |
+| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain.boot_uuid` と接続相手の asid) | chain の `{boot_uuid, asid}` == pinned | None |
 
 - `ConditionKind` は Lifetime / State の 2 値です。世代、`until`、`age`、`uses` は Lifetime で、`uses` も一度 0 になれば戻りません。
-- `EvalContext` は `now` と「key → `observe()` の結果」を持ちます。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡します(condition は自分の key を知らない)。
+- `EvalContext` は `now` と「key → `observe()` の結果(`Result<Option<Value>, ObserveError>`)」を持ちます。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡します(condition は自分の key を知らない)。結果が `Err` の key の condition を使う grant は、その評価で判定できないものとして `Decision.undecidable` に載ります(「評価」)。
 - 状態型の `check` には `args` が届くので、`time.window` の時間帯のような引数を判定に使えます。
-- 状態型も pin 値を持てます。接続相手に依存する値(`os.login_session` の asid)を grant の作成時に固定するためです。寿命型の「偽になれば失効が確定する」は、観測値(世界の状態)と pin 値を比べる condition にだけ当てはまります。接続相手に依存する値が一致しないのは別の相手が来ただけで、世界の状態が変わったのではないので、状態型にします。
+- 状態型も pin 値を持てます。接続相手に依存する値(`os.login_session` の `{boot_uuid, asid}`)を grant の作成時に固定するためです。寿命型の「偽になれば失効が確定する」は、観測値(世界の状態)と pin 値を比べる condition にだけ当てはまります。接続相手に依存する値が一致しないのは別の相手が来ただけで、世界の状態が変わったのではないので、状態型にします。
 
 ### ルールの作成と強さの制約
 
@@ -523,7 +531,8 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 制約の表(クラスごとに `allow` で許す scope の条件、`AllowConstraints`)はアプリが `RuleBuilder` / `Policy` に与えます。crate は既定値を持たず、検査の仕組みだけを持ちます。`Policy` が `AllowConstraints` を持ち(`Policy::load_verified` の引数で与える)、`RuleBuilder::build`、`Policy::load_verified`、`Policy::grant`、`Policy::load_grant` が同じ検査をして、満たさなければエラーにします(`BuildError::ScopeTooWeak`、`LoadError::ScopeTooWeak`、`GrantError::ScopeTooWeak`)。制約はクラスで判定し、深さは使いません。どの scope が制約を満たすかも、アプリの制約表が決めます。
 
 - 制約表の形は、`strong` / `medium` / `weak` の 3 つ(どれも必須)に、それぞれ `Unrestricted`(制限なし)か `AnyOf([...])`(列挙したどれか 1 つを満たせばよい)を置きます。`AnyOf` の要素は `Condition(key)`(その key の condition を含む)か `UntilWithin(期間)`(その期間以内に失効する)です。
-- 判定の時機: `age` の長さと寿命型の condition の有無は rule の build 時(と読み込み時)に、`until` の絶対時刻は grant を作るとき(その時点の now)に判定します。`path` のクラスがプロセスで決まるのも grant を作るときです(build 時は中として判定する)。
+- 時間の制約は `ScopeOption::UntilWithin` で表します。`Condition("age")` / `Condition("until")` も書けますが、grant 側では `age` は `until` に変換されているので、`Condition("age")` は grant では満たされません。
+- 判定の時機: `age` の長さと寿命型の condition の有無は rule の build 時(と読み込み時)に、`until` の絶対時刻は grant を作るとき(その時点の now)に判定します。`Policy::load_grant` の `UntilWithin` の基準時刻は grant の `created_at` です。`path` のクラスがプロセスで決まるのも grant を作るときです(build 時は中として判定する)。
 
 | ルールの強さ(クラス) | `allow` で許される scope(アプリが与える制約の例) |
 | --- | --- |
@@ -535,7 +544,7 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 ### 保存
 
-保存形は「一覧 1 本」と「grant 1 件ずつ」の 2 系統です。どちらも JSON で、保存と署名はアプリの責務です。
+保存形は「一覧 1 本」と「grant 1 件ずつ」の 2 系統です。どちらも JSON で、保存と署名はアプリの責務です。署名の検証はアプリが実装する `PolicyVerifier::verify(&self, kind: SignedKind, bytes, sig)` で行い、`enum SignedKind { List, Grant }` で一覧と grant の署名の用途を分けます。
 
 **一覧**(subject、tag、rule): crate は「一覧のバイト列と署名を受け取り、検証してから読む」ための入口(`Policy::load_verified`)を用意します。cw は一覧に D 側の鍵で署名し、同じ uid のプロセスが勝手に許可ルールを書き足せないようにします(PasskeyRegistry と同じ扱い)。
 
@@ -550,6 +559,8 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 - 1 件ずつなので、`uses` の更新の書き込みは軽く済みます(実測は実装時のベンチで確かめる)。
 - `uses` は二重に消費されません。値を渡すのは減らした grant の永続化に成功した後なので、永続化に失敗したときは値も渡していません。
+- アプリは `evaluate` → 永続化 → `add_grant` を直列化します。同時に走らせると、どちらの評価も同じ残り回数の grant を見るので、上限を超えて消費できます。
+- 一覧を読み直した後は、grant も `Policy::load_grant` で検査し直します。タグの定義が変わると、そのタグを subject に持つ grant の強さが下がり得るためです。
 - 世代は事象固有の値なので、起動時に読み直した grant も、再起動を跨いで正しく判定できます(「scope: grant の寿命」)。
 - 永続化先のディレクトリは、評価するデーモン以外(同じ uid の他プロセス)から書けない場所に置きます。書けると、使い切る前の grant ファイルを差し戻して `uses` を戻せるためです。置き場はアプリが決めます。
 
@@ -564,12 +575,16 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     icon: true,
     digest: false,                                   // 実行ファイルの digest(既定は取らない)
     max_ancestors: 32,
+    redaction: Redaction::default(),                 // env の伏せ字(対象の判定と伏せ方の 2 関数)の差し替え
 })?;
 // chain.processes()[0] が対象、以降が祖先
 // chain.truncated: Option<Truncated>。列が途切れた理由 enum Truncated { MaxAncestors, AncestorExited, Unavailable }
-// p.signature_trust(): Platform / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
+// chain.boot_uuid: String。収集側が kern.bootsessionuuid を取る
+// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
 // ProcessInfo は digest: Option<String> と path_meta: Option<PathMeta> を持つ。PathMeta { owner_uid: u32, writable_by_user: bool }(path のクラスの判定に使う)
-// ProcessIdentity(process の pin 値)は boot_uuid: String を持つ。Identity::process_identity(&self, boot_uuid) で作る
+// ProcessInfo.responsible: Option<ProcessIdentity>。責任プロセスは pid でなく個体の識別で持つ
+// Signature.bundle_id: Option<String>(kSecCodeInfoPList 由来。照合に使い、BinaryPin.bundle_id の照合元)。ProcessInfo.bundle(実行パスから .app を遡って読む)は表示用
+// ProcessIdentity(process の pin 値)は boot_uuid: String を持つ。Identity::process_identity(&self, boot_uuid) で作り、boot_uuid は ProcessChain.boot_uuid を渡す
 
 // 強さ(procline-core の共有型)。どの項目がどのクラスかは Vocabulary が持ち、ProcessInfo の項目は持たない。深さは UI の概念で、型は持たない
 enum Strength { Strong, Medium, Weak }               // クラス(項目が値から決める)
@@ -583,7 +598,10 @@ struct BinaryPin { digest: Option<Pinnable<String>>, team_id: Option<Pinnable<St
 enum SessionLevel { Boot, Awake, Unlocked }          // os.session の段階(args の値。JSON では "boot" / "awake" / "unlocked")
 
 // 語彙(procline-acl)
-let mut vocab = Vocabulary::builtin();               // matcher の項目(process / binary / uid / cwd など)、os.* の scope と条件(os.session など)、until / age / uses
+let mut vocab = Vocabulary::builtin();               // OS 非依存の項目だけ: matcher の項目(process / binary / uid / gid / path / cwd / argv / name / tty / responsible)、until / age / uses、time.window
+for item in procline_macos::os_items() {             // os.* の項目(os.session / os.console_user / os.login_session / os.not_remote / os.console_active)は procline-macos が提供する
+    vocab.register(item)?;
+}
 // matcher の項目、寿命型、状態型を同じ register で足す。key の重複と名前空間の違反はエラー
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // クラスが値によらず一定の項目は、クラスを明示してクロージャで登録する
 // クラスが値で変わる項目は Matcher trait を実装し、Item::matcher(key, impl) で登録する
@@ -595,12 +613,18 @@ vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;          
 
 trait Condition {
     fn kind(&self) -> ConditionKind;                 // Lifetime / State
-    fn observe(&self) -> Option<Value>;              // 評価の最初に EvalContext::capture が 1 回呼ぶ
-    fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;  // chain は接続相手の asid を pin するため
+    fn observe(&self) -> Result<Option<Value>, ObserveError>;  // 評価の最初に EvalContext::capture が 1 回呼ぶ。Ok(None) は観測するものが無い / 期間の外、Err は観測の失敗
+    fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;  // chain は os.login_session の {boot_uuid, asid} を pin するため
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
     fn advance(&self, pinned: Option<&Value>) -> Option<Value>;
     fn validate_args(&self, args: Option<&Value>) -> Result<(), String>;  // 引数の妥当性。読み込みと builder が呼ぶ
 }
+struct ObserveError { reason: String }
+// EvalContext は key ごとに Result<Option<Value>, ObserveError> を持つ。Err の condition を使う grant はその評価で判定できない(Decision.undecidable)
+
+// 署名の検証(アプリが実装する)。kind で一覧と grant の署名の用途を分ける
+trait PolicyVerifier { fn verify(&self, kind: SignedKind, bytes: &[u8], sig: &[u8]) -> bool; }
+enum SignedKind { List, Grant }
 
 // 一覧(subject、tag、rule)の読み込みと、保存した grant の読み直し
 // constraints: AllowConstraints はアプリが与える制約の表(クラスごとに allow で許す scope の条件)。crate は既定値を持たない。下は例示で、既定値ではない
@@ -609,15 +633,16 @@ let constraints = AllowConstraints {
     medium: ScopeRequirement::AnyOf(vec![ScopeOption::UntilWithin(Duration::from_secs(7 * 24 * 3600)), ScopeOption::Condition("os.session".into())]),
     weak: ScopeRequirement::AnyOf(vec![ScopeOption::Condition("os.session".into()), ScopeOption::Condition("app.unlock".into())]),
 };  // AnyOf は列挙のどれか 1 つ(OR)
-let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab, constraints)?;  // 未登録の項目、タグの循環、値の妥当性、placeholder の場所、制約の違反はエラー
+let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab, constraints, default_effect)?;  // default_effect: Effect はどの grant にも当たらないとき(Decision.grant_id が None)の effect。未登録の項目、タグの循環、値の妥当性、placeholder の場所、制約の違反はエラー
 // LoadError: InvalidValue(値の妥当性の違反、placeholder を書けない場所の true)、UnknownTag { name }、UnknownSubject { name }、ScopeTooWeak(制約の違反)…
-let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // grant 1 件を検証し、語彙と制約と照合する
+let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // grant 1 件を検証し、語彙と制約と照合する(UntilWithin の基準時刻は grant の created_at)。一覧を読み直した後も grant をこれで検査し直す
 policy.add_grant(saved);                             // メモリ上の Policy に入れる(同じ id があれば置換)
 // policy.remove_grant(id) / policy.grants() -> impl Iterator<Item = &Grant>: 掃除に使う
 
 // 評価
 let tagged = policy.tag(&chain);                     // 各プロセスに付いたタグ(画面の表示にも使う)。TaggedChain は語彙と chain だけを借り、policy を借りない
-let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // 採用された grant に advance をかけ、新版を返す(メモリは変えない)
+// tagged.undecidable_tags: BTreeSet<String>。途切れた列で有無を判定できなかったタグ(承認画面は「付いていない」と区別して見せる)
+let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // 採用された grant に advance をかけ、新版を返す(メモリは変えない)。アプリは evaluate → 永続化 → add_grant を直列化する(同時に走らせると上限を超えて uses を消費できる)
 if let Some(grant) = &decision.updated_grant {
     // 署名して永続化し、書けてから policy.add_grant(grant.clone()) で差し替え、値を渡す
 }
@@ -626,15 +651,15 @@ for id in &decision.expired {
 }
 // decision.undecidable が空でないとき、判定できない grant を残して allow を通すかはアプリが決める
 // decision.trace は接続相手に返さない(どの条件で落ちたかが見える)
-let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // advance なし(trace の表示用)
+let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // advance なし(trace の表示用)。expired は載せるが失効を確定しない(アプリは explain の expired を削除に使わない)
 
 pub struct Decision {
     pub effect: Effect,
-    pub grant_id: Option<String>,        // 採用された grant(ask なら採用した ask の grant)。既定の effect なら None
+    pub grant_id: Option<String>,        // 採用された grant(ask なら採用した ask の grant)。None なら effect は load_verified の default_effect
     pub trace: Trace,
     pub updated_grant: Option<Grant>,    // advance で変わった grant の新版。explain では常に None
-    pub expired: Vec<String>,            // この評価で失効が確定した grant の id。アプリが削除する
-    pub undecidable: Vec<String>,        // 列が途切れていて判定できない grant の id。効果の決定には使っていない
+    pub expired: Vec<String>,            // この評価で失効が確定した grant の id。evaluate のものをアプリが削除する(explain のものは削除に使わない)
+    pub undecidable: Vec<String>,        // 判定できない grant の id(祖先への条件を持ち途切れた列で当たらなかったもの、観測に失敗した condition を使うもの)。効果の決定には使っていない
 }
 
 // subject の形(procline-acl)
@@ -644,6 +669,7 @@ struct AncestorMatch { r#match: BTreeMap<String, MatchValue>, tags: Vec<String> 
 // JSON では Exact は文字列か数値、Glob は {"glob": …}、Regex は {"regex": …}、Range は {"min": …, "max": …}。argv の Regex は要素ごとに当てる
 // SubjectRef { Inline(Box<Subject>), Named(String) }: rule の subject の位置。placeholder を書けるのは rule の Inline だけ
 // Grant { id, rule_id: String, effect, subject: Subject, targets, conditions, … }: grant の subject は inline(名前付きの subject は grant を作るときに展開。タグ名は名前のまま)
+// targets(rule と grant): 要素は対象(Target の文字列)に対する glob。空の targets は全対象に当たる
 
 // 承認画面から rule を作る(収集結果は受け取らず、true 入りの subject を組む)
 let subject = SubjectBuilder::new()

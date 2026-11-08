@@ -23,8 +23,8 @@ ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入�
 - 保存した rule がそのまま再適用の対象になる。承認画面に rule の一覧を出し、選んで passkey を 1 回通せば grant ができる。
 - `RuleBuilder::build()` は静的な rule を返すだけで、世代は記録しない。
 - 承認画面でその場で条件を選んで許可する流れは「rule を組み立て、すぐ grant にする」の 2 段。rule を一覧に保存するかは利用者が選び、保存しなければ使い捨ての rule になる。
-- 寿命型・消費型の condition を持たない rule から作った grant は pin 値が無く、失効しない(永続の grant)。deny は普通こちら。
-- 静的な rule を評価に直接使うことはしない。評価が見るのは grant だけ。一覧の rule のうち寿命型・消費型の condition を持たないものは、読み込み時に自動で永続の grant になる(手書きの deny を「許可する」操作なしに効かせるため)。寿命型・消費型を含む rule は承認を経てだけ grant になる。
+- 寿命型・消費型の condition を持たない rule から作った grant は失効しない(永続の grant)。deny は普通こちら。
+- 静的な rule を評価に直接使うことはしない。評価が見るのは grant だけ。一覧の rule のうち、寿命型・消費型の condition を持たず、placeholder を含まず、pin に chain や観測値を要する condition(`os.login_session` 等)も含まないものは、読み込み時に自動で永続の grant になる(手書きの deny を「許可する」操作なしに効かせるため)。それ以外の rule は承認を経てだけ grant になる([DR-0008](DR-0008-evaluation-semantics.md))。
 - grant は自己完結。effect、targets、pin 済みの conditions、placeholder を解決した subject を自分で持ち、元の rule の id を `rule_id` として持つ(表示と掃除に使う)。rule が後で変わっても既存の grant は変わらない。
 - grant の subject は inline の `Subject`。rule の subject が名前で参照していれば、grant を作るときに展開する。subject の中のタグ名の参照だけは名前のまま残す。タグの定義は署名付きの一覧にあり、その更新は意図した変更なので、既存の grant にも及んでよい([DR-0008](DR-0008-evaluation-semantics.md))。
 - grant の `id` は `Policy::grant` が一意に付ける(形式は実装時に決める。下の JSON の `g-…` は例示)。
@@ -61,14 +61,14 @@ grant の形:
 /// この condition の観測値。EvalContext::capture が評価の最初に 1 回だけ観測し、評価の途中で変わらない
 pub struct Observed<'a> {
     pub now: SystemTime,
-    pub value: Option<&'a Value>,   // observe() の結果。無ければ None
+    pub value: Option<&'a Value>,   // observe() の Ok の中身。Ok(None) なら None
 }
 
 trait Condition {
     fn kind(&self) -> ConditionKind;                                   // Lifetime / State
-    /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition は None
-    fn observe(&self) -> Option<Value>;
-    /// grant を作るときに 1 回。pin 値を返す。接続相手の asid のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、接続相手に依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
+    /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition と期間の外は Ok(None)。観測に失敗したときは Err で、その condition を使う grant はその評価で判定できない(DR-0008)
+    fn observe(&self) -> Result<Option<Value>, ObserveError>;
+    /// grant を作るときに 1 回。pin 値を返す。os.login_session の {boot_uuid, asid} のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、接続相手に依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
     fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;
     /// 判定。副作用なし
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
@@ -79,6 +79,7 @@ trait Condition {
 }
 
 enum PinError { Unobservable, InvalidArgs { reason: String } }
+struct ObserveError { reason: String }
 ```
 
 | 項目 | observe | pin | check | advance |
@@ -88,20 +89,20 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 | `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
 | `uses` | None | args の N | pinned > 0 | pinned − 1 |
 | 状態型(`os.console_active` 等) | 今の状態(観測するものがあれば) | None | observed / args / chain を見る | None |
-| 状態型 `os.login_session` | None | chain の接続相手の asid | chain の接続相手の asid == pinned | None |
+| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain.boot_uuid` と接続相手の asid) | chain の `{boot_uuid, asid}` == pinned | None |
 
 - 世代を返す専用の trait は持たない。世代の観測は `observe` が受け持ち、pin 値は JSON の値 (`serde_json::Value`) で表す。語彙への登録は `Item::condition` に統一する。
 - `ConditionKind` は Lifetime / State の 2 値。世代、`until`、`age`、`uses` は Lifetime で、`uses` も一度 0 になれば戻らない。
-- `EvalContext` は `now` と「key → `observe()` の結果」を持つ。`EvalContext::capture` が評価の最初に全 condition の `observe` を 1 回ずつ呼び、評価の途中で値は変わらない。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡す(condition は自分の key を知らない)。
+- `EvalContext` は `now` と「key → `observe()` の結果(`Result<Option<Value>, ObserveError>`)」を持つ。`EvalContext::capture` が評価の最初に全 condition の `observe` を 1 回ずつ呼び、評価の途中で値は変わらない。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡す(condition は自分の key を知らない)。
 - 状態型の `check` には `args` が届くので、`time.window` の時間帯のような引数を判定に使える。
-- 状態型も pin 値を持てる(接続相手に依存する値を作成時に固定する。`os.login_session` の asid)。寿命型の「偽 → 失効の確定」は観測値(世界の状態)と pin 値を比べる condition にだけ当てはまり、接続相手に依存する値の不一致は別の相手が来ただけなので、`os.login_session` は状態型。
+- 状態型も pin 値を持てる(接続相手に依存する値を作成時に固定する。`os.login_session` の `{boot_uuid, asid}`)。寿命型の「偽 → 失効の確定」は観測値(世界の状態)と pin 値を比べる condition にだけ当てはまり、接続相手に依存する値の不一致は別の相手が来ただけなので、`os.login_session` は状態型。
 
 ### 評価と grant の更新
 
-評価の順序、`ask`、失効の確定、途切れた列の扱いは [DR-0008](DR-0008-evaluation-semantics.md) が定める。要点:
+評価の順序、`ask`、既定の effect、失効の確定、途切れた列と観測の失敗の扱いは [DR-0008](DR-0008-evaluation-semantics.md) が定める。要点:
 
-1. 各 grant の条件を判定する。寿命型の `check` が偽になった grant はその場で失効を確定し(`Decision.expired`)、targets が対象に当たらない grant を除き、subject を照合して状態型の `check` を取る。列が途切れていれば `ancestors` を持つ grant と、`ancestors` で定義したタグを subject に持つ grant は判定できない(`Decision.undecidable`)。
-2. deny > allow > ask の順で effect を決める。`allow` が当たれば、当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順(他の grant で通るのに、限りある `uses` を減らさないため)。`ask` が当たれば `Effect::Ask`(`grant_id` は採用した ask の grant)、何も当たらなければ既定の effect。
+1. 各 grant の条件を判定する。観測に失敗した condition を使う grant は判定できない(`Decision.undecidable`)。寿命型の `check` が偽になった grant はその場で失効を確定し(`Decision.expired`)、targets が対象に当たらない grant を除き、subject を照合して状態型の `check` を取る。列が途切れていれば、祖先への条件(`ancestors`、または `ancestors` で定義したタグ)を持ち、途切れた列で当たらなかった grant は判定できない(`Decision.undecidable`)。途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。
+2. deny > allow > ask の順で effect を決める。`allow` が当たれば、当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順(他の grant で通るのに、限りある `uses` を減らさないため)。`ask` が当たれば `Effect::Ask`(`grant_id` は採用した ask の grant)、何も当たらなければ既定の effect(アプリが `Policy::load_verified` の `default_effect` で与える)。
 3. 採用された grant にだけ、各 condition の `advance` をかける。1 つでも `Some` なら pin 値を差し替えた新しい grant を作る(grant は immutable)。
 4. アプリが変わった grant を署名して永続化し、書けてから結果を使う。
 
@@ -112,17 +113,17 @@ pub struct Decision {
     pub trace: Trace,
     pub updated_grant: Option<Grant>,    // advance で変わった grant の新版。アプリはこれを署名して書いてから add_grant で差し替え、値を渡す
     pub expired: Vec<String>,            // この評価で失効が確定した grant の id(DR-0008)
-    pub undecidable: Vec<String>,        // 列が途切れていて判定できない grant の id(DR-0008)
+    pub undecidable: Vec<String>,        // 判定できない grant の id(途切れた列、観測の失敗。DR-0008)
 }
 impl Policy {
-    pub fn evaluate(&self, tagged: &TaggedChain, target: &Target, ctx: &EvalContext) -> Decision;     // advance あり。新版を返すだけで、メモリ上の grant は変えない
-    pub fn explain(&self, tagged: &TaggedChain, target: &Target, ctx: &EvalContext) -> Decision;      // advance なし (trace 表示用)。updated_grant は常に None
+    pub fn evaluate(&self, tagged: &TaggedChain, target: &Target, ctx: &EvalContext) -> Decision;     // advance あり。新版を返すだけで、メモリ上の grant は変えない。アプリは evaluate → 永続化 → add_grant を直列化する
+    pub fn explain(&self, tagged: &TaggedChain, target: &Target, ctx: &EvalContext) -> Decision;      // advance なし (trace 表示用)。updated_grant は常に None。expired は載せるが失効を確定しない
 }
 ```
 
 - 消費は `evaluate` の中の `advance` で行う。消費を記録する別の入口は持たない。
 - アプリは `updated_grant` を署名して永続化し、書けてから `Policy::add_grant`(同じ id なら置換)で差し替えて値を渡す。書けなかったときは allow を使わない。
-- `uses` が 0 になった grant は、次の評価で手順 1 により失効が確定し、`Decision.expired` に載る。削除はアプリが行う。
+- `uses` が 0 になった grant は、次の評価で手順 1 により失効が確定し、`Decision.expired` に載る。削除はアプリが `evaluate` の `expired` で行う(`explain` の `expired` は使わない)。
 
 ### grant の保存
 

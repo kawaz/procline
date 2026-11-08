@@ -18,7 +18,7 @@
 | `true` | placeholder。grant を作るときに、その subject が当たったプロセスの実値を pin する | `{"binary": {"team_id": true, "signing_id": true}}` = 承認したそのアプリに固定 |
 
 - 構造を持つ値では field 単位で混ぜられる(`{"binary": {"signing_id": "com.googlecode.iterm2", "team_id": true}}` = signing identifier で見つけ、その Team ID を pin)。`process` は `true`(個体を pin)か具体値の複合。単純項目(`cwd`、`uid`、`path` …)も `true` で実値を完全一致で pin する。
-- placeholder を書けるのは rule の inline の subject だけ。タグの定義、名前付きの subject、自動で永続の grant になる rule に `true` があれば、loader はエラーにする(`LoadError::InvalidValue`、[DR-0008](DR-0008-evaluation-semantics.md))。
+- placeholder を書けるのは rule の inline の subject だけ。タグの定義と名前付きの subject に `true` があれば、loader はエラーにする(`LoadError::InvalidValue`)。placeholder を含む rule は読み込み時に自動で永続の grant にはならず、承認を経てだけ grant になる([DR-0008](DR-0008-evaluation-semantics.md))。
 - grant の subject は inline の `Subject` で、placeholder を全部具体値に解決済み(名前付きの subject は展開する)。grant に `true` が残っていれば、loader はエラーにする(`LoadError::InvalidValue`)。
 - 解決は `Policy::grant(&self, rule: &Rule, tagged: &TaggedChain, ctx: &EvalContext) -> Result<Grant, GrantError>` が行う(grant を返すだけで、メモリ上の Policy には入れない。[DR-0008](DR-0008-evaluation-semantics.md))。各 placeholder は項目の `Matcher::resolve` が実値に置き換える。`match` の placeholder は対象プロセス(列の先頭)の値、`ancestors` の要素の placeholder はその要素が当たった祖先の値で埋める。値が無ければ(署名が無いのに `team_id: true` 等)`GrantError::ValueUnavailable { key, field: Option<String> }`(項目の `ResolveError::ValueUnavailable { field }` に key を付けたもの)。
 - 承認画面が passkey の前に「何が pin されるか」を見せられるよう、`Policy::resolve_subject(&self, subject: &SubjectRef, tagged: &TaggedChain) -> Result<Subject, GrantError>` を公開する。名前参照は一覧の subject に解決してから埋める (無ければ `GrantError::UnknownSubject`)。`grant` も内部でこれを使う。

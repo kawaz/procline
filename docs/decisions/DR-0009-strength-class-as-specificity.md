@@ -1,4 +1,4 @@
-# DR-0009: 強さのクラスは、条件が承認した個体・コードをどれだけ特定するかで決める。世代は事象固有の値にする
+# DR-0009: 強さのクラスは、条件が承認した個体・コードをどれだけ特定するかで決める。世代は事象固有の値にし、識別子は boot UUID と組にする
 
 - Status: Active
 - Date: 2026-11-09
@@ -9,7 +9,7 @@
 
 制約の表そのもの(どのクラスにどの scope を許すか)は、許可の方針でありアプリが決めるものである。crate が既定値を持つと、方針を crate が決めることになる。
 
-世代の値にも同じ種類の問題がある。`os.session` の `awake` / `unlocked` と `os.console_user` を、デーモンが通知を数える回数で表すと、デーモンが動いていない間の事象を数えられず、再起動を跨いだ grant を判定できない。`process` の pin 値も、両側に揃う最も強い識別子 1 つだけで比べると、再起動を跨いで同じ値が再び現れる識別子(pid、unique\_id)で取り違えうる。
+世代の値にも同じ種類の問題がある。`os.session` の `awake` / `unlocked` と `os.console_user` を、デーモンが通知を数える回数で表すと、デーモンが動いていない間の事象を数えられず、再起動を跨いだ grant を判定できない。`process` の pin 値も、両側に揃う最も強い識別子 1 つだけで比べると、再起動を跨いで同じ値が再び現れる識別子(pid、unique\_id)で取り違えうる。`os.login_session` の pin 値の asid も起動ごとに再利用され、責任プロセスを pid で持つと pid の再利用で取り違える。
 
 ## Decision
 
@@ -46,10 +46,13 @@
 - `os.console_user` も同じく、ユーザーの切り替えの事象固有の値にする。
 - どれもデーモンの再起動と無関係に一意なので、再起動を跨いで読み直した grant も正しく判定できる。
 
-### `process` の照合
+### 識別子と boot UUID
 
-- `process` の pin 値に boot UUID を含める(`ProcessIdentity.boot_uuid: String`、`Identity::process_identity(&self, boot_uuid)`)。
-- 照合は、両側に揃っている識別子を全部比べて、全部一致したときだけ当たる(最も強い 1 つで比べるのではない)。
+- `ProcessChain` が `boot_uuid: String` を持つ(収集側が `kern.bootsessionuuid` を取る)。
+- `process` の pin 値に boot UUID を含める(`ProcessIdentity.boot_uuid: String`)。`Identity::process_identity(&self, boot_uuid)` には `ProcessChain.boot_uuid` を渡す。
+- `process` の照合は、両側に揃っている識別子を全部比べて、全部一致したときだけ当たる(最も強い 1 つで比べるのではない)。
+- `os.login_session` の pin 値は `{boot_uuid, asid}`。asid は起動ごとに再利用されるため。
+- 責任プロセスは pid でなく `ProcessIdentity` で持つ(`ProcessInfo.responsible: Option<ProcessIdentity>`)。
 
 ## Alternatives Considered
 
@@ -65,6 +68,7 @@
 - `path` のクラスの判定のために、収集は path の所有者と利用者の書き込み可否を取る(`ProcessInfo.path_meta`)。`path` を自身の条件に持つ rule は、build 時と読み込み時には中として制約を検査し、grant を作るときに実際のプロセスで強 / 中を決めて検査し直す。
 - 世代を事象の値にしたので、デーモンの再起動を理由に grant が失効することはなくなる。
 - `process` の pin 値は boot UUID を持つので、再起動の後に同じ pid・unique\_id のプロセスが現れても当たらない。
+- `os.login_session` の grant は、再起動の後に同じ asid のセッションが現れても当たらない。
 
 ## 関連
 
