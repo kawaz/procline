@@ -3,7 +3,12 @@ use std::fmt;
 
 use procline_core::{ProcessChain, ProcessInfo, Strength};
 
+use crate::conditions::{Age, TimeWindow, Until, Uses};
 use crate::context::Observed;
+use crate::matchers::{
+    ArgvMatcher, BinaryMatcher, CwdMatcher, GidMatcher, NameMatcher, PathMatcher, ProcessMatcher,
+    ResponsibleMatcher, TtyMatcher, UidMatcher,
+};
 use crate::subject::MatchValue;
 
 /// Every item usable in a rule: `match` keys, lifetime scopes and state conditions.
@@ -15,12 +20,40 @@ pub struct Vocabulary {
 impl Vocabulary {
     /// The built-in items, all independent of the OS: the matcher items (`process` (identifies the individual process), `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible`), `time.window`, and `until` / `age` / `uses`. The `os.*` items come from the collector crate of the OS (`procline_macos::os_items`); the application adds them with `register`.
     pub fn builtin() -> Self {
-        todo!()
+        let mut vocab = Self::default();
+        for item in [
+            Item::matcher("process", ProcessMatcher),
+            Item::matcher("binary", BinaryMatcher),
+            Item::matcher("uid", UidMatcher),
+            Item::matcher("gid", GidMatcher),
+            Item::matcher("path", PathMatcher),
+            Item::matcher("cwd", CwdMatcher),
+            Item::matcher("argv", ArgvMatcher),
+            Item::matcher("name", NameMatcher),
+            Item::matcher("tty", TtyMatcher),
+            Item::matcher("responsible", ResponsibleMatcher),
+            Item::condition("until", Until),
+            Item::condition("age", Age),
+            Item::condition("uses", Uses),
+            Item::condition("time.window", TimeWindow),
+        ] {
+            vocab.items.insert(item.key.clone(), item);
+        }
+        vocab
     }
 
     /// Adds an item. Fails on a duplicate key or a key outside the allowed namespace.
-    pub fn register(&mut self, _item: Item) -> Result<(), RegisterError> {
-        todo!()
+    ///
+    /// A registered key starts with `os.` (the host state and epochs, provided by the collector crate of the OS) or `app.` (the application's own items), followed by a non-empty name. Keys without a prefix (the attributes of the process itself, and `until` / `age` / `uses`) and `time.` belong to the built-in vocabulary.
+    pub fn register(&mut self, item: Item) -> Result<(), RegisterError> {
+        if !is_registrable_key(&item.key) {
+            return Err(RegisterError::Namespace { key: item.key });
+        }
+        if self.items.contains_key(&item.key) {
+            return Err(RegisterError::Duplicate { key: item.key });
+        }
+        self.items.insert(item.key.clone(), item);
+        Ok(())
     }
 
     /// Looks up a registered item.
@@ -31,12 +64,23 @@ impl Vocabulary {
     /// The class the matcher item decides from the value, and from the process when one is given (see `Matcher::class`); `None` for an unregistered key or a condition item.
     pub fn class(
         &self,
-        _key: &str,
-        _value: &MatchValue,
-        _process: Option<&ProcessInfo>,
+        key: &str,
+        value: &MatchValue,
+        process: Option<&ProcessInfo>,
     ) -> Option<Strength> {
-        todo!()
+        match self.items.get(key)?.kind() {
+            ItemKind::Matcher(matcher) => Some(matcher.class(value, process)),
+            ItemKind::Condition(_) => None,
+        }
     }
+}
+
+/// The namespaces `register` accepts: `os.` and `app.`, each followed by a non-empty name.
+fn is_registrable_key(key: &str) -> bool {
+    ["os.", "app."].iter().any(|prefix| {
+        key.strip_prefix(prefix)
+            .is_some_and(|name| !name.is_empty())
+    })
 }
 
 /// One registrable item: key and its implementation. The item itself owns the shape and validity of its values.
@@ -57,7 +101,7 @@ impl Item {
     /// A matcher item with a constant class and a closure. An item whose class varies with the value implements `Matcher` and registers with `Item::matcher`.
     pub fn matcher_fn<F>(key: impl Into<String>, class: Strength, matches: F) -> Self
     where
-        F: Fn(&ProcessInfo, &MatchValue) -> bool + Send + Sync + 'static,
+        F: Fn(MatchTarget<'_>, &MatchValue) -> bool + Send + Sync + 'static,
     {
         Self::matcher(key, ConstClassMatcher { class, matches })
     }
@@ -93,9 +137,19 @@ pub enum ItemKind {
     Condition(Box<dyn Condition>),
 }
 
+/// The process a matcher looks at, with the boot UUID of the chain it was collected in (`ProcessChain.boot_uuid`), which the identifiers of the `process` item are paired with.
+///
+/// An item sees no ancestors: the only value from the chain it needs is the boot UUID.
+#[derive(Debug, Clone, Copy)]
+pub struct MatchTarget<'a> {
+    pub process: &'a ProcessInfo,
+    pub boot_uuid: &'a str,
+}
+
 /// Matches one process against the value written in `match`, checks and resolves that value, and decides its class.
 pub trait Matcher: Send + Sync {
-    fn matches(&self, process: &ProcessInfo, value: &MatchValue) -> bool;
+    /// Whether the process satisfies the value. A value that `validate` rejects, a placeholder included, never matches.
+    fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool;
 
     /// The class of the value, placeholders included (a placeholder names its field, so the class is known before the value is). Most items return a constant; `binary` returns the strongest field present (`Strong` with a signature field, `Medium` with `digest` alone).
     ///
@@ -109,7 +163,7 @@ pub trait Matcher: Send + Sync {
     fn resolve(
         &self,
         value: &MatchValue,
-        process: &ProcessInfo,
+        target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError>;
 }
 
@@ -121,10 +175,10 @@ struct ConstClassMatcher<F> {
 
 impl<F> Matcher for ConstClassMatcher<F>
 where
-    F: Fn(&ProcessInfo, &MatchValue) -> bool + Send + Sync,
+    F: Fn(MatchTarget<'_>, &MatchValue) -> bool + Send + Sync,
 {
-    fn matches(&self, process: &ProcessInfo, value: &MatchValue) -> bool {
-        (self.matches)(process, value)
+    fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
+        (self.matches)(target, value)
     }
 
     fn class(&self, _value: &MatchValue, _process: Option<&ProcessInfo>) -> Strength {
@@ -140,7 +194,7 @@ where
     fn resolve(
         &self,
         value: &MatchValue,
-        _process: &ProcessInfo,
+        _target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
             MatchValue::Pin => Err(ResolveError::ValueUnavailable { field: None }),

@@ -6,6 +6,7 @@ use procline_core::{ProcessChain, Strength};
 use crate::builder::RuleBuilder;
 use crate::constraints::AllowConstraints;
 use crate::context::EvalContext;
+use crate::matching::tag_chain;
 use crate::rule::{Effect, Grant, Rule, Target};
 use crate::subject::{Subject, SubjectRef, Tag};
 use crate::vocabulary::{PinError, Vocabulary};
@@ -51,6 +52,27 @@ impl<'v> Policy<'v> {
         _default_effect: Effect,
     ) -> Result<Self, LoadError> {
         todo!()
+    }
+
+    /// A policy assembled from parts that are already parsed and checked, without a signature: for tests and for applications that build the list in code. Nothing is checked here (unknown items, values, tag cycles, constraints); the caller is responsible for what `load_verified` would reject.
+    pub fn from_parts(
+        vocab: &'v Vocabulary,
+        subjects: Vec<(String, Subject)>,
+        tags: Vec<Tag>,
+        rules: Vec<Rule>,
+        grants: Vec<Grant>,
+        constraints: AllowConstraints,
+        default_effect: Effect,
+    ) -> Self {
+        Self {
+            vocab,
+            constraints,
+            default_effect,
+            subjects,
+            tags,
+            rules,
+            grants,
+        }
     }
 
     /// Starts a rule with the given id and subject; `RuleBuilder::build` checks it against this policy's vocabulary, list and `AllowConstraints`.
@@ -103,11 +125,13 @@ impl<'v> Policy<'v> {
     }
 
     /// Attaches the tags each process of the chain carries. The result borrows the vocabulary and the chain, not the policy.
-    pub fn tag<'c>(&self, _chain: &'c ProcessChain) -> TaggedChain<'c>
+    ///
+    /// A tag whose definition requires other tags is decided after them, whatever the order of the definitions. On a truncated chain, a tag with conditions on the ancestors (directly, or through the tags it requires) that does not match a process for want of the missing ancestors goes into `undecidable_tags`; a tag that matches is attached, since it also matches the whole chain.
+    pub fn tag<'c>(&self, chain: &'c ProcessChain) -> TaggedChain<'c>
     where
         'v: 'c,
     {
-        todo!()
+        tag_chain(self.vocab, &self.subjects, &self.tags, chain)
     }
 
     /// Decides the effect for the target and advances the adopted grant. Memory is not changed: the application stores `updated_grant` and replaces it with `add_grant`, and removes the grants in `expired`.

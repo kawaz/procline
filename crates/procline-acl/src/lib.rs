@@ -1,8 +1,11 @@
 //! Access control rules over a process lineage.
 
 mod builder;
+mod conditions;
 mod constraints;
 mod context;
+mod matchers;
+mod matching;
 mod policy;
 mod rule;
 mod subject;
@@ -18,6 +21,6 @@ pub use policy::{
 pub use rule::{ConditionUse, Effect, Grant, PinnedCondition, Rule, Target};
 pub use subject::{AncestorMatch, Literal, MatchValue, Subject, SubjectRef, Tag};
 pub use vocabulary::{
-    Condition, ConditionKind, Item, ItemKind, Matcher, ObserveError, PinError, RegisterError,
-    ResolveError, Vocabulary,
+    Condition, ConditionKind, Item, ItemKind, MatchTarget, Matcher, ObserveError, PinError,
+    RegisterError, ResolveError, Vocabulary,
 };
