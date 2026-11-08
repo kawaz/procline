@@ -18,14 +18,14 @@ ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入�
 | 名前 | 中身 |
 | --- | --- |
 | rule | 静的な定義。effect、subject、targets、conditions を持つ。conditions は記号のまま。署名付きの一覧(subject、tag、rule)に入る |
-| grant | rule を実際のプロセス(承認の瞬間の接続相手)に適用し、各 condition を具体値に pin したもの。評価の対象はこれ。永続化は 1 件ずつ |
+| grant | rule を実際のプロセス(承認の瞬間の接続相手)に適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの。評価の対象はこれ。永続化は 1 件ずつ |
 
 - 保存した rule がそのまま再適用の対象になる。承認画面に rule の一覧を出し、選んで passkey を 1 回通せば grant ができる。
 - `RuleBuilder::build()` は静的な rule を返すだけで、世代は記録しない。
 - 承認画面でその場で条件を選んで許可する流れは「rule を組み立て、すぐ grant にする」の 2 段。rule を一覧に保存するかは利用者が選び、保存しなければ使い捨ての rule になる。
 - 寿命型・消費型の condition を持たない rule から作った grant は pin 値が無く、失効しない(永続の grant)。deny は普通こちら。
 - 静的な rule を評価に直接使うことはしない。評価が見るのは grant だけ。一覧の rule のうち寿命型・消費型の condition を持たないものは、読み込み時に自動で永続の grant になる(手書きの deny を「許可する」操作なしに効かせるため)。寿命型・消費型を含む rule は承認を経てだけ grant になる。
-- grant は自己完結。effect、targets、pin 済みの conditions、subject の中身を自分で持ち、元の rule の id を `rule_id` として持つ(表示と掃除に使う)。rule が後で変わっても既存の grant は変わらない。
+- grant は自己完結。effect、targets、pin 済みの conditions、placeholder を解決した subject を自分で持ち、元の rule の id を `rule_id` として持つ(表示と掃除に使う)。rule が後で変わっても既存の grant は変わらない。
 - subject の中のタグ名・subject 名の参照は名前のまま残す。タグの定義は署名付きの一覧にあり、その更新は意図した変更なので、既存の grant にも及んでよい。
 - grant の `id` は `Policy::grant` が一意に付ける(形式は実装時に決める。下の JSON の `g-…` は例示)。
 
@@ -130,9 +130,9 @@ impl Policy {
 
 ### builder と強さの制約
 
-- `SubjectBuilder` は変えない。
+- `SubjectBuilder` は収集結果を持たず、placeholder(`true`)入りの subject を組む([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。
 - `RuleBuilder::build()` は静的な `Rule` を返す。検査するのは値の妥当性と、強さ(クラス)と scope の制約([DR-0003](DR-0003-rule-strength-from-own-match.md))。制約は寿命型・消費型の condition の有無で判定する(pin 値はまだ無い)。制約の表は変えず、`uses` は判定では世代の scope と同じ扱いにする(寿命型で、一度切れれば戻らないため)。
-- `Policy::grant(&mut self, rule: &Rule, ctx: &EvalContext) -> Result<Grant, GrantError>` が pin を行い、id を付けた grant をメモリ上の Policy にも入れて返す(署名と保存はアプリ)。`GrantError` は `pin` の失敗(`PinError`: 観測値が無い、引数が不正)と、値の妥当性の違反。rule の再適用もこの入口で行う。
+- `Policy::grant(&mut self, rule: &Rule, tagged: &TaggedChain, ctx: &EvalContext) -> Result<Grant, GrantError>` が subject の placeholder を `tagged` の実値で埋め、各 condition を pin し、id を付けた grant をメモリ上の Policy にも入れて返す(署名と保存はアプリ)。`GrantError` は placeholder を埋める値が無い(`ValueUnavailable`、[DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))、`pin` の失敗(`PinError`: 観測値が無い、引数が不正)、値の妥当性の違反。rule の再適用もこの入口で行う。
 
 ## Alternatives Considered
 
@@ -161,3 +161,4 @@ impl Policy {
 - [DR-0001](DR-0001-crate-naming.md): crate の分け方(rule と grant を置く procline-acl)
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): 構造を持つ値の座(grant の `os.session` の pin 値の形)と、値の妥当性の検査
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): rule の強さと、`allow` に許す scope の制約
+- [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md): subject の placeholder と、grant を作るときの解決

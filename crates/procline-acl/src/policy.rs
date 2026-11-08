@@ -5,7 +5,7 @@ use procline_core::ProcessChain;
 
 use crate::context::EvalContext;
 use crate::rule::{Effect, Grant, Rule, Target};
-use crate::subject::{Subject, Tag};
+use crate::subject::{Subject, SubjectRef, Tag};
 use crate::vocabulary::{PinError, Vocabulary};
 
 /// The verified list of subjects, tags and rules, and the grants evaluation looks at.
@@ -59,10 +59,10 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Replaces every placeholder of the subject with the actual value: those of `match` from the target (the first process of the chain), those of an `ancestors` entry from the ancestor the entry matched. Lets an approval screen show what will be pinned before the user approves.
+    /// Resolves a name to the subject in the list, then replaces every placeholder with the actual value: those of `match` from the target (the first process of the chain), those of an `ancestors` entry from the ancestor the entry matched. Lets an approval screen show what will be pinned before the user approves.
     pub fn resolve_subject(
         &self,
-        _subject: &Subject,
+        _subject: &SubjectRef,
         _tagged: &TaggedChain<'_>,
     ) -> Result<Subject, GrantError> {
         todo!()
@@ -183,6 +183,10 @@ pub enum GrantError {
     UnknownItem {
         key: String,
     },
+    /// The subject is referenced by a name that is not in the list.
+    UnknownSubject {
+        name: String,
+    },
     /// The arguments or value of a condition break the item's validity rules.
     InvalidValue {
         key: String,
@@ -204,6 +208,7 @@ impl fmt::Display for GrantError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownItem { key } => write!(f, "{key:?} is not registered in the vocabulary"),
+            Self::UnknownSubject { name } => write!(f, "no subject named {name:?} in the list"),
             Self::InvalidValue { key, reason } => {
                 write!(f, "the value of {key:?} is not valid: {reason}")
             }

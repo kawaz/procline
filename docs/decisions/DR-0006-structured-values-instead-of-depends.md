@@ -35,7 +35,7 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 
 | 誰 | 何をする |
 | --- | --- |
-| builder(`SubjectBuilder` / `RuleBuilder`) | `SubjectBuilder::pin(key, PinSpec)` で、利用者が選んだもの(`process` なら取れた識別子の全部、`binary` なら field の組み合わせ)から、妥当性の規則を満たすように収集結果の値で埋める。`PinSpec` は `{ All, Binary(Vec<BinaryField>) }`。`os.session` は条件の項目なので、段階は `RuleBuilder::condition(ConditionUse::with_args("os.session", json!("unlocked")))` のように rule の条件の引数で指定する |
+| builder(`SubjectBuilder` / `RuleBuilder`) | `SubjectBuilder::pin(key, PinSpec)` で、利用者が選んだもの(`process` なら個体、`binary` なら field の組み合わせ)を、妥当性の規則を満たすように揃えて placeholder の `true` で置く。builder は収集結果を持たず、実値は `Policy::grant` が埋める([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。`PinSpec` は `{ All, Binary(Vec<BinaryField>) }`。`os.session` は条件の項目なので、段階は `RuleBuilder::condition(ConditionUse::with_args("os.session", json!("unlocked")))` のように rule の条件の引数で指定する |
 | 読み込み(`Policy::load_verified`、`Policy::load_grant`) | 各項目の値の妥当性を項目の実装で検査し、不正ならエラー。`binary` / `process` の値に未知の field があれば、黙って捨てずにエラー |
 | UI(アプリ側) | key ごとに 1 つの選択肢を出し、その中で値の段階や field の組み合わせを選ばせる |
 
@@ -47,7 +47,7 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 | `binary` | 任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` | 値にある field を全部それぞれ検証する(AND)。署名由来の field(`team_id` / `signing_id` / `bundle_id` / `cdhash`)は署名の検証が通ったときだけ一致。どの field も完全一致 | 値にある field の最強(署名由来の field があれば Strong、`digest` だけなら Medium) |
 | `os.session` | 段階の enum `boot` < `awake` < `unlocked`。pin 値は選んだ段階以下の世代の複合(`{"boot": "7B1E…", "awake": 12, "unlocked": 3}`) | 段階以下の世代が全部一致 | Strong(世代は偽れない) |
 
-`binary` の field の値はどれも文字列(`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id` / `signing_id` / `bundle_id` は署名や Info.plist の値そのまま)。真偽値の field は無い。
+`binary` の field の値は文字列か placeholder の `true`(grant ではどれも文字列。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id` / `signing_id` / `bundle_id` は署名や Info.plist の値そのまま)。真偽値を値に取る field は無い。
 
 `binary` の妥当性の規則(項目の中に閉じる):
 
@@ -56,7 +56,8 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 - `cdhash` と `digest` は単独でよい。
 - 空(field が 1 つも無い)は不正。
 - 未知の field がある値は不正(黙って捨てない)。`process` の値も同じ。
-- builder はこの規則を満たすように収集結果から埋める(利用者が `signing_id` を選べば `team_id` も入る)。読み込みは満たさない値をエラーにする。
+- placeholder の field も「ある」に数える。
+- builder はこの規則を満たすように field を揃える(利用者が `signing_id` を選べば `team_id` も入る)。読み込みは満たさない値をエラーにする。
 - `cdhash` は、CodeDirectory が identifier・Team ID・Info.plist のハッシュを含むので、下の field の値を全部決める最も強い field(SDK の `cs_blobs.h`: `CS_SUPPORTSTEAMID`、`teamOffset`、`CSSLOT_INFOSLOT`)。
 - `digest` は実行パス上のファイルの内容のハッシュで、床として置く。macOS では `proc_pidpath` のパスを読むので、exec の後にファイルを置き換えられると稼働中の像と食い違う(クラスは実行パスと同じ Medium)。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い。署名由来の field が取れる環境・アプリでは `digest` を使わず、UI は署名由来の field を優先して出す。
 - 署名が有効なことは署名由来の field の matcher の性質なので、それだけを表す項目は持たない。
@@ -82,7 +83,7 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 | クラス | 同じ uid のプロセスがその値を偽れるか | `Strength { Strong, Medium, Weak }` |
 | 深さ | 値がどれだけ絞るか | `Depth`(値の段階、または pin した field の数) |
 
-- クラスは項目が値から決める(`Matcher::class`)。多くの項目は値によらず一定で、`process`、uid、`os.session` が Strong、実行パスと責任プロセスが Medium、名前、argv、cwd、tty、env が Weak。`binary` は値にある field の最強(上の表)。
+- クラスは項目が値から決める(`Matcher::class`)。placeholder 入りの値も受け、どの field に置かれているかで決める([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。多くの項目は値によらず一定で、`process`、uid、`os.session` が Strong、実行パスと責任プロセスが Medium、名前、argv、cwd、tty、env が Weak。`binary` は値にある field の最強(上の表)。
 - `Strength` は procline-core に置く共有型。どの項目がどのクラスかは Vocabulary(登録された項目の実装)が持つので、`ProcessInfo` の各項目は Strength を持たない。
 - ルールの強さの制約はクラスで判定する(算出の規則は [DR-0003](DR-0003-rule-strength-from-own-match.md))。深さは制約に使わず、UI の並び順と、アプリが追加で課す制約の材料にする。
 
@@ -101,7 +102,7 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 - UI は key ごとに 1 つの選択肢を出せばよい。
 - アプリの項目が組み込みの座に依存する形は書けない。組で使いたいときは同じ match に並べる(AND)。
 - Linux では `binary` の `digest` がコードの同一性の主手段になる。
-- 承認画面は値の段階や field を選ぶだけでよく、妥当性の規則を満たす値は builder が埋めるので、利用者が組を作り損ねることがない。一覧を手で書く場合は、妥当性の規則を満たす値を書く必要がある(満たさなければ読み込み時にエラー)。
+- 承認画面は値の段階や field を選ぶだけでよく、妥当性の規則を満たす field の組は builder が揃えるので、利用者が組を作り損ねることがない。一覧を手で書く場合は、妥当性の規則を満たす値を書く必要がある(満たさなければ読み込み時にエラー)。
 - `ProcessInfo` は強さを持たないので、収集の crate は強さの規則を知らずに済む。
 
 ## 関連
@@ -111,3 +112,4 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): ルールの強さを対象プロセス自身の条件から算出する
 - [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md): condition の observe / pin / check / advance と、grant の pin 値
 - [DR-0005](DR-0005-process-identity-as-one-item.md): `process` の値の形と照合
+- [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md): subject の placeholder(`true`)と、grant を作るときの解決

@@ -115,40 +115,50 @@ argv、パス、env の値など、相手が自由に決められる文字列を
 
 ## ACL ルールの形と評価
 
-ACL は4つの部品でできています。subject、tag、rule は名前を付けて使い回せる静的な定義で、署名付きの一覧に入り、設定ファイルにも承認画面にも同じ形で現れます。grant は rule を実際のプロセスに適用して条件を具体値に pin したもので、評価が見るのはこれだけです。
+ACL は4つの部品でできています。subject、tag、rule は名前を付けて使い回せる静的な定義で、署名付きの一覧に入り、設定ファイルにも承認画面にも同じ形で現れます。grant は rule を実際のプロセスに適用して subject の placeholder と条件を具体値に pin したもので、評価が見るのはこれだけです。
 
 | 部品 | 中身 | 使い道 |
 | --- | --- | --- |
-| subject | 1つのプロセスへの条件。祖先への条件を入れ子で持てる | ルールの対象、タグの定義 |
+| subject | 1つのプロセスへの条件。祖先への条件を順序付きの列で持てる | ルールの対象、タグの定義 |
 | tag | 名前の付いた subject。当たるプロセスにタグが付く | 承認画面での表示、ほかの subject の条件 |
 | rule | 誰が(subject)、何に(targets)、いつまで・どんなときに(conditions)、どうなるか(effect)。conditions は記号のまま | grant の元。「いつもの許可」を承認画面で選んで passkey 1回で適用 |
-| grant | rule を承認の瞬間の接続相手に適用し、各 condition を具体値に pin したもの | 評価 |
+| grant | rule を承認の瞬間の接続相手に適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの | 評価 |
 
 どの grant にも当たらなければ既定の effect(普通は `ask`)になり、拒否は許可より優先します。
 
 ### subject
 
-subject は1つのプロセスへの条件で、接続相手か祖先かを区別しません。祖先への条件は `ancestors` の中に subject を入れ子で書きます。入れ子の subject もまた `ancestors` を持てるので、「A の下の B の下の C」のような何層の形でも組み立てられます。
+subject は1つのプロセスへの条件で、接続相手か祖先かを区別しません。祖先への条件は `ancestors` に順序付きの列で書きます。値の `true` は placeholder で、grant を作るときにそのプロセスの実値で埋まります(「rule」)。
 
 ```json
 {
-  "match": {
-    "binary": { "team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code" },
-    "cwd": "/Users/alice/src/pj1/**"
-  },
+  "match": { "binary": { "team_id": true, "signing_id": true } },
   "ancestors": [
-    { "any": { "match": { "binary": { "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } } }
+    { "match": { "binary": { "signing_id": "com.anthropic.claude-code", "team_id": true } } },
+    { "tags": ["terminal-app"] }
   ]
 }
 ```
+
+この例は「上に claude-code がいて、さらにその上に `terminal-app` のタグが付いたプロセスがいる」プロセスで、対象自身の Team ID と signing identifier、claude-code の Team ID は承認したときの値に固定されます。
 
 | 要素 | 中身 |
 | --- | --- |
 | match | そのプロセス自身の項目への条件(形は後述の matcher) |
 | tags | そのプロセスに付いているタグ |
-| ancestors | 祖先への条件の列。`any`(祖先のどれか)、`at`(n 個上)、`chain`(並び順まで指定)。中身はどれも subject。`"include_self": true` でそのプロセス自身も候補に含める(「自身か祖先のどれか」) |
+| ancestors | 祖先への条件の順序付きの列。各要素は `match` と `tags`。この順で祖先のどこかに当たる(間に挟まってよい)。近い方から |
+| include\_self | `true` なら、`ancestors` の列の照合を祖先ではなくそのプロセス自身から始めてよい(「自身か子孫」のタグの定義に使う)。subject に 1 つで、要素ごとには持たない |
 
-`match` と `tags` はそのプロセス自身への条件で、`ancestors` は祖先だけへの条件です(`include_self` がなければ自身は含まない)。`ancestors` しか書かなければ、そのプロセス自身には条件を付けないことになります。subject の中の条件はすべて AND です。OR はルールを分けて書きます。ルールを読む人が入れ子の論理式を追わずに済むようにするためです。
+`match` と `tags` はそのプロセス自身への条件で、`ancestors` は祖先への条件です(`include_self` がなければ自身は含まない)。`ancestors` しか書かなければ、そのプロセス自身には条件を付けないことになります。
+
+`ancestors` は部分列として照合します。
+
+- 列の順は対象に近い方からで、収集結果の列 `[対象, 親, 祖父, …]` と同じ向きです。
+- 各要素は、前の要素が当たった祖先より上で、この順に祖先のどこかに当たればよく、間に別の祖先が挟まってもかまいません。tmux、direnv、ラッパの有無で深さは安定しないので、「間に何も挟まらない」を区別する書き方は持ちません。
+- 照合は近い側から貪欲に決めます。要素 1 を最も近い当たる祖先に、要素 2 をそのさらに上で最も近い当たる祖先に、と決めるので、要素の placeholder をどの祖先の値で埋めるかが一意に決まります。具体値もタグも無い要素(`{"match": {"binary": {"team_id": true}}}` だけ)は、その値を持つ最も近い祖先に当たります。
+- 要素の中に `ancestors` は入れ子にせず、要素を名前で参照することもしません。深い条件はタグの定義に閉じ込めます。
+
+subject の中の条件はすべて AND です。OR はルールを分けて書きます。ルールを読む人が入れ子の論理式を追わずに済むようにするためです。
 
 ### tag
 
@@ -158,16 +168,16 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 {
   "tag": "claude-pj1",
   "subject": {
-    "ancestors": [{
-      "any": {
+    "ancestors": [
+      {
         "match": {
-          "binary": { "team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code" },
+          "binary": { "signing_id": "com.anthropic.claude-code", "team_id": "VWXYZ67890" },
           "cwd": "/Users/alice/src/pj1/**"
-        },
-        "ancestors": [{ "any": { "match": { "binary": { "team_id": "ABCDE12345" } } } }]
+        }
       },
-      "include_self": true
-    }]
+      { "match": { "binary": { "team_id": "ABCDE12345" } } }
+    ],
+    "include_self": true
   }
 }
 ```
@@ -201,6 +211,18 @@ rule は静的な定義です。conditions は記号のまま書き、世代や�
 | targets | ルールが効く対象(キーの glob、タグ)。対象の語彙はアプリが決める。不要なアプリは省略する |
 | conditions | 条件の名前の列(すべて AND)。寿命型と状態型があり、どちらかは語彙が決める(下記) |
 
+subject の値は、具体値か placeholder(`true`)のどちらかです(決定の記録: [DR-0007](decisions/DR-0007-pin-placeholders-and-ordered-ancestors.md))。
+
+| rule に書く値 | 意味 | 例 |
+| --- | --- | --- |
+| 文字列(項目によって glob / 正規表現 / 数値範囲) | 手書きの具体値。そのまま照合する | `{"binary": {"team_id": "MYTEAM", "signing_id": "myapp"}}` = 自作アプリからは常に allow |
+| `true` | placeholder。grant を作るときに、その subject が当たったプロセスの実値を pin する | `{"binary": {"team_id": true, "signing_id": true}}` = 承認したそのアプリに固定 |
+
+- 構造を持つ値では field 単位で混ぜられます(`{"binary": {"signing_id": "com.googlecode.iterm2", "team_id": true}}` = signing identifier で見つけ、その Team ID を pin)。
+- `process` は `true`(個体を pin)か具体値の複合です。
+- 単純項目(`cwd`、`uid`、`path` …)も `true` で、実値を完全一致で pin します。
+- これにより「いつもの許可」は 1 つの rule で済み、アプリごとに別の rule を保存しなくてよくなります。
+
 条件には2つの種類があり、どちらかは語彙に登録するときに決まります。ルールには `conditions` に名前を並べるだけで、種類ごとに置き場を分けません(すべて AND)。
 
 | 種類 | 偽になったとき | 例 |
@@ -214,7 +236,7 @@ rule は静的な定義です。conditions は記号のまま書き、世代や�
 
 ### grant
 
-grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適用し、各 condition を具体値に pin したものです。grant を作るときに、寿命型の条件にはその時点の世代を記録し、`age` は時刻に直します。
+grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適用し、subject の placeholder を実値に、各 condition を具体値に pin したものです。grant を作るときに、subject の `match` の placeholder は対象プロセス(列の先頭)の値で、`ancestors` の要素の placeholder はその要素が当たった祖先の値で埋め、寿命型の条件にはその時点の世代を記録し、`age` は時刻に直します。
 
 ```json
 {
@@ -238,11 +260,12 @@ grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適�
 - `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には無い)です。`age` は grant を作るときに `until` の pin 値に直します(`key` も `until` にする)。
 - `os.session` の pin 値は、段階以下の世代を全部持ちます(`unlocked` なら `boot`、`awake`、`unlocked` の 3 つ)。
 - `id` は `Policy::grant` が一意に付けます(上の `g-…` は例示)。
-- grant は自己完結です。effect、targets、pin 済みの conditions、subject の中身を自分で持ち、元の rule の id を `rule_id` として持ちます(表示と掃除に使う)。rule が後で変わっても、既存の grant は変わりません。
+- subject に placeholder は残りません(残っていれば読み込みエラー)。埋める値が無ければ(署名が無いのに `team_id: true` など)grant は作れません(`GrantError::ValueUnavailable`)。
+- grant は自己完結です。effect、targets、pin 済みの conditions、placeholder を解決した subject を自分で持ち、元の rule の id を `rule_id` として持ちます(表示と掃除に使う)。rule が後で変わっても、既存の grant は変わりません。
 - subject の中のタグ名・subject 名の参照は、名前のまま残します。タグの定義は署名付きの一覧にあり、その更新は意図した変更なので、既存の grant にも及んでよいためです。
 - 寿命型・消費型の condition を持たない rule から作った grant は pin 値が無く、失効しません(永続の grant)。deny は普通こちらです。
 
-保存した rule がそのまま再適用の対象になります。承認画面に rule の一覧を出し、選んで passkey を1回通せば grant ができます。承認画面でその場で条件を選んで許可する流れは「rule を組み立て、すぐ grant にする」の 2 段です。rule を一覧に保存するかは利用者が選び、保存しなければ使い捨ての rule になります。
+保存した rule がそのまま再適用の対象になります。placeholder があるので、同じ rule を別のアプリの承認にも使えます。承認画面に rule の一覧を出し、選んで passkey を1回通せば grant ができます。承認画面でその場で条件を選んで許可する流れは「rule を組み立て、すぐ grant にする」の 2 段です。rule を一覧に保存するかは利用者が選び、保存しなければ使い捨ての rule になります。
 
 ### 名前と参照
 
@@ -253,7 +276,7 @@ subject、tag、rule、条件の組は、どれも名前を付けて一覧に置
 **決定の理由**: 参照が現れる場所ごとに、何を指すかが1つに決まっていて、種類が混ざる場所がないためです。
 
 - `tags` の中はタグ名だけ。
-- subject の位置(ルールの `subject`、`ancestors` の `any` などの中身)は、文字列なら subject 名、オブジェクトならその場の定義。型で区別できる。
+- subject の位置(ルールの `subject`)は、文字列なら subject 名、オブジェクトならその場の定義。型で区別できる。`ancestors` の要素は名前で参照せず、その場の `match` と `tags` だけを書く。
 - rule は適用するときに名前で指すだけで、一覧の中からは参照されない。
 - `conditions` の要素は、文字列も `{"age": "1h"}` のような引数付きも、どちらも語彙の名前。
 
@@ -270,11 +293,13 @@ subject、tag、rule、条件の組は、どれも名前を付けて一覧に置
 | 正規表現 | パス、argv |
 | 数値の範囲 | uid |
 
+rule の値が placeholder(`true`)の項目や field は、grant で実値の完全一致になります(「rule」)。真偽値の完全一致はありません。JSON の `true` は placeholder 専用で、真偽値の項目は今は無く、要るときは文字列で表します。
+
 `process`、`binary`、`os.session` は構造を持つ値で、完全一致だけにします(`binary` はどの field も完全一致)。署名の条件は、署名の検証が通ったときだけ一致とみなします。ad-hoc 署名は Team ID が空なので、Team ID の条件には決して一致しません。
 
-**`process`** は「この個体のプロセス」を表す項目です(決定の記録: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md))。pin 値は、builder がその時点で取れた識別子を全部持つ複合値です(例 `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。照合は両側に揃っている最も強い識別子で比べ、最悪でも pid と起動時刻の組の一致を見ます。ルールを書く人は、どの識別子で比べたかを気にしません。クラスは強です。`match` にも `ancestors` の中にも書けるので、「このターミナルのタブのシェルの子孫」が書けます。pin したプロセスが終わればそのプロセスは列に居なくなり、grant は当たらなくなります。列に居るプロセスの寿命はこれで表せます。終わったプロセスを指す grant の削除は掃除(アプリ)の責務です。UI では「このプロセスだけ」の 1 選択肢として出します。
+**`process`** は「この個体のプロセス」を表す項目です(決定の記録: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md))。rule では `true`(承認したその個体を pin)か具体値の複合を書き、grant では `Policy::grant` がその時点で取れた識別子を全部持たせた複合値になります(例 `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。照合は両側に揃っている最も強い識別子で比べ、最悪でも pid と起動時刻の組の一致を見ます。ルールを書く人は、どの識別子で比べたかを気にしません。クラスは強です。`match` にも `ancestors` の中にも書けるので、「このターミナルのタブのシェルの子孫」が書けます。pin したプロセスが終わればそのプロセスは列に居なくなり、grant は当たらなくなります。列に居るプロセスの寿命はこれで表せます。終わったプロセスを指す grant の削除は掃除(アプリ)の責務です。UI では「このプロセスだけ」の 1 選択肢として出します。
 
-**`binary`** は「このプロセスのコード」を表す項目です。値は任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` です(例 `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`)。field の値はどれも文字列で、`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id`、`signing_id`、`bundle_id` は署名や Info.plist の値そのままです。真偽値の field はありません。照合は値にある field をそれぞれ検証し、全部が一致したときだけ当たります(AND)。署名由来の field(`team_id`、`signing_id`、`bundle_id`、`cdhash`)は、署名の検証が通ったときだけ一致とみなします。署名が有効なことは署名由来の field の照合の性質なので、それだけを表す項目は持ちません。クラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中です。
+**`binary`** は「このプロセスのコード」を表す項目です。値は任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` です(例 `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`)。field の値は文字列か placeholder の `true` で、grant ではどれも文字列です。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id`、`signing_id`、`bundle_id` は署名や Info.plist の値そのままです。真偽値を値に取る field は無いので、`true` は placeholder の意味だけを持ちます。照合は値にある field をそれぞれ検証し、全部が一致したときだけ当たります(AND)。署名由来の field(`team_id`、`signing_id`、`bundle_id`、`cdhash`)は、署名の検証が通ったときだけ一致とみなします。署名が有効なことは署名由来の field の照合の性質なので、それだけを表す項目は持ちません。クラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中です。
 
 値の妥当性の規則は `binary` の中に閉じています。
 
@@ -283,8 +308,9 @@ subject、tag、rule、条件の組は、どれも名前を付けて一覧に置
 - `cdhash` と `digest` は単独でよい。
 - 空(field が 1 つも無い)は不正。
 - 未知の field がある値は不正で、黙って捨てずにエラーにする(`process` の値も同じ)。
+- placeholder の field も「ある」に数える(`{"signing_id": "com.googlecode.iterm2", "team_id": true}` は妥当)。
 
-builder はこの規則を満たすように収集結果から値を埋め(利用者が `signing_id` を選べば `team_id` も入る)、読み込みは満たさない値をエラーにします。
+builder はこの規則を満たすように field を揃えて `true` を置き(利用者が `signing_id` を選べば `team_id` も入る)、読み込みは満たさない値をエラーにします。
 
 - `cdhash` は、下の field の値を全部決める最も強い field です。CodeDirectory が identifier、Team ID、Info.plist のハッシュを含むためです(SDK の `cs_blobs.h` の `CS_SUPPORTSTEAMID`、`teamOffset`、`CSSLOT_INFOSLOT`)。
 - `digest` は実行パス上のファイルの内容のハッシュで、署名に頼れないときの床として置きます。macOS では `proc_pidpath` のパスを読むので、exec の後にファイルを置き換えられると稼働中の像と食い違います(クラスは実行パスと同じ中)。Linux では `/proc/<pid>/exe` が稼働中の inode を指すので、実質強い手段になります。署名由来の field が取れる環境・アプリでは `digest` を使わず、UI は署名由来の field を優先して出します。
@@ -314,8 +340,8 @@ register(key, impl)
 
 値の形と妥当性は項目自身が持ちます。key をまたぐ依存は持たず、構造が要るものは 1 つの key の値に構造を持たせます(`process`、`binary`、`os.session`)。
 
-- builder(承認画面からルールを作る `SubjectBuilder` / `RuleBuilder`)は、利用者が選んだもの(`binary` の field の組み合わせ、`os.session` の段階)から値を埋める。`binary` は妥当性の規則を満たすように収集結果の値で埋め、`os.session` の段階は rule の条件の引数として書く(世代は grant を作るときに pin する)。
-- 読み込み(`Policy::load_verified`、`Policy::load_grant`)は、項目の実装が検査して不正な値(未知の field を含む)をエラーにする。
+- builder(承認画面からルールを作る `SubjectBuilder` / `RuleBuilder`)は収集結果を持たず、利用者が選んだもの(`process`、`binary` の field の組み合わせ、`os.session` の段階)から、選ばれた field を `true` で置いた subject を組む。実値は `Policy::grant` が埋める。`binary` は妥当性の規則を満たすように field を揃え、`os.session` の段階は rule の条件の引数として書く(世代は grant を作るときに pin する)。
+- 読み込み(`Policy::load_verified`、`Policy::load_grant`)は、項目の実装が検査して不正な値(未知の field を含む)をエラーにする。grant に placeholder が残っていれば、それも不正な値としてエラーにする(`LoadError::InvalidValue`)。
 - UI(アプリ側)は key ごとに 1 つの選択肢を出し、その中で値の段階や field の組み合わせを選ばせる。
 - アプリの項目を組み込みの項目と組で使いたいときは、同じ `match` に並べる(AND)。
 
@@ -328,7 +354,7 @@ register(key, impl)
 | クラス | 同じ uid のプロセスがその値を偽れるか(「収集する情報」の表の強さ) | 強 / 中 / 弱 |
 | 深さ | 値がどれだけ絞るか | 値の段階、または pin した field の数 |
 
-- クラスは項目が値から決めます(`Matcher::class`)。多くの項目は値によらず一定で、「収集する情報」の表のとおりです(`process`、uid は強、実行パスと責任プロセスは中、名前、argv、cwd、tty、env は弱)。`os.session` は強です。
+- クラスは項目が値から決めます(`Matcher::class`)。rule の placeholder 入りの値も受け、どの field に置かれているかで決めます(`{"binary": {"team_id": true}}` は強)。多くの項目は値によらず一定で、「収集する情報」の表のとおりです(`process`、uid は強、実行パスと責任プロセスは中、名前、argv、cwd、tty、env は弱)。`os.session` は強です。
 - `binary` のクラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中です。
 - どの項目がどのクラスかは語彙(登録された項目の実装)が持ちます。収集結果の各項目は強さを持ちません。
 - 深さは UI の並び順と、アプリが追加で課す制約の材料です。ルールの強さの制約には使いません(「ルールの作成と強さの制約」)。
@@ -339,7 +365,7 @@ register(key, impl)
 
 1. 失効した grant を除く(寿命型の `check` が偽のもの。掃除の対象にする)。
 2. targets が対象に当たらない grant を除く。
-3. 各 grant の subject を照合し、状態型の `check` を取る。`deny` が1つでも当たれば拒否。
+3. 各 grant の subject を照合し、状態型の `check` を取る。subject の `match` と `tags` は対象自身と、`ancestors` は列を近い側から貪欲に部分列として照合する。`deny` が1つでも当たれば拒否。
 4. `allow` が当たれば許可。当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順。他の grant で通るのに、限りある `uses` を減らさないため。
 5. `ask` が当たれば、または何も当たらなければ、既定の effect。
 6. 採用された grant にだけ、各 condition の `advance` をかける。1 つでも新しい pin 値を返せば、pin 値を差し替えた新しい grant を作る(grant は immutable)。
@@ -443,15 +469,18 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 ### ルールの作成と強さの制約
 
-ルールは、収集した情報から項目を選んで作ります(RuleBuilder)。承認画面で「このプロセスの署名で」「1つ上の祖先の Team ID で」と選ぶと、その値がそのまま条件になります。`binary` は選んだ field から builder が妥当な値を埋め、`os.session` は段階を条件の引数で選びます(「項目の登録」)。`SubjectBuilder` が subject を、`RuleBuilder` が静的な rule を作ります。
+ルールは、承認画面で項目を選んで作ります(RuleBuilder)。「このプロセスの署名で」「上にいる claude-code の Team ID で」と選ぶと、選んだ field を placeholder(`true`)にした subject ができ、実値は grant を作るときに埋まります。`binary` は選んだ field から builder が妥当な組に揃え、`os.session` は段階を条件の引数で選びます(「項目の登録」)。`SubjectBuilder` が subject を、`RuleBuilder` が静的な rule を作ります。
 
-- `RuleBuilder::build()` は静的な `Rule` を返し、世代は記録しません。検査するのは値の妥当性と、強さ(クラス)と scope の制約(下記)です。制約は寿命型・消費型の condition の有無で判定します(pin 値はまだ無い)。
-- pin は `Policy::grant(rule, ctx)` が行います。pin した grant をメモリ上の Policy にも入れて返します(署名と保存はアプリ)。`pin` が失敗した(`PinError`: 観測値が無い、引数が不正)とき、値が妥当でないときは `GrantError` です。
+- `SubjectBuilder` は収集結果を受け取りません。`PinSpec` から `true` 入りの subject を組み、具体値は `exact` で書きます。祖先の要素は `AncestorBuilder` で組んで `ancestor` で順に足します。
+- 同じ key への `pin` と `exact` は、`binary` では field 単位で 1 つの値に合成し(同じ field が両方にあればエラー)、単純項目と `process` では 2 回目をエラーにします(`BuildError::Conflict`)。`SubjectBuilder::build` / `AncestorBuilder::build` が検査するのは値の妥当性(`binary` の規則、空)だけで、語彙との照合(未登録の項目)は `RuleBuilder::build` が行います。
+- `RuleBuilder::build()` は静的な `Rule` を返し、世代は記録しません。検査するのは値の妥当性と、強さ(クラス)と scope の制約(下記)です。制約は寿命型・消費型の condition の有無で判定します(pin 値はまだ無い)。強さのクラスは placeholder のままでも判定できます。
+- pin は `Policy::grant(rule, tagged, ctx)` が行います。subject の placeholder を `tagged` の実値で埋め、各 condition を pin した grant をメモリ上の Policy にも入れて返します(署名と保存はアプリ)。`GrantError` は、placeholder を埋める値が無い(`ValueUnavailable`)、`pin` が失敗した(`PinError`: 観測値が無い、引数が不正)、値が妥当でない、のどれかです。
+- 承認画面は passkey の前に「何が pin されるか」を見せるため、`Policy::resolve_subject(subject, tagged)` で placeholder を埋めた subject を得られます(名前参照は一覧の subject に解決してから埋めます。`include_self` で対象自身に当たった要素は対象自身の値で埋めます)。`Policy::grant` も内部でこれを使います。
 
 ルールの強さは、subject のうち対象プロセス自身への条件から決まります(決定の記録: [DR-0003](decisions/DR-0003-rule-strength-from-own-match.md))。
 
 - 対象プロセス自身への条件は、`match` と、`tags` が指すタグの定義のうち自身への条件です。ルールの強さは、それらの項目のクラスのうち最も強いものです。
-- `ancestors` の条件は数えません。祖先が強く特定されていても、対象は「その子孫なら何でも」で、対象自身は縛られないためです。`include_self` があっても同じです(「自身か祖先のどれか」であって、自身を pin していない)。
+- `ancestors` の条件は数えません。祖先が強く特定されていても、対象は「その子孫なら何でも」で、対象自身は縛られないためです。`include_self` があっても同じです(列の照合を自身から始めてよいだけで、自身を縛らない)。
 - 自身への条件が何も無い subject(`ancestors` だけ)は最も弱く、弱と同じ制約を受けます。
 - タグを条件にしたときの強さは、タグの定義の subject を同じ規則で算出したものです。
 
@@ -501,9 +530,12 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 enum Strength { Strong, Medium, Weak }               // クラス(項目が値から決める)
 struct Depth(u8);                                    // 深さ(値の段階 / pin した field の数)
 
+// rule に書く値(procline-core)。JSON では true が Pin、それ以外は T の値
+enum Pinnable<T> { Pin, Value(T) }
+
 // 構造を持つ値(procline-core)
-struct BinaryPin { digest: Option<String>, team_id: Option<String>, signing_id: Option<String>, bundle_id: Option<String>, cdhash: Option<CdHash> }  // JSON ではどの field も文字列(cdhash は hex)
-// BinaryPin::validate(&self) -> Result<(), BinaryPinError>: 値の妥当性(signing_id には team_id、bundle_id には team_id と signing_id、空は不正)。未知の field は読み込みでエラー
+struct BinaryPin { digest: Option<Pinnable<String>>, team_id: Option<Pinnable<String>>, signing_id: Option<Pinnable<String>>, bundle_id: Option<Pinnable<String>>, cdhash: Option<Pinnable<CdHash>> }  // JSON では field ごとに true(placeholder)か文字列(cdhash は hex)
+// BinaryPin::validate(&self) -> Result<(), BinaryPinError>: 値の妥当性(signing_id には team_id、bundle_id には team_id と signing_id、空は不正。placeholder の field も「ある」に数える)。未知の field は読み込みでエラー
 enum SessionLevel { Boot, Awake, Unlocked }          // os.session の段階(args の値。JSON では "boot" / "awake" / "unlocked")
 
 // 語彙(procline-acl)
@@ -543,13 +575,35 @@ pub struct Decision {
     pub updated_grant: Option<Grant>,    // advance で変わった grant の新版。explain では常に None
 }
 
-// 承認画面から rule を作る
-let subject = SubjectBuilder::from(&tagged, 0)       // 対象プロセスの項目から選ぶ(tagged が語彙への参照を持つ)
-    .pin("binary", PinSpec::Binary(vec![BinaryField::SigningId]))  // key と、その値のどこまでを pin するか。team_id も収集結果の値で入る
-    .tag("claude-pj1")
+// subject の形(procline-acl)
+struct Subject { r#match: BTreeMap<String, MatchValue>, tags: Vec<String>, ancestors: Vec<AncestorMatch>, include_self: bool }
+struct AncestorMatch { r#match: BTreeMap<String, MatchValue>, tags: Vec<String> }  // ancestors の要素。入れ子の ancestors は持たない
+// MatchValue { Pin, Exact(..), Glob(..), Regex(..), Range { .. }, Process(Pinnable<ProcessIdentity>), Binary(BinaryPin) }: Pin は単純項目の placeholder
+
+// 承認画面から rule を作る(収集結果は受け取らず、true 入りの subject を組む)
+let subject = SubjectBuilder::new()
+    .pin("binary", PinSpec::Binary(vec![BinaryField::TeamId, BinaryField::SigningId]))  // key と、その値のどの field を placeholder にするか
+    .ancestor(
+        AncestorBuilder::new()
+            .exact("binary", MatchValue::Binary(BinaryPin {
+                signing_id: Some(Pinnable::Value("com.anthropic.claude-code".into())),
+                team_id: None, digest: None, bundle_id: None, cdhash: None,
+            }))                                      // signing_id で見つけ、
+            .pin("binary", PinSpec::Binary(vec![BinaryField::TeamId]))  // その Team ID を pin(同じ key の exact と field 単位で 1 つの値に合成)
+            .build()?,
+    )
+    .ancestor(AncestorBuilder::new().tag("terminal-app").build()?)  // 近い方から順に足す
     .build()?;
-// PinSpec { All, Binary(Vec<BinaryField>) }: All は process 用(取れた識別子を全部)。os.session の段階は下の RuleBuilder::condition で指定する
+// SubjectBuilder: new / pin(key, PinSpec) / exact(key, MatchValue) / tag(name) / ancestor(AncestorMatch) / include_self() / build() -> Result<Subject, BuildError>
+// AncestorBuilder: new / pin / exact / tag / build() -> Result<AncestorMatch, BuildError>
+// build が検査するのは値の妥当性だけ(binary の規則、空)。未登録の項目は RuleBuilder::build が検査する
+// 同じ key への pin と exact: binary は field 単位で合成(同じ field が両方にあれば BuildError::Conflict)、単純項目と process は 2 回目で BuildError::Conflict
+// PinSpec { All, Binary(Vec<BinaryField>) }: All は process と単純項目用(値全体を true にする)。os.session の段階は下の RuleBuilder::condition で指定する
 // BinaryField { Digest, TeamId, SigningId, BundleId, CdHash }
+
+// 承認画面のプレビュー: passkey の前に「何が pin されるか」を見せる
+let preview = policy.resolve_subject(&rule.subject, &tagged)?;  // SubjectRef (名前でも可) の placeholder を tagged の実値で埋めた Subject。値が無ければ GrantError::ValueUnavailable
+
 let rule = RuleBuilder::new(subject, &vocab)
     .targets(["key:k1"])
     .condition(ConditionUse::with_args("age", json!("1h")))
@@ -557,8 +611,9 @@ let rule = RuleBuilder::new(subject, &vocab)
     .allow()
     .build()?;                                       // 静的な Rule。値の妥当性と、強さ(クラス)と scope の制約を検査
 
-// rule を適用して grant を作る(各 condition の pin。保存した rule も同じ入口)
-let grant = policy.grant(&rule, &ctx)?;              // pin して id を付け、メモリ上の Policy にも入れて返す。GrantError: pin の失敗(Unobservable / InvalidArgs)、値の妥当性の違反
+// rule を適用して grant を作る(subject の placeholder と各 condition の pin。保存した rule も同じ入口)
+let grant = policy.grant(&rule, &tagged, &ctx)?;     // pin して id を付け、メモリ上の Policy にも入れて返す
+// GrantError: ValueUnavailable { key, field: Option<String> }(placeholder を埋める値が無い)、pin の失敗(Unobservable / InvalidArgs)、値の妥当性の違反
 // アプリは grant を署名して永続化する
 ```
 

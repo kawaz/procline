@@ -12,7 +12,8 @@
 ## Decision
 
 - ルールの強さは、subject のうち **対象プロセス自身への条件**(`match` と、`tags` が指すタグの定義の自身への条件)のクラスのうち最も強いもの。
-- `ancestors` の条件は数えない。`include_self` があっても同じ(「自身か祖先のどれか」であって、自身を pin していない)。
+- `ancestors` の条件は数えない。`ancestors` は祖先への条件の順序付きの列で、各要素がこの順で祖先のどこかに当たればよい([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。`include_self` があっても同じ(列の照合を自身から始めてよいだけで、自身を縛らない)。
+- 強さのクラスは placeholder(`true`)のままでも判定する。どの項目・field に置かれているかで決まるため([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。
 - 自身への条件が何も無い subject(`ancestors` だけ)は最弱(Weak と同じ制約)。
 - タグを条件にしたときの強さは、タグの定義の subject を同じ規則で算出したもの。
 - 制約の表(強 / 中 / 弱 → `allow` で許される scope)はクラスで判定する。深さ([DR-0006](DR-0006-structured-values-instead-of-depends.md))は制約に使わない。
@@ -32,3 +33,4 @@
 - [DESIGN-ja の「ルールの作成と強さの制約」](../DESIGN-ja.md)
 - [DR-0001](DR-0001-crate-naming.md): crate の分け方
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): 項目の登録と、強さのクラスと深さ
+- [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md): subject の placeholder と、`ancestors` の順序付きの部分列
