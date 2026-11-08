@@ -1,24 +1,26 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
-
+use crate::pin::Pinnable;
 use crate::signature::CdHash;
 
-/// The pin value of the `binary` matcher item: the identity of the code, as any number of fields. Every field present is checked (AND); the fields taken from the signature match only when the signature verifies.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The value of the `binary` matcher item: the identity of the code, as any number of fields. Every field present is checked (AND); the fields taken from the signature match only when the signature verifies.
+///
+/// Each field present is a concrete value or a placeholder (`Pinnable::Pin`) that a grant fills in with the value of the matched process. A grant holds no placeholder.
+///
+/// In JSON, an object with the fields `digest`, `team_id`, `signing_id`, `bundle_id` and `cdhash`, each optional; a field is `true` for a placeholder or its value otherwise (`cdhash` as a lowercase hex string). Unknown fields are rejected. Example: `{"signing_id": "com.googlecode.iterm2", "team_id": true}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BinaryPin {
     /// Hash of the contents of the file at the executable path (`sha256:…`).
-    pub digest: Option<String>,
-    pub team_id: Option<String>,
-    pub signing_id: Option<String>,
-    pub bundle_id: Option<String>,
+    pub digest: Option<Pinnable<String>>,
+    pub team_id: Option<Pinnable<String>>,
+    pub signing_id: Option<Pinnable<String>>,
+    pub bundle_id: Option<Pinnable<String>>,
     /// Determines every other signature field, so it is the strongest field.
-    pub cdhash: Option<CdHash>,
+    pub cdhash: Option<Pinnable<CdHash>>,
 }
 
 impl BinaryPin {
-    /// Checks the validity rules: `signing_id` needs `team_id`, `bundle_id` needs `team_id` and `signing_id`, and at least one field is present.
+    /// Checks the validity rules: `signing_id` needs `team_id`, `bundle_id` needs `team_id` and `signing_id`, and at least one field is present. A placeholder counts as present.
     pub fn validate(&self) -> Result<(), BinaryPinError> {
         todo!()
     }
@@ -34,14 +36,14 @@ pub enum BinaryField {
     CdHash,
 }
 
-/// A `binary` value breaks a validity rule.
+/// A `binary` value breaks a validity rule. A field given as a placeholder counts as given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryPinError {
-    /// `signing_id` is present without `team_id`; anyone, even an ad-hoc signer, can claim a signing identifier.
+    /// `signing_id` is given without `team_id`; anyone, even an ad-hoc signer, can claim a signing identifier.
     SigningIdWithoutTeamId,
-    /// `bundle_id` is present without `team_id` and `signing_id`; anyone can write an Info.plist.
+    /// `bundle_id` is given without `team_id` and `signing_id`; anyone can write an Info.plist.
     BundleIdWithoutSigner,
-    /// No field is present.
+    /// No field is given.
     Empty,
 }
 

@@ -92,7 +92,7 @@ pub enum ItemKind {
 pub trait Matcher: Send + Sync {
     fn matches(&self, process: &ProcessInfo, value: &MatchValue) -> bool;
 
-    /// The class of the value. Most items return a constant; `binary` returns the strongest field present (`Strong` with a signature field, `Medium` with `digest` alone).
+    /// The class of the value, placeholders included (a placeholder names its field, so the class is known before the value is). Most items return a constant; `binary` returns the strongest field present (`Strong` with a signature field, `Medium` with `digest` alone).
     fn class(&self, value: &MatchValue) -> Strength;
 }
 

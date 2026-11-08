@@ -2,6 +2,7 @@
 
 mod binary;
 mod env;
+mod pin;
 mod process;
 mod sanitize;
 mod session;
@@ -10,6 +11,7 @@ mod strength;
 
 pub use binary::{BinaryField, BinaryPin, BinaryPinError};
 pub use env::{EnvPolicy, IsSecretFn, RedactFn, Redaction, default_is_secret, default_redact};
+pub use pin::Pinnable;
 pub use process::{
     AuditToken, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity, ProcessInfo,
     StartTime,

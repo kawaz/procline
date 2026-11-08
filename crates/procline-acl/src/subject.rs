@@ -1,20 +1,36 @@
 use std::collections::BTreeMap;
 
-use procline_core::{BinaryPin, ProcessIdentity};
+use procline_core::{BinaryPin, Pinnable, ProcessIdentity};
 
-/// A condition on one process, optionally with conditions on its ancestors. All parts are ANDed.
+/// A condition on one process and on its ancestors. All parts are ANDed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Subject {
     /// Conditions on the process itself, keyed by item. Flat: a structured value stays under its own key.
     pub r#match: BTreeMap<String, MatchValue>,
     /// Tags the process itself must carry.
     pub tags: Vec<String>,
-    pub ancestors: Vec<AncestorCondition>,
+    /// Conditions on the ancestors, nearest first. Each entry matches some ancestor, in this order, with other ancestors allowed in between (a subsequence).
+    ///
+    /// Matching is greedy from the near side: each entry takes the nearest matching ancestor above the one the previous entry took, so the ancestor whose values fill in an entry's placeholders is unique.
+    pub ancestors: Vec<AncestorMatch>,
+    /// Let the sequence of `ancestors` start at the process itself instead of its parent.
+    pub include_self: bool,
+}
+
+/// One entry of `ancestors`: conditions on one ancestor. It has no `ancestors` of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AncestorMatch {
+    /// Conditions on the ancestor, keyed by item.
+    pub r#match: BTreeMap<String, MatchValue>,
+    /// Tags the ancestor must carry.
+    pub tags: Vec<String>,
 }
 
 /// A value to match an item against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchValue {
+    /// Placeholder of an item with an unstructured value (`true` in JSON): a grant pins the actual value of the matched process, compared for exact match.
+    Pin,
     Exact(Literal),
     Glob(String),
     Regex(String),
@@ -23,37 +39,17 @@ pub enum MatchValue {
         min: i64,
         max: i64,
     },
-    /// The individual process (`process` item). Compared by the strongest identifier present on both sides.
-    Process(ProcessIdentity),
-    /// The identity of the code (`binary` item). Every field present is checked.
+    /// The individual process (`process` item), or a placeholder for the matched one. Compared by the strongest identifier present on both sides.
+    Process(Pinnable<ProcessIdentity>),
+    /// The identity of the code (`binary` item). Every field present is checked; each field may be a placeholder.
     Binary(BinaryPin),
 }
 
-/// A literal compared for exact match.
+/// A literal compared for exact match. There is no boolean literal: `true` in JSON is the placeholder; an item with a truth value takes a string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
-    Bool(bool),
     Integer(i64),
     Text(String),
-}
-
-/// One entry of `ancestors`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AncestorCondition {
-    pub selector: AncestorSelector,
-    /// Also consider the process itself as a candidate.
-    pub include_self: bool,
-}
-
-/// Which ancestors the nested subject applies to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AncestorSelector {
-    /// Any ancestor.
-    Any(SubjectRef),
-    /// The ancestor `n` levels up.
-    At(usize, SubjectRef),
-    /// Ancestors in this order.
-    Chain(Vec<SubjectRef>),
 }
 
 /// A subject written in place or referenced by name.

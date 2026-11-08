@@ -49,8 +49,22 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Pins the conditions of the rule and adds the resulting grant; the application signs and stores the returned grant.
-    pub fn grant(&mut self, _rule: &Rule, _ctx: &EvalContext) -> Result<Grant, GrantError> {
+    /// Fills in the placeholders of the rule's subject from `tagged` (via `resolve_subject`), pins the conditions, and adds the resulting grant; the application signs and stores the returned grant.
+    pub fn grant(
+        &mut self,
+        _rule: &Rule,
+        _tagged: &TaggedChain<'_>,
+        _ctx: &EvalContext,
+    ) -> Result<Grant, GrantError> {
+        todo!()
+    }
+
+    /// Replaces every placeholder of the subject with the actual value: those of `match` from the target (the first process of the chain), those of an `ancestors` entry from the ancestor the entry matched. Lets an approval screen show what will be pinned before the user approves.
+    pub fn resolve_subject(
+        &self,
+        _subject: &Subject,
+        _tagged: &TaggedChain<'_>,
+    ) -> Result<Subject, GrantError> {
         todo!()
     }
 
@@ -126,7 +140,7 @@ pub enum LoadError {
     TagCycle {
         tags: Vec<String>,
     },
-    /// The value of an item breaks the item's validity rules.
+    /// The value of an item breaks the item's validity rules, or a grant still holds a placeholder in its subject.
     InvalidValue {
         key: String,
         reason: String,
@@ -179,6 +193,11 @@ pub enum GrantError {
         key: String,
         error: PinError,
     },
+    /// A placeholder of the subject has no actual value to fill in (for example `team_id: true` on an unsigned process); `field` names the field of a structured value.
+    ValueUnavailable {
+        key: String,
+        field: Option<String>,
+    },
 }
 
 impl fmt::Display for GrantError {
@@ -189,6 +208,19 @@ impl fmt::Display for GrantError {
                 write!(f, "the value of {key:?} is not valid: {reason}")
             }
             Self::Pin { key, error } => write!(f, "cannot pin {key:?}: {error}"),
+            Self::ValueUnavailable { key, field: None } => {
+                write!(
+                    f,
+                    "the process has no value for {key:?}; choose another item"
+                )
+            }
+            Self::ValueUnavailable {
+                key,
+                field: Some(field),
+            } => write!(
+                f,
+                "the process has no value for {field:?} of {key:?}; choose another field"
+            ),
         }
     }
 }
