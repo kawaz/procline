@@ -2,8 +2,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Whether the executable is signed at all.
+/// Whether the executable is signed at all. JSON: `{"state": "unsigned"}` or `{"state": "signed", ...fields of Signature}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum CodeSigning {
     Unsigned,
     Signed(Signature),
@@ -75,8 +76,9 @@ pub struct Signature {
     pub apple_anchored: Option<bool>,
 }
 
-/// Result of validating the signature.
+/// Result of validating the signature. JSON: `"valid"` or `{"invalid": {"reason": "…"}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SignatureValidity {
     Valid,
     Invalid { reason: String },
@@ -293,7 +295,25 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Certificate {
     pub summary: String,
+    /// DER bytes; JSON carries them as base64url without padding.
+    #[serde(with = "base64url")]
     pub der: Vec<u8>,
+}
+
+/// serde adapter: `Vec<u8>` as a base64url (no padding) string, the form every byte string in the JSON takes.
+mod base64url {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        URL_SAFE_NO_PAD.decode(s).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Trust level derived from the code signature.
