@@ -16,7 +16,7 @@
 | `procline` | 入口。core の型と、ビルドターゲットの OS の collect を再公開する |
 | `procline-core` | OS 非依存の型と判定(収集結果の型、強さのクラス、署名の信頼度、無害化、env の方針) |
 | `procline-macos` | macOS での収集 |
-| `procline-acl` | ルールの型、評価、語彙とその登録、ルールの作成 |
+| `procline-acl` | rule と grant の型、評価、語彙とその登録、rule の作成と grant の発行 |
 
 - 名前の由来は process lineage(プロセスとその祖先の列)。収集結果が、対象のプロセスから launchd までの祖先を並べた列であることを表す。
 - crates.io で 4 つの名前はどれも未登録(crates.io の API `/api/v1/crates/<name>` が 404 を返す)。**crate 名 選定判断基準日: 2026-11-08** (選定を変えたらこの日付と根拠も一緒に更新する)

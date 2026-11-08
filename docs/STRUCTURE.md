@@ -11,7 +11,7 @@ procline/
     procline/               # 入口。core の型と、ビルドターゲットの OS の collect を再公開する
     procline-core/          # 収集結果の型、Strength、env の方針と伏せ字、表示用の無害化 (OS 非依存)
     procline-macos/         # macOS での接続相手と祖先の収集
-    procline-acl/           # Vocabulary、subject / tag / rule / preset、評価、ルールの作成
+    procline-acl/           # Vocabulary、subject / tag / rule / grant、評価、ルールの作成
   docs/
     DESIGN-ja.md            # 設計の正本
     DESIGN.md               # DESIGN-ja.md の英訳

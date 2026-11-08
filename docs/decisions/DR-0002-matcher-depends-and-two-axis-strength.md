@@ -25,7 +25,7 @@ register(key, impl, depends: [key...])
 ```
 
 - `key`: 項目の名前。組み込みは接頭辞なし(`signing_id`、`cwd`)か `os.` / `time.`、アプリは `app.`。
-- `impl`: 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型は世代を返す関数、状態型は真偽を返す関数。
+- `impl`: 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))。
 - `depends`: この項目の値が意味を持つために、同じ `match`(寿命型なら同じ `conditions`)に値ごと pin されていなければならない項目の列。
 - 登録先は procline-acl の `Vocabulary`。matcher の項目、scope、条件が同じ器に入る。
 - `depends` に挙げた key が未登録なら、登録の時点でエラー。循環もエラー。

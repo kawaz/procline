@@ -14,7 +14,7 @@
 1. **識別は pid より強いもので**: 接続相手は audit token、祖先はプロセスごとに一意な ID で特定し、pid の再利用で取り違えない。
 2. **表示と照合を同じ型の上に置く**: 画面で見ている情報から、そのままルールを作れるようにする。
 3. **項目ごとに強さを持つ**: 同じ uid のプロセスが偽れる項目(名前、cwd、argv)と、偽れない項目(コード署名)を、項目を登録するときに強さで区別し、弱い条件だけの許可を制限する。
-4. **語彙をアプリが足せる**: matcher の項目、scope(ルールの寿命)、条件は、組み込みの語彙に加えて、アプリ固有のものを同じ形で登録できるようにする。
+4. **語彙をアプリが足せる**: matcher の項目、scope(grant の寿命)、条件は、組み込みの語彙に加えて、アプリ固有のものを同じ形で登録できるようにする。
 
 **範囲**
 
@@ -29,7 +29,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | procline | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
 | procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の信頼度の判定、表示用の無害化、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
 | procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、OS の世代(起動、スリープ、画面ロックなど)の提供 | core、Security framework、AppKit |
-| procline-acl | ルールの型、評価、語彙(matcher の項目、scope、条件)とその登録、ルールの作成 | core |
+| procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、rule の作成と grant の発行 | core |
 
 アプリ(cw、pam-passkey)は、必要なものだけを使います。pam-passkey は収集だけ、cw はすべてです。cw 固有の語彙(`app.unlock` など)は cw 側で定義して、`app.` の名前で procline-acl に登録します。
 
@@ -112,16 +112,16 @@ argv、パス、env の値など、相手が自由に決められる文字列を
 
 ## ACL ルールの形と評価
 
-ACL は、名前を付けて使い回せる4つの部品でできています。どれも単体で意味を持ち、設定ファイルにも承認画面にも同じ形で現れます。
+ACL は4つの部品でできています。subject、tag、rule は名前を付けて使い回せる静的な定義で、署名付きの一覧に入り、設定ファイルにも承認画面にも同じ形で現れます。grant は rule を実際のプロセスに適用して条件を具体値に pin したもので、評価が見るのはこれだけです。
 
 | 部品 | 中身 | 使い道 |
 | --- | --- | --- |
 | subject | 1つのプロセスへの条件。祖先への条件を入れ子で持てる | ルールの対象、タグの定義 |
 | tag | 名前の付いた subject。当たるプロセスにタグが付く | 承認画面での表示、ほかの subject の条件 |
-| rule | 誰が(subject)、何に(targets)、いつまで・どんなときに(conditions)、どうなるか(effect) | 評価 |
-| preset | scope の世代を記録する前のルール | 「いつもの許可」を passkey 1回で適用 |
+| rule | 誰が(subject)、何に(targets)、いつまで・どんなときに(conditions)、どうなるか(effect)。conditions は記号のまま | grant の元。「いつもの許可」を承認画面で選んで passkey 1回で適用 |
+| grant | rule を承認の瞬間の接続相手に適用し、各 condition を具体値に pin したもの | 評価 |
 
-どのルールにも当たらなければ既定の effect(普通は `ask`)になり、拒否は許可より優先します。
+どの grant にも当たらなければ既定の effect(普通は `ask`)になり、拒否は許可より優先します。
 
 ### subject
 
@@ -182,19 +182,21 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 
 ### rule
 
+rule は静的な定義です。conditions は記号のまま書き、世代や時刻はまだ持ちません。subject、tag と同じ署名付きの一覧に入ります。
+
 ```json
 {
-  "id": "r-01",
+  "id": "pj1-claude-usual",
   "effect": "allow",
   "subject": { "tags": ["claude-pj1"] },
   "targets": ["key:k1"],
-  "conditions": ["os.boot", "app.unlock", { "age": "1h" }, "os.not_remote"],
-  "created_from": "approval-ui"
+  "conditions": ["os.boot", "app.unlock", { "age": "1h" }, { "uses": 3 }, "os.not_remote"]
 }
 ```
 
 | 要素 | 中身 |
 | --- | --- |
+| id | rule の名前。grant が `rule_id` で指す |
 | effect | `allow`(無認証で通す)、`deny`(拒否)、`ask`(アプリの再認証を求める) |
 | subject | 上の subject。名前で参照してもよい |
 | targets | ルールが効く対象(キーの glob、タグ)。対象の語彙はアプリが決める。不要なアプリは省略する |
@@ -204,32 +206,48 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 
 | 種類 | 偽になったとき | 例 |
 | --- | --- | --- |
-| 寿命型(scope) | 戻らない。そのルールは永久に失効する | `os.boot`、`app.unlock`、`age`、`until` |
+| 寿命型(scope) | 戻らない。その grant は永久に失効する | `os.boot`、`app.unlock`、`age`、`until`、`uses` |
 | 状態型 | 偽の間だけ当たらない | `os.not_remote`、`os.console_active`、`time.window` |
 
-種類はルールを書く人ではなく語彙が知っているので、承認画面や trace では各条件の横に種類を出し、読む人にどちらの意味かを見せます。保存するときは、寿命型の条件にその時点の世代を記録した形に展開します(`age` は時刻に直す)。
+`uses`(消費型)も寿命型です。一度 0 になれば戻りません。種類はルールを書く人ではなく語彙が知っているので、承認画面や trace では各条件の横に種類を出し、読む人にどちらの意味かを見せます。
 
-### preset
+静的な rule を評価に直接使うことはしません。評価が見るのは grant だけです。一覧の rule のうち寿命型・消費型の condition を持たないものは、読み込み時に自動で永続の grant になります。手書きの deny を「許可する」操作なしに効かせるためです。寿命型・消費型を含む rule は、承認を経てだけ grant になります。
 
-preset は、scope の世代を記録する前のルールに名前を付けたものです。適用すると、その時点の世代を記録し、`age` を時刻に直して、普通のルールとして追加します。
+### grant
+
+grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適用し、各 condition を具体値に pin したものです。grant を作るときに、寿命型の条件にはその時点の世代を記録し、`age` は時刻に直します。
 
 ```json
 {
-  "preset": "pj1-claude-usual",
-  "rule": {
-    "effect": "allow",
-    "subject": { "tags": ["claude-pj1"] },
-    "targets": ["key:k1"],
-    "conditions": ["os.boot", "app.unlock", { "age": "1h" }]
-  }
+  "id": "g-2026-11-08-0001",
+  "rule_id": "pj1-claude-usual",
+  "effect": "allow",
+  "subject": { "tags": ["claude-pj1"] },
+  "targets": ["key:k1"],
+  "conditions": [
+    { "key": "os.boot", "pinned": "7B1E…" },
+    { "key": "app.unlock", "pinned": 12 },
+    { "key": "until", "pinned": "2026-11-08T13:00:00+09:00" },
+    { "key": "uses", "pinned": 3 },
+    { "key": "os.not_remote" }
+  ],
+  "created_at": "2026-11-08T12:00:00+09:00",
+  "created_from": "approval-ui"
 }
 ```
 
-承認画面に preset の一覧を出し、選んで passkey を1回通せば、いつもの許可をその場で作れます。preset の追加と変更も、ルールと同じ署名付きの一覧に入れます。
+- `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には無い)です。`age` は grant を作るときに `until` の pin 値に直します(`key` も `until` にする)。
+- depends の規則は grant にも当てはまります(`os.wake` の pin があるなら `os.boot` の pin もある)。
+- `id` は `Policy::grant` が一意に付けます(上の `g-…` は例示)。
+- grant は自己完結です。effect、targets、pin 済みの conditions、subject の中身を自分で持ち、元の rule の id を `rule_id` として持ちます(表示と掃除に使う)。rule が後で変わっても、既存の grant は変わりません。
+- subject の中のタグ名・subject 名の参照は、名前のまま残します。タグの定義は署名付きの一覧にあり、その更新は意図した変更なので、既存の grant にも及んでよいためです。
+- 寿命型・消費型の condition を持たない rule から作った grant は pin 値が無く、失効しません(永続の grant)。deny は普通こちらです。
+
+保存した rule がそのまま再適用の対象になります。承認画面に rule の一覧を出し、選んで passkey を1回通せば grant ができます。承認画面でその場で条件を選んで許可する流れは「rule を組み立て、すぐ grant にする」の 2 段です。rule を一覧に保存するかは利用者が選び、保存しなければ使い捨ての rule になります。
 
 ### 名前と参照
 
-subject、tag、preset、条件の組は、どれも名前を付けて一覧に置き、ほかから名前で参照できます。承認画面で作った subject を名前付きで保存すれば、次からはタグの定義にも別のルールにも使い回せます。
+subject、tag、rule、条件の組は、どれも名前を付けて一覧に置き、ほかから名前で参照できます。承認画面で作った subject を名前付きで保存すれば、次からはタグの定義にも別のルールにも使い回せます。
 
 参照は文字列で書きます(`{"ref": "…"}` のような包みは使いません)。
 
@@ -237,7 +255,7 @@ subject、tag、preset、条件の組は、どれも名前を付けて一覧に�
 
 - `tags` の中はタグ名だけ。
 - subject の位置(ルールの `subject`、`ancestors` の `any` などの中身)は、文字列なら subject 名、オブジェクトならその場の定義。型で区別できる。
-- preset は適用するときに名前で指すだけで、一覧の中からは参照されない。
+- rule は適用するときに名前で指すだけで、一覧の中からは参照されない。
 - `conditions` の要素は、文字列も `{"age": "1h"}` のような引数付きも、どちらも語彙の名前。
 
 包みを入れても、書く量と読む手間が増えるだけで、曖昧さは減りません。この前提が崩れる(同じ場所に種類の違う名前が入り得る形を足す)ときにだけ、見直します。
@@ -266,7 +284,7 @@ register(key, impl, depends: [key...])
 | 引数 | 中身 |
 | --- | --- |
 | key | 項目の名前。組み込みは接頭辞なし(`signing_id`、`cwd`)か `os.` / `time.`、アプリは `app.`(名前空間の規則は「アプリが足す語彙」のとおり) |
-| impl | 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型は世代を返す関数、状態型は真偽を返す関数 |
+| impl | 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型と状態型は condition の trait(observe / pin / check / advance、「条件の実装」) |
 | depends | この項目の値が意味を持つために、同じ `match`(寿命型なら同じ `conditions`)に値ごと pin されていなければならない項目の列 |
 
 登録先は procline-acl の `Vocabulary` で、matcher の項目、scope、条件が同じ器に入ります。`depends` に挙げた key が登録されていなければ、登録の時点でエラーにします。depends の循環もエラーです。
@@ -311,39 +329,47 @@ register(key, impl, depends: [key...])
 
 ### 評価
 
-1. scope が切れたルールを除く(切れたルールは掃除の対象にする)。
-2. targets が対象に当たらないルールを除く。
-3. subject を照合する(match の項目は depends の祖先も含めてすべて照合する)。`deny` が1つでも当たれば拒否。
-4. `allow` が当たれば許可。
+評価の対象は grant です。
+
+1. 失効した grant を除く(寿命型の `check` が偽のもの。掃除の対象にする)。
+2. targets が対象に当たらない grant を除く。
+3. 各 grant の subject を照合し(match の項目は depends の祖先も含めてすべて照合する)、状態型の `check` を取る。`deny` が1つでも当たれば拒否。
+4. `allow` が当たれば許可。当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順。他の grant で通るのに、限りある `uses` を減らさないため。
 5. `ask` が当たれば、または何も当たらなければ、既定の effect。
+6. 採用された grant にだけ、各 condition の `advance` をかける。1 つでも新しい pin 値を返せば、pin 値を差し替えた新しい grant を作る(grant は immutable)。
 
-評価の結果は effect だけでなく、どのルールが効いたかと、各条件がどの項目に一致したか(trace)を返します。画面の「なぜ通ったか、なぜ聞かれたか」に使います。
+評価の結果(`Decision`)は effect だけでなく、採用された grant の id と、各条件がどの項目に一致したか(trace)を返します。画面の「なぜ通ったか、なぜ聞かれたか」に使います。手順 6 で grant が変わったときは、その新版も返します(`updated_grant`)。
 
-## scope: ルールの寿命
+評価の入口は 2 つです。`evaluate` は手順 6 まで行い、メモリ上の grant も新版に差し替えます。`explain` は trace の表示用で、`advance` をかけず、`updated_grant` は常に空です。
 
-寿命型の条件(以下 scope)は「今の世代(epoch)を返す関数」で定義します。ルールを作るときにその時点の世代を記録し、評価のたびに今の世代と比べて、違えばそのルールは永久に失効します。「解錠している間」ではなく「この解錠の回の間」になるので、一度ロックして解錠し直してもルールが生き返りません。
+- アプリは `updated_grant` を署名して永続化し、書けてから値を渡します。書き込みに失敗してもメモリ上は減った側なので、安全側に倒れます。
+- `uses` が 0 になった grant は、次の評価で手順 1 により失効扱いになります。削除は掃除(アプリ)の責務です。
 
-この形にすると、どの scope も「一度終われば戻らない」ことが自動的に保証され、アプリが足すのも「世代を返す関数」1つで済みます。世代を判定できない(関数が値を返せない)ときは失効とみなします。安全側に倒れるためです。
+## scope: grant の寿命
 
-scope は複数並べられ、すべてが生きている間だけルールが効きます(AND)。「24時間、ただし再起動まで」のように組み合わせます。
+寿命型の条件(以下 scope)は、grant を作るときにその時点の世代(epoch)を pin し、評価のたびに今の世代と pin 値を比べて、違えばその grant は永久に失効します。「解錠している間」ではなく「この解錠の回の間」になるので、一度ロックして解錠し直しても grant が生き返りません。
+
+この形にすると、どの scope も「一度終われば戻らない」ことが自動的に保証され、アプリが足すのも condition の trait の実装 1 つで済みます(「条件の実装」)。grant を作るときに今の世代を観測できなければ grant を作れず(`PinError::Unobservable`)、評価のときに観測できなければ `check` が偽になって失効します。どちらも安全側に倒れるためです。
+
+scope は複数並べられ、すべてが生きている間だけ grant が効きます(AND)。「24時間、ただし再起動まで」のように組み合わせます。
 
 ### 組み込みの語彙
 
 | 名前 | 終わる時点 | 世代の取り方(macOS) |
 | --- | --- | --- |
 | `until` | 指定の時刻 | 時計(世代ではなく時刻で判定) |
-| `age` | 作成からの経過時間 | 作成時に `until` に変換して保存 |
-| `uses` | N 回使ったら | ルールごとの回数(世代ではなくカウンタ) |
+| `age` | grant の作成からの経過時間 | grant を作るときに `until` の pin 値に直す |
+| `uses` | N 回採用されたら | 残り回数を pin し、採用されるたびに 1 減る(世代ではなくカウンタ) |
 | `os.boot` | 再起動 | `kern.bootsessionuuid` |
 | `os.wake` | スリープ、ハイバネーション | IOKit の電源通知で数える起床の回数 |
 | `os.screen_unlock` | 画面ロック、スクリーンセーバー | 画面のロック解除の通知で数える回数 |
-| `os.login_session` | ログアウト、ssh の切断 | audit token の asid(作成時の接続相手のもの) |
+| `os.login_session` | ログアウト、ssh の切断 | audit token の asid(grant を作るときの接続相手のもの) |
 | `os.console_user` | ユーザーの切り替え | コンソールユーザーの変化で数える回数 |
 | `process` | 指定プロセスの終了 | 接続相手または祖先の unique\_id。「このターミナルのタブのシェルが生きている間」が書ける |
 
-通知で数える世代(`os.wake`、`os.screen_unlock`、`os.console_user`)は、デーモンの起動中しか数えられません。デーモンが再起動したら、それらに紐づくルールはすべて失効させます(間に何が起きたか分からないため)。世代の値にはデーモンの起動 ID を含めれば、これも自動的に守られます。
+通知で数える世代(`os.wake`、`os.screen_unlock`、`os.console_user`)は、デーモンの起動中しか数えられません。デーモンが再起動したら、それらを pin した grant はすべて失効します(間に何が起きたか分からないため)。起動時に読み直した grant では、これらの世代の観測値が無いか、pinned と observed が一致しないので `check` が偽になり、これも自動的に守られます(「保存」)。
 
-`os.wake` と `os.screen_unlock` は `os.boot` に依存し、ルールに置くときは `os.boot` も置きます(「項目の登録と depends」)。
+`os.wake` と `os.screen_unlock` は `os.boot` に依存し、rule に置くときは `os.boot` も置きます(「項目の登録と depends」)。
 
 ### アプリが足す語彙
 
@@ -352,13 +378,13 @@ scope は複数並べられ、すべてが生きている間だけルールが�
 - `app.unlock`: vault を開いた回。手動ロックや vkey\_ttl 切れで終わる。
 - `app.passphrase`: P を発行した回。Sealed になると終わる。
 
-登録されていない名前を持つルールは、読み込み時にエラーにします(黙って無視すると、意図より長く効くルールになるため)。
+登録されていない名前を持つルールは、読み込み時にエラーにします(黙って無視すると、そこから作る grant が意図より長く効くため)。
 
 ## 条件、ルールの作成、保存
 
 ### 条件
 
-状態型の条件は、評価のたびに真偽が変わり得るものです。scope と違い、偽になってもルールは失効せず、そのときだけ当たらなくなります。scope と同じく、組み込みに加えてアプリが `app.` の名前で足せます。
+状態型の条件は、評価のたびに真偽が変わり得るものです。scope と違い、偽になっても grant は失効せず、そのときだけ当たらなくなります。scope と同じく、組み込みに加えてアプリが `app.` の名前で足せます。
 
 | 名前 | 真になるとき |
 | --- | --- |
@@ -369,9 +395,50 @@ scope は複数並べられ、すべてが生きている間だけルールが�
 
 「自宅の Wi-Fi にいる間」のような場所の条件は、アプリが必要に応じて足します。
 
+### 条件の実装: observe / pin / check / advance
+
+寿命型(scope)、消費型(`uses`)、状態型は、同じ trait の関数で表します。外の状態(世代、画面ロックの状態など)を読むのは `observe` だけで、`pin` / `check` / `advance` は渡された値から結果を決めます。condition が触るのは自分の pin 値だけで、grant 全体は受け取りません。
+
+```rust
+/// この condition の観測値。EvalContext::capture が評価の最初に 1 回だけ観測し、評価の途中で変わらない
+pub struct Observed<'a> {
+    pub now: SystemTime,
+    pub value: Option<&'a Value>,   // observe() の結果。無ければ None
+}
+
+trait Condition {
+    fn kind(&self) -> ConditionKind;                                   // Lifetime / State
+    /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition は None
+    fn observe(&self) -> Option<Value>;
+    /// grant を作るときに 1 回。pin 値を返す。状態型は Ok(None)。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
+    fn pin(&self, args: Option<&Value>, obs: &Observed) -> Result<Option<Value>, PinError>;
+    /// 判定。副作用なし
+    fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
+    /// 採用された grant にだけ呼ぶ。pin 値の新版。None なら変化なし
+    fn advance(&self, pinned: Option<&Value>) -> Option<Value>;
+}
+
+enum PinError { Unobservable, InvalidArgs { reason: String } }
+```
+
+| 項目 | observe | pin | check | advance |
+| --- | --- | --- | --- | --- |
+| 世代(`os.boot`、`os.wake`、`app.unlock` …) | 今の世代 | observed の値(無ければ Err) | pinned == observed | None |
+| `until` | None | args の時刻 | obs.now < pinned | None |
+| `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
+| `uses` | None | args の N | pinned > 0 | pinned − 1 |
+| 状態型(`os.console_active` 等) | 今の状態(観測するものがあれば) | None | observed / args / chain を見る | None |
+
+- `ConditionKind` は Lifetime / State の 2 値です。世代、`until`、`age`、`uses` は Lifetime で、`uses` も一度 0 になれば戻りません。
+- `EvalContext` は `now` と「key → `observe()` の結果」を持ちます。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡します(condition は自分の key を知らない)。
+- 状態型の `check` には `args` が届くので、`time.window` の時間帯のような引数を判定に使えます。
+
 ### ルールの作成と強さの制約
 
-ルールは、収集した情報から項目を選んで作ります(RuleBuilder)。承認画面で「このプロセスの署名で」「1つ上の祖先の Team ID で」と選ぶと、その値がそのまま条件になります。depends のある項目を選ぶと、根までの祖先も収集結果の値で埋まります(「項目の登録と depends」)。
+ルールは、収集した情報から項目を選んで作ります(RuleBuilder)。承認画面で「このプロセスの署名で」「1つ上の祖先の Team ID で」と選ぶと、その値がそのまま条件になります。depends のある項目を選ぶと、根までの祖先も収集結果の値で埋まります(「項目の登録と depends」)。`SubjectBuilder` が subject を、`RuleBuilder` が静的な rule を作ります。
+
+- `RuleBuilder::build()` は静的な `Rule` を返し、世代は記録しません。検査するのは depends の欠けと、強さ(クラス)と scope の制約(下記)です。制約は寿命型・消費型の condition の有無で判定します(pin 値はまだ無い)。
+- pin は `Policy::grant(rule, ctx)` が行います。pin した grant をメモリ上の Policy にも入れて返します(署名と保存はアプリ)。`pin` が失敗した(`PinError`: 観測値が無い、引数が不正)とき、depends が欠けているときは `GrantError` です。
 
 ルールの強さは、subject のうち対象プロセス自身への条件から決まります(決定の記録: [DR-0003](decisions/DR-0003-rule-strength-from-own-match.md))。
 
@@ -388,15 +455,29 @@ build 時に次の制約を検査し、満たさなければエラーにしま�
 | 中(実行パス、責任プロセス) | `until` が 7 日以内、または世代の scope を含む |
 | 弱(名前、cwd、argv、env) | 世代の scope(`process`、`os.login_session`、`app.unlock` など)を含む |
 
+`uses` は制約の判定では世代の scope と同じ扱いです(寿命型で、一度切れれば戻らないため)。
+
 `deny` には制約をかけません。弱い条件の拒否も、少なくとも安全側には働くからです。画面では、弱い条件を選んだ時点で「同じユーザーの他のプロセスも名乗れる条件です」と表示します。
 
 ### 保存
 
-ルールの一覧は JSON で、保存と保護はアプリの責務です。crate は「一覧のバイト列と署名を受け取り、検証してから読む」ための入口を用意します。cw は一覧に D 側の鍵で署名し、同じ uid のプロセスが勝手に許可ルールを書き足せないようにします(PasskeyRegistry と同じ扱い)。
+保存形は「一覧 1 本」と「grant 1 件ずつ」の 2 系統です。どちらも JSON で、保存と署名はアプリの責務です。
+
+**一覧**(subject、tag、rule): crate は「一覧のバイト列と署名を受け取り、検証してから読む」ための入口(`Policy::load_verified`)を用意します。cw は一覧に D 側の鍵で署名し、同じ uid のプロセスが勝手に許可ルールを書き足せないようにします(PasskeyRegistry と同じ扱い)。
+
+**grant**: grant はメモリ上に持ち、デーモンの意図しない終了に備えて、作成時と更新時に 1 件ずつ署名して永続化し、起動時に全部読み直します。crate は `Grant` の JSON の形と、2 つの入口を持ちます。
+
+- `Policy::load_grant(bytes, sig, &verifier)`: 1 件のバイト列と署名を受け取り、検証してから `Grant` を返す。一覧と同じ検査(未登録の項目、depends の欠け・矛盾)をし、落ちればエラー。
+- `Policy::add_grant(grant)`: 読み直した grant をメモリ上の Policy に入れる。
+
+
+- 1 件ずつなので、`uses` の更新の書き込みは軽く済みます(実測は実装時のベンチで確かめる)。
+- 起動時に読み直した grant のうち、デーモンの起動中しか数えられない世代(`os.wake` 等)を pin したものは、観測値が無いか、pinned と observed が一致しないので `check` が偽になり失効します。「デーモン再起動で失効」は自動的に守られます。
+- 永続化先のディレクトリは、評価するデーモン以外(同じ uid の他プロセス)から書けない場所に置きます。書けると、使い切る前の grant ファイルを差し戻して `uses` を戻せるためです。置き場はアプリが決めます。
 
 ## API の骨格
 
-収集、評価、ルールの作成の3つが入口です。語彙の拡張は、matcher の項目、scope、条件を同じ `register` で登録します。
+収集、評価、rule の作成、grant の発行が入口です。語彙の拡張は、matcher の項目、scope、条件を同じ `register` で登録します。
 
 ```rust
 // 収集(procline-macos)
@@ -417,23 +498,38 @@ struct Depth(u8);                                    // 深さ(連鎖の根か�
 let mut vocab = Vocabulary::builtin();               // matcher の項目(signature_valid / team_id / signing_id / cwd など)、os.* の scope と条件、until / age / uses / process
 // matcher の項目、寿命型、状態型を同じ register で足す。depends の key が未登録、または循環ならエラー
 vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // 照合する関数。根(depends なし)は Item::root_matcher(key, class, ...) でクラスを与える
-vocab.register(Item::epoch("app.unlock", depends: [], CwUnlockEpoch::new(&vault)))?;  // 世代を返す
-// 状態型も Item::condition(...) で同じ register に渡す(真偽を返す)
+vocab.register(Item::condition("app.unlock", depends: [], CwUnlock::new(&vault)))?;  // Condition を実装した値(寿命型)
+// 状態型も同じ Item::condition(...) で register に渡す。寿命型か状態型かは Condition::kind が返す
 
-trait EpochProvider {
-    fn current(&self, ctx: &EvalContext) -> Option<Epoch>;
-}
 trait Condition {
-    fn eval(&self, chain: &ProcessChain, args: &Value, ctx: &EvalContext) -> bool;
+    fn kind(&self) -> ConditionKind;                 // Lifetime / State
+    fn observe(&self) -> Option<Value>;              // 評価の最初に EvalContext::capture が 1 回呼ぶ
+    fn pin(&self, args: Option<&Value>, obs: &Observed) -> Result<Option<Value>, PinError>;
+    fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
+    fn advance(&self, pinned: Option<&Value>) -> Option<Value>;
 }
 
-// 一覧(subject、tag、rule、preset)の読み込みと評価
-let policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // 未登録の項目、タグの循環、depends の欠け・矛盾はエラー
-let tagged = policy.tag(&chain);                     // 各プロセスに付いたタグ(画面の表示にも使う)
-let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);
-// decision.effect / decision.matched_rule / decision.trace
+// 一覧(subject、tag、rule)の読み込みと、保存した grant の読み直し
+let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // 未登録の項目、タグの循環、depends の欠け・矛盾はエラー
+let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // grant 1 件を検証し、語彙と照合する(未登録の項目、depends の欠け・矛盾はエラー)
+policy.add_grant(saved);                             // メモリ上の Policy に入れる
 
-// 承認画面からルールを作る
+// 評価
+let tagged = policy.tag(&chain);                     // 各プロセスに付いたタグ(画面の表示にも使う)
+let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // 採用された grant に advance をかける
+if let Some(grant) = &decision.updated_grant {
+    // 署名して永続化し、書けてから値を渡す
+}
+let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // advance なし(trace の表示用)
+
+pub struct Decision {
+    pub effect: Effect,
+    pub grant_id: Option<String>,        // 採用された grant。既定の effect なら None
+    pub trace: Trace,
+    pub updated_grant: Option<Grant>,    // advance で変わった grant の新版。explain では常に None
+}
+
+// 承認画面から rule を作る
 let subject = SubjectBuilder::from(&tagged, 0)       // 対象プロセスの項目から選ぶ(tagged が語彙への参照を持つ)
     .pin("signing_id")                               // 祖先の team_id / signature_valid も収集結果の値で入る
     .tag("claude-pj1")
@@ -441,16 +537,17 @@ let subject = SubjectBuilder::from(&tagged, 0)       // 対象プロセスの項
 let rule = RuleBuilder::new(subject, &vocab)
     .targets(["key:k1"])
     .condition(ConditionUse::with_args("age", json!("1h")))
-    .condition(ConditionUse::named("os.boot"))      // 寿命型なので今の世代をここで記録
+    .condition(ConditionUse::named("os.boot"))      // 記号のまま。世代は grant を作るときに pin する
     .allow()
-    .build()?;                                       // depends の欠けと、強さ(クラス)と scope の制約を検査
+    .build()?;                                       // 静的な Rule。depends の欠けと、強さ(クラス)と scope の制約を検査
 
-// preset を適用する(世代の記録と age の時刻化をして普通のルールにする)
-let rule = policy.instantiate_preset("pj1-claude-usual", &ctx)?;
+// rule を適用して grant を作る(各 condition の pin。保存した rule も同じ入口)
+let grant = policy.grant(&rule, &ctx)?;              // pin して id を付け、メモリ上の Policy にも入れて返す。GrantError: pin の失敗(Unobservable / InvalidArgs)、depends の欠け
+// アプリは grant を署名して永続化する
 ```
 
-- `EvalContext` は現在時刻と世代の値を評価の開始時に一度だけ取り、評価の途中で値が変わらないようにします。テストでは全部を差し替えられます。
-- `uses` の回数は評価では増やさず、アプリが「実際に値を渡した」ときに `policy.record_use(rule_id)` で増やします。
+- `EvalContext::capture` は評価の開始時に現在時刻と各 condition の `observe()` の結果を一度だけ取り、評価の途中で値が変わらないようにします。Policy はそこから condition ごとに `Observed` を組んで `pin` と `check` に渡します。テストでは全部を差し替えられます。
+- `uses` は `evaluate` の中で、採用された grant の `advance` で減ります。アプリは `decision.updated_grant` を署名して永続化し、書けてから値を渡します。
 
 ---
 

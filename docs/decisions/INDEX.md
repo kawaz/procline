@@ -17,3 +17,4 @@ Status は各 DR ファイルの `Status:` 行が正本。ここに載るのは�
 | [DR-0001](DR-0001-crate-naming.md) | N/A | crate 名を procline / procline-core / procline-macos / procline-acl にし、入口は procline |
 | [DR-0002](DR-0002-matcher-depends-and-two-axis-strength.md) | ⬜ 未実装 | matcher の項目を depends 付きで登録し、depends は同じ match に値ごと pin する。強さはクラスと深さの 2 軸 |
 | [DR-0003](DR-0003-rule-strength-from-own-match.md) | ⬜ 未実装 | ルールの強さは対象プロセス自身への条件のクラスで決め、祖先への条件は数えない |
+| [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) | ⬜ 未実装 | 静的な rule と pin 済みの grant を分け、condition を observe / pin / check / advance で表す。評価は grant だけを見て、採用された grant だけを advance し、grant は 1 件ずつ永続化する |
