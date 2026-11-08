@@ -14,15 +14,16 @@
 
 | rule に書く値 | 意味 | 例 |
 | --- | --- | --- |
-| 文字列(項目によって glob / 正規表現 / 数値範囲) | 手書きの具体値。そのまま照合する | `{"binary": {"team_id": "MYTEAM", "signing_id": "myapp"}}` = 自作アプリからは常に allow |
+| 具体値(文字列か数値。glob / 正規表現 / 数値範囲は `{"glob": …}` / `{"regex": …}` / `{"min": …, "max": …}`) | 手書きの具体値。そのまま照合する | `{"binary": {"team_id": "MYTEAM", "signing_id": "myapp"}}` = 自作アプリからは常に allow |
 | `true` | placeholder。grant を作るときに、その subject が当たったプロセスの実値を pin する | `{"binary": {"team_id": true, "signing_id": true}}` = 承認したそのアプリに固定 |
 
 - 構造を持つ値では field 単位で混ぜられる(`{"binary": {"signing_id": "com.googlecode.iterm2", "team_id": true}}` = signing identifier で見つけ、その Team ID を pin)。`process` は `true`(個体を pin)か具体値の複合。単純項目(`cwd`、`uid`、`path` …)も `true` で実値を完全一致で pin する。
-- grant の subject は placeholder を全部具体値に解決済み。grant に `true` が残っていれば、loader はエラーにする(`LoadError::InvalidValue`)。
-- 解決は `Policy::grant(&mut self, rule: &Rule, tagged: &TaggedChain, ctx: &EvalContext) -> Result<Grant, GrantError>` が行う。`match` の placeholder は対象プロセス(列の先頭)の値、`ancestors` の要素の placeholder はその要素が当たった祖先の値で埋める。値が無ければ(署名が無いのに `team_id: true` 等)`GrantError::ValueUnavailable { key, field: Option<String> }`。
+- placeholder を書けるのは rule の inline の subject だけ。タグの定義、名前付きの subject、自動で永続の grant になる rule に `true` があれば、loader はエラーにする(`LoadError::InvalidValue`、[DR-0008](DR-0008-evaluation-semantics.md))。
+- grant の subject は inline の `Subject` で、placeholder を全部具体値に解決済み(名前付きの subject は展開する)。grant に `true` が残っていれば、loader はエラーにする(`LoadError::InvalidValue`)。
+- 解決は `Policy::grant(&self, rule: &Rule, tagged: &TaggedChain, ctx: &EvalContext) -> Result<Grant, GrantError>` が行う(grant を返すだけで、メモリ上の Policy には入れない。[DR-0008](DR-0008-evaluation-semantics.md))。各 placeholder は項目の `Matcher::resolve` が実値に置き換える。`match` の placeholder は対象プロセス(列の先頭)の値、`ancestors` の要素の placeholder はその要素が当たった祖先の値で埋める。値が無ければ(署名が無いのに `team_id: true` 等)`GrantError::ValueUnavailable { key, field: Option<String> }`(項目の `ResolveError::ValueUnavailable { field }` に key を付けたもの)。
 - 承認画面が passkey の前に「何が pin されるか」を見せられるよう、`Policy::resolve_subject(&self, subject: &SubjectRef, tagged: &TaggedChain) -> Result<Subject, GrantError>` を公開する。名前参照は一覧の subject に解決してから埋める (無ければ `GrantError::UnknownSubject`)。`grant` も内部でこれを使う。
-- 強さのクラスは placeholder でも判定できる(どの field かは分かるため)。`Matcher::class(value)` は placeholder 入りの値も受ける。
-- 「いつもの許可」は 1 つの rule で済む。`RuleBuilder` / `SubjectBuilder` は収集結果を受け取らず、`PinSpec` から `true` 入りの subject を組む。
+- 強さのクラスは placeholder でも判定できる(どの field かは分かるため)。`Matcher::class(value, process)` は placeholder 入りの値も受ける。
+- 「いつもの許可」は 1 つの rule で済む。`RuleBuilder`(`Policy::rule_builder(id, subject)` から作る)/ `SubjectBuilder` は収集結果を受け取らず、`PinSpec` から `true` 入りの subject を組む。
 
 型の形:
 
@@ -30,7 +31,7 @@
 - procline-acl: `MatchValue::Pin`(単純項目の placeholder)、`MatchValue::Process(Pinnable<ProcessIdentity>)`。
 - `SubjectBuilder::new()` の `pin(key, PinSpec)` / `exact(key, MatchValue)` / `tag(name)` / `ancestor(AncestorMatch)` / `include_self()` / `build() -> Result<Subject, BuildError>`。祖先の要素は `AncestorBuilder` の `pin` / `exact` / `tag` / `build() -> Result<AncestorMatch, BuildError>` で組む。
 - 同じ key への `pin` と `exact` は、`binary` では field 単位で 1 つの値に合成する(同じ field が両方にあれば `BuildError::Conflict`)。単純項目と `process` は 2 回目で `BuildError::Conflict`。
-- `SubjectBuilder::build` / `AncestorBuilder::build` が検査するのは値の妥当性(`binary` の規則、空)だけ。語彙との照合(未登録の項目)は `RuleBuilder::build` の責務。
+- `SubjectBuilder::build` / `AncestorBuilder::build` が検査するのは値の妥当性(`binary` の規則、空)だけ。語彙との照合(未登録の項目、`Matcher::validate`)は `RuleBuilder::build` の責務。
 - 真偽値の完全一致は持たない。JSON の `true` は placeholder 専用で、真偽値の項目は今は無く、要るときは文字列で表す。
 
 ### `ancestors`: subject の順序付きの列(部分列の一致)
@@ -80,3 +81,4 @@
 - [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md): rule と grant の分離、`Policy::grant`
 - [DR-0005](DR-0005-process-identity-as-one-item.md): `process` の値の形
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): 構造を持つ値の座(`binary` の field)と `Matcher::class`
+- [DR-0008](DR-0008-evaluation-semantics.md): placeholder を書ける場所と、grant をメモリに入れる順

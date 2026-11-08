@@ -10,7 +10,7 @@ ACL の条件に使う項目には、単独では意味を持たないものが�
 - signing identifier は開発者が自由に決める値で、ad-hoc 署名でも名乗れる。Team ID と組になって初めて「誰のどのコードか」を指す。
 - bundle ID は Info.plist から読むので誰でも書ける。署名者と signing identifier の組に乗せないと何も保証しない。
 - cdhash や Team ID は、署名の検証が通っていなければ何を指すか保証がない。
-- 起床の回数や画面のロック解除の回数は、起動セッションの中でだけ意味を持つ。
+- 起床や画面のロック解除の世代は、起動セッションの中でだけ意味を持つ。
 
 これらを別々の key の項目にして key の間に依存を宣言すると、依存先が同じ match に揃っているかの検査(欠け・矛盾・重複)が読み込みに要り、「署名の検証が通った」だけを表す人工の項目も要る。ところが組み込みで依存が要る組は、どれも「同じ座(key)に、構造を持つ値がある」だけだった。プロセスのコードの同一性を表す値、OS の世代の段階、プロセスの個体識別である。
 
@@ -27,7 +27,7 @@ register(key, impl)
 ```
 
 - `key`: 項目の名前(名前空間は下記)。
-- `impl`: 項目の種類ごとの実装。matcher の項目は `Matcher` trait(照合する `matches` と、値からクラスを決める `class(&self, value) -> Strength`)を実装して `Item::matcher(key, impl)` で登録する。クラスが値によらず一定の項目は、クラスを明示してクロージャで `Item::matcher_fn(key, class, f)` と登録できる。寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))で、`Item::condition(key, impl)`。
+- `impl`: 項目の種類ごとの実装。matcher の項目は `Matcher` trait(照合する `matches`、値からクラスを決める `class(&self, value, process: Option<&ProcessInfo>) -> Strength`(`process` で決まる項目は、無ければ弱い側。[DR-0009](DR-0009-strength-class-as-specificity.md))、値の妥当性を検査する `validate`、placeholder を実値に置き換える `resolve`)を実装して `Item::matcher(key, impl)` で登録する。クラスが値によらず一定の項目は、クラスを明示してクロージャで `Item::matcher_fn(key, class, f)` と登録できる。寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))で、`Item::condition(key, impl)`。
 - 登録先は procline-acl の `Vocabulary`。matcher の項目、scope、条件が同じ器に入る。
 - 登録時の検査は key の重複と名前空間だけ。
 
@@ -43,9 +43,9 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 
 | 座 | 値の形 | 照合 | クラス |
 | --- | --- | --- | --- |
-| `process` | 取れた識別子を全部 pin する複合(`{unique_id?, pid, start_time?}`、[DR-0005](DR-0005-process-identity-as-one-item.md)) | 両側に揃う最強の識別子 1 つで比べる | Strong |
+| `process` | 取れた識別子と boot UUID を全部 pin する複合(`{boot_uuid, unique_id?, pid, start_time?}`、[DR-0005](DR-0005-process-identity-as-one-item.md)) | 両側に揃う識別子を全部比べ、全部一致したときだけ当たる([DR-0009](DR-0009-strength-class-as-specificity.md)) | Strong |
 | `binary` | 任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` | 値にある field を全部それぞれ検証する(AND)。署名由来の field(`team_id` / `signing_id` / `bundle_id` / `cdhash`)は署名の検証が通ったときだけ一致。どの field も完全一致 | 値にある field の最強(署名由来の field があれば Strong、`digest` だけなら Medium) |
-| `os.session` | 段階の enum `boot` < `awake` < `unlocked`。pin 値は選んだ段階以下の世代の複合(`{"boot": "7B1E…", "awake": 12, "unlocked": 3}`) | 段階以下の世代が全部一致 | Strong(世代は偽れない) |
+| `os.session` | 段階の enum `boot` < `awake` < `unlocked`。pin 値は選んだ段階以下の世代の複合(`{"boot": "7B1E…", "awake": 起床の時刻, "unlocked": 解錠の時刻}`) | 段階以下の世代が全部一致 | なし(条件の項目なので、ルールの強さに数えない) |
 
 `binary` の field の値は文字列か placeholder の `true`(grant ではどれも文字列。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id` / `signing_id` / `bundle_id` は署名や Info.plist の値そのまま)。真偽値を値に取る field は無い。
 
@@ -59,20 +59,19 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 - placeholder の field も「ある」に数える。
 - builder はこの規則を満たすように field を揃える(利用者が `signing_id` を選べば `team_id` も入る)。読み込みは満たさない値をエラーにする。
 - `cdhash` は、CodeDirectory が identifier・Team ID・Info.plist のハッシュを含むので、下の field の値を全部決める最も強い field(SDK の `cs_blobs.h`: `CS_SUPPORTSTEAMID`、`teamOffset`、`CSSLOT_INFOSLOT`)。
-- `digest` は実行パス上のファイルの内容のハッシュで、床として置く。macOS では `proc_pidpath` のパスを読むので、exec の後にファイルを置き換えられると稼働中の像と食い違う(クラスは実行パスと同じ Medium)。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い。署名由来の field が取れる環境・アプリでは `digest` を使わず、UI は署名由来の field を優先して出す。
+- `digest` は実行パス上のファイルの内容のハッシュで、床として置く。macOS では `proc_pidpath` のパスを読むので、exec の後にファイルを置き換えられると稼働中の像と食い違う(クラスは Medium)。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い。署名由来の field が取れる環境・アプリでは `digest` を使わず、UI は署名由来の field を優先して出す。
 - 署名が有効なことは署名由来の field の matcher の性質なので、それだけを表す項目は持たない。
 
 `os.session` の世代の定義:
 
 - 段階の名前は期間の名前。`boot` は起動してから再起動まで、`awake` は起床してからスリープ・ハイバネーションまで、`unlocked` は解錠してから画面ロック(手動、離席の自動ロック、スクリーンセーバー)まで。
 - `awake` と `unlocked` は厳密には入れ子でない(スリープせずにロックできる)が、段階 N はそれ以下の世代を全部 pin するので、`unlocked` を選ぶとスリープでも失効する。これは仕様。
-- observe は 3 つの段階の世代を 1 つの複合値 `{"boot": uuid, "awake": 回数, "unlocked": 回数}` で返し、その期間の中にいる段階だけを含める(期間の外、つまりロック中やスリープ中の段階は欠く。`boot` は `kern.bootsessionuuid`、他は開始の回数)。pin は引数の段階以下の field を写し、`check` は pinned にある field が全部 observed にあって一致するときだけ真。期間の外では field が欠けるので偽になり、次に期間が始まれば回数が変わるので永久に失効する。「解錠の回数」だけを世代にすると、ロック中も回数が変わらず通ってしまうため。
+- observe は 3 つの段階の世代を 1 つの複合値 `{"boot": uuid, "awake": 起床の時刻, "unlocked": 解錠の時刻}` で返し、その期間の中にいる段階だけを含める(期間の外、つまりロック中やスリープ中の段階は欠く。`boot` は `kern.bootsessionuuid`、`awake` は直近の起床の時刻(`kern.waketime`)、`unlocked` は直近の解錠の時刻。世代を事象固有の値にするのは [DR-0009](DR-0009-strength-class-as-specificity.md))。pin は引数の段階以下の field を写し、`check` は pinned にある field が全部 observed にあって一致するときだけ真。期間の外では field が欠けるので偽になって失効が確定し([DR-0008](DR-0008-evaluation-semantics.md))、次に期間が始まっても時刻が変わるので一致しない。「解錠の時刻」だけを世代にすると、ロック中も値が変わらず通ってしまうため。
 - ユーザーの切り替え(`os.console_user`)とログインセッション(`os.login_session`、asid)は `os.session` の段階に入れず、独立の座のまま。省電力でモニタが消えるまでの期間は持たない(ロックもスリープも伴わずに起き、マルチモニタの扱いも要るので、欲しいアプリが `app.` で足す)。
-- 通知で数える世代(`awake`、`unlocked`、`os.console_user`)はデーモンの起動中しか数えられない。再起動後は観測値が無いか一致しないので `check` が偽([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))。
 
 ### 名前空間
 
-- 接頭辞なし: 対象プロセス自身の属性(`process`、`binary`、`uid`、`gid`、`path`、`cwd`、`argv`、`env`、`name`、`tty`、`responsible` …)。subject は「そのプロセスへの条件」なので無印。
+- 接頭辞なし: 対象プロセス自身の属性(`process`、`binary`、`uid`、`gid`、`path`、`cwd`、`argv`、`name`、`tty`、`responsible` …)。subject は「そのプロセスへの条件」なので無印。
 - `os.` はホストの状態と世代、`time.` は時刻、`app.` はアプリ固有。
 - `until` / `age` / `uses` は接頭辞なし。grant 自体の寿命であってプロセスの属性でもホストの状態でもないが、組み込みの基本語として無印にする。
 
@@ -80,10 +79,10 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 
 | 軸 | 何を表すか | 値 |
 | --- | --- | --- |
-| クラス | 同じ uid のプロセスがその値を偽れるか | `Strength { Strong, Medium, Weak }` |
-| 深さ | 値がどれだけ絞るか | `Depth`(値の段階、または pin した field の数) |
+| クラス | その条件が、承認した個体・コードをどれだけ特定するか([DR-0009](DR-0009-strength-class-as-specificity.md)) | `Strength { Strong, Medium, Weak }` |
+| 深さ | 値がどれだけ絞るか | 値の段階、または pin した field の数(UI の概念で、crate は算出も型も持たない) |
 
-- クラスは項目が値から決める(`Matcher::class`)。placeholder 入りの値も受け、どの field に置かれているかで決める([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。多くの項目は値によらず一定で、`process`、uid、`os.session` が Strong、実行パスと責任プロセスが Medium、名前、argv、cwd、tty、env が Weak。`binary` は値にある field の最強(上の表)。
+- クラスは項目が値から決める(`Matcher::class`。`path` のようにプロセスの属性で決まる項目は、grant の作成時と評価時に渡るプロセスで決め、build 時と読み込み時は弱い側)。placeholder 入りの値も受け、どの field に置かれているかで決める([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。組み込みのクラスは [DR-0009](DR-0009-strength-class-as-specificity.md) の表(`process` と署名由来の field を持つ `binary` が Strong、責任プロセスと `digest` が Medium、`path` は場所で Strong か Medium、名前、argv、cwd、uid、gid、tty が Weak)。`binary` は値にある field の最強(上の表)。
 - `Strength` は procline-core に置く共有型。どの項目がどのクラスかは Vocabulary(登録された項目の実装)が持つので、`ProcessInfo` の各項目は Strength を持たない。
 - ルールの強さの制約はクラスで判定する(算出の規則は [DR-0003](DR-0003-rule-strength-from-own-match.md))。深さは制約に使わず、UI の並び順と、アプリが追加で課す制約の材料にする。
 
@@ -113,3 +112,4 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 - [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md): condition の observe / pin / check / advance と、grant の pin 値
 - [DR-0005](DR-0005-process-identity-as-one-item.md): `process` の値の形と照合
 - [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md): subject の placeholder(`true`)と、grant を作るときの解決
+- [DR-0009](DR-0009-strength-class-as-specificity.md): クラスの定義と組み込みのクラス、世代の値

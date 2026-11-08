@@ -5,7 +5,7 @@
 
 ## Context
 
-ルールの強さ(クラス)は、`allow` に許す scope の制約を決める(強なら制限なし、中なら期限か世代の scope、弱なら世代の scope が要る)。subject は対象プロセス自身への条件(`match`、`tags`)と、祖先への条件(`ancestors`)を持てるので、どの条件から強さを決めるかを定める必要がある。
+ルールの強さ(クラス)は、`allow` に許す scope の制約に使う。制約の表(クラスごとに許す scope の条件)はアプリが与える(例: 強なら制限なし、中なら期限か世代の scope、弱なら世代の scope が要る。[DR-0009](DR-0009-strength-class-as-specificity.md))。subject は対象プロセス自身への条件(`match`、`tags`)と、祖先への条件(`ancestors`)を持てるので、どの条件から強さを決めるかを定める必要がある。
 
 祖先への条件は、祖先を特定しても対象プロセス自身を縛らない。例えば「Team ID が ABCDE12345 のターミナルの子孫」は、そのターミナルから起動されたプロセスなら何でも当たる。
 
@@ -16,16 +16,16 @@
 - 強さのクラスは placeholder(`true`)のままでも判定する。どの項目・field に置かれているかで決まるため([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。
 - 自身への条件が何も無い subject(`ancestors` だけ)は最弱(Weak と同じ制約)。
 - タグを条件にしたときの強さは、タグの定義の subject を同じ規則で算出したもの。
-- 制約の表(強 / 中 / 弱 → `allow` で許される scope)はクラスで判定する。深さ([DR-0006](DR-0006-structured-values-instead-of-depends.md))は制約に使わない。
+- 制約の表(強 / 中 / 弱 → `allow` で許される scope)はクラスで判定する。表の値はアプリが与え、crate は検査の仕組みだけを持つ([DR-0009](DR-0009-strength-class-as-specificity.md))。深さ([DR-0006](DR-0006-structured-values-instead-of-depends.md))は制約に使わない。
 
 ## Alternatives Considered
 
 - 案 A: subject の中で最も強い条件(祖先への条件を含む)で決める
-  - 不採用理由: 祖先への条件は対象自身を縛らないので、祖先が Strong の項目で特定されていても、対象は「その子孫なら何でも」になる。祖先の強さを数えると、同じ uid のどのプロセスでもその祖先の下で起動すれば当たるルールに、制限なしの `allow` を許してしまう。
+  - 不採用理由: 祖先への条件は対象自身を縛らないので、祖先が Strong の項目で特定されていても、対象は「その子孫なら何でも」になる。祖先の強さを数えると、同じ uid のどのプロセスでもその祖先の下で起動すれば当たるルールに、Strong に許す緩い `allow`(例の表では制限なし)を許してしまう。
 
 ## Consequences
 
-- `ancestors` だけで定義したタグ(DESIGN-ja の例の `claude-pj1`)は Weak で、それを subject にした `allow` ルールには世代の scope(`os.login_session`、`os.session`、`app.unlock` など)が要る。
+- `ancestors` だけで定義したタグ(DESIGN-ja の例の `claude-pj1`)は Weak で、それを subject にした `allow` ルールには、アプリの制約表が Weak に課す scope が要る(例の表では世代の scope。`os.session`、`app.unlock` など)。
 - 祖先で絞った上で制限の緩い許可を出したいときは、対象自身にも強い条件(署名由来の field を持つ `binary` など)を付ける必要がある。
 
 ## 関連
@@ -34,3 +34,4 @@
 - [DR-0001](DR-0001-crate-naming.md): crate の分け方
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): 項目の登録と、強さのクラスと深さ
 - [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md): subject の placeholder と、`ancestors` の順序付きの部分列
+- [DR-0009](DR-0009-strength-class-as-specificity.md): クラスの定義と、制約の表はアプリが与えること
