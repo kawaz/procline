@@ -133,7 +133,7 @@ A subject is a condition on one process and does not distinguish between the pee
     "signature_valid": true,
     "team_id": "VWXYZ67890",
     "signing_id": "com.anthropic.claude-code",
-    "cwd": "~/src/pj1/**"
+    "cwd": "/Users/alice/src/pj1/**"
   },
   "ancestors": [
     { "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } }
@@ -163,7 +163,7 @@ A tag is a named subject. On every collection, each process in the sequence is m
           "signature_valid": true,
           "team_id": "VWXYZ67890",
           "signing_id": "com.anthropic.claude-code",
-          "cwd": "~/src/pj1/**"
+          "cwd": "/Users/alice/src/pj1/**"
         },
         "ancestors": [{ "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345" } } }]
       },
@@ -249,7 +249,7 @@ The keys of `match` are names of items registered in the vocabulary (`Vocabulary
 | Form | Applicable items |
 | --- | --- |
 | Exact match | All |
-| glob | Paths, identifiers, bundle IDs, process names, cwd |
+| glob | Paths, identifiers, bundle IDs, process names, cwd. Paths and cwd are written as absolute paths; `~` is not interpreted |
 | Regular expression | Paths, argv |
 | Numeric range | uid |
 
@@ -290,7 +290,7 @@ There is only one rule: **items listed in depends are pinned with their values i
 | Who | What it does |
 | --- | --- |
 | builder (`SubjectBuilder` / `RuleBuilder`, which create rules from the approval UI) | Lets the user pick a single item (usually a leaf). The builder fills in the ancestors from the picked item up to the root with values from the collection result. The user is never asked to pick ancestors by hand |
-| Loading (`Policy::load_verified`) | Missing (a depends item of some item is not in the same match) is an error. Conflicting (the same item is given different values) is an error. Duplicated (multiple leaves share the same ancestor with matching values) is fine |
+| Loading (`Policy::load_verified`) | Missing (a depends item of some item is not in the same match) is an error. Conflicting (the same item written more than once as a duplicate key) is an error. Duplicated (multiple leaves share the same ancestor) is fine, since the ancestor only needs to appear once in the map |
 | Evaluation | Looks at the whole chain. Matches all items of the match with AND, and never looks only at the leaf while omitting ancestors |
 | UI (app side; procline-acl provides chain enumeration and ordering) | Items with depends are shown as one choice per chain (a set of items connected by depends), with candidates ordered by strength (e.g. for the signature chain, `signature_valid` < `team_id` < `signing_id` < `bundle_id`, with `cdhash` on a separate branch). Picking one pins everything from that item up to the root. Independent items without dependencies are listed as is |
 

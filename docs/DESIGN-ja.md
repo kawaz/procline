@@ -133,7 +133,7 @@ subject は1つのプロセスへの条件で、接続相手か祖先かを区�
     "signature_valid": true,
     "team_id": "VWXYZ67890",
     "signing_id": "com.anthropic.claude-code",
-    "cwd": "~/src/pj1/**"
+    "cwd": "/Users/alice/src/pj1/**"
   },
   "ancestors": [
     { "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } }
@@ -163,7 +163,7 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
           "signature_valid": true,
           "team_id": "VWXYZ67890",
           "signing_id": "com.anthropic.claude-code",
-          "cwd": "~/src/pj1/**"
+          "cwd": "/Users/alice/src/pj1/**"
         },
         "ancestors": [{ "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345" } } }]
       },
@@ -249,7 +249,7 @@ subject、tag、preset、条件の組は、どれも名前を付けて一覧に�
 | 形 | 使える項目 |
 | --- | --- |
 | 完全一致 | すべて |
-| glob | パス、識別子、bundle ID、プロセス名、cwd |
+| glob | パス、識別子、bundle ID、プロセス名、cwd。パスと cwd は絶対パスで書き、`~` は解釈しない |
 | 正規表現 | パス、argv |
 | 数値の範囲 | uid |
 
@@ -290,7 +290,7 @@ register(key, impl, depends: [key...])
 | 誰 | 何をする |
 | --- | --- |
 | builder(承認画面からルールを作る `SubjectBuilder` / `RuleBuilder`) | 利用者には項目を 1 つ選ばせる(多くは葉)。選んだ項目から根までの祖先は、builder が収集結果の値で埋める。利用者に祖先を手で選ばせない |
-| 読み込み(`Policy::load_verified`) | 欠け(ある項目の depends の項目が同じ match に無い)はエラー。矛盾(同じ項目に食い違う値が与えられている)はエラー。重複(複数の葉が同じ祖先を共有し、値が一致している)は正常 |
+| 読み込み(`Policy::load_verified`) | 欠け(ある項目の depends の項目が同じ match に無い)はエラー。矛盾(同じ項目が重複 key で複数回書かれている)はエラー。重複(複数の葉が同じ祖先を共有する)は、祖先が map に 1 つあればよいので正常 |
 | 評価 | 連鎖全体を見る。match の項目をすべて AND で照合し、葉だけを見て祖先を省くことはしない |
 | UI(アプリ側。procline-acl は連鎖の列挙と並び順を提供する) | depends のある項目は、連鎖(depends で繋がった項目の集まり)ごとに 1 つの選択肢として見せ、候補を強度順に並べる(例: 署名の連鎖なら `signature_valid` < `team_id` < `signing_id` < `bundle_id`、別の枝に `cdhash`)。選ぶと、その項目から根までが pin される。依存の無い独立項目はそのまま並べる |
 

@@ -51,11 +51,11 @@ register(key, impl, depends: [key...])
 | 誰 | 何をする |
 | --- | --- |
 | builder(`SubjectBuilder` / `RuleBuilder`) | 利用者には項目を 1 つ選ばせる(多くは葉)。選んだ項目から根までの祖先は、builder が収集結果の値で埋める。利用者に祖先を手で選ばせない |
-| 読み込み(`Policy::load_verified`) | 欠け(ある項目の depends の項目が同じ match に無い)はエラー。矛盾(同じ項目に食い違う値が与えられている)はエラー。重複(複数の葉が同じ祖先を共有し、値が一致している)は正常 |
+| 読み込み(`Policy::load_verified`) | 欠け(ある項目の depends の項目が同じ match に無い)はエラー。矛盾(同じ項目が重複 key で複数回書かれている)はエラー。重複(複数の葉が同じ祖先を共有する)は、祖先が map に 1 つあればよいので正常 |
 | 評価 | 連鎖全体を見る。match の項目をすべて AND で照合し、葉だけを見て祖先を省くことはしない |
 | UI(アプリ側。procline-acl は連鎖の列挙と並び順を提供する) | depends のある項目は、連鎖(depends で繋がった項目の集まり)ごとに 1 つの選択肢として見せ、候補を強度順に並べる(例: 署名の連鎖なら `signature_valid` < `team_id` < `signing_id` < `bundle_id`、別の枝に `cdhash`)。選ぶと、その項目から根までが pin される。依存の無い独立項目はそのまま並べる |
 
-match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabulary が知っているので、保存形に入れ子を持たせない。ただし平坦な map では「矛盾」が構造上起きにくく、loader の検査が何を対象にするかは裁定待ち(QUESTIONS.md の PL-Q1)。本 DR は「欠け・矛盾はエラー」「矛盾は同じ項目に食い違う値」までを決める。
+match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabulary が知っているので、保存形に入れ子を持たせない。平坦な map では祖先と葉の値が食い違う形は書けないので、「矛盾」の検査は JSON の重複 key の拒否になる(kawaz 裁定 2026-11-08)。
 
 ### 強さの 2 軸
 
@@ -75,7 +75,7 @@ match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabular
 - 案 A: 項目ごとに固定の強さだけを持ち、depends を持たない
   - 不採用理由: `signing_id` や `bundle_id` を単独の条件として許すことになる。ad-hoc 署名なら `signing_id` を、Info.plist を書けば `bundle_id` を誰でも名乗れるので、強い項目に見えて同じ uid のプロセスに偽られる。「署名と組でなければ弱い」のような注記では型として検査できない。
 - 案 B: 連鎖を保存形に入れ子で持つ(葉ごとに祖先の値を持つ)
-  - 不採用理由: 同じ祖先の値を葉ごとに繰り返して書くことになり、現行の JSON 例より読みにくい。連鎖の構造は Vocabulary が持っているので保存形に要らない。ただし「矛盾」の検査対象が平坦な map では消えるので、どちらを採るかは裁定待ち(QUESTIONS.md の PL-Q1)。入れ子を採る裁定が出たらこの DR を改める。
+  - 不採用理由: 同じ祖先の値を葉ごとに繰り返して書くことになり、平坦な map より読みにくい。連鎖の構造は Vocabulary が持っているので保存形に要らない。葉ごとに祖先の値が食い違う「矛盾」を書けてしまうこと自体が、検査を増やす理由になる。
 
 ## Consequences
 
@@ -89,4 +89,3 @@ match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabular
 - [DESIGN-ja の「項目の登録と depends」「強さ: クラスと深さ」](../DESIGN-ja.md)
 - [DR-0001](DR-0001-crate-naming.md): crate の分け方(`Strength` を置く procline-core、`Vocabulary` を置く procline-acl)
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): ルールの強さを対象プロセス自身の条件から算出する
-- [QUESTIONS.md の PL-Q1](../QUESTIONS.md): match の保存形と「矛盾」の対象
