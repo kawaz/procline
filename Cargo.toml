@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/kawaz/procline"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+procline-core = { path = "crates/procline-core" }
+procline-macos = { path = "crates/procline-macos" }
+procline-acl = { path = "crates/procline-acl" }
