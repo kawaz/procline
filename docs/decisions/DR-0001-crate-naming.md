@@ -36,5 +36,5 @@
 ## 関連
 
 - [DESIGN-ja の「構成」](../DESIGN-ja.md)
-- [DR-0002](DR-0002-matcher-depends-and-two-axis-strength.md): `procline-acl` の語彙と、`procline-core` に置く強さの型
+- [DR-0006](DR-0006-structured-values-instead-of-depends.md): `procline-acl` の語彙と、`procline-core` に置く強さの型と構造を持つ値の型
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): `procline-acl` のルールの強さの算出

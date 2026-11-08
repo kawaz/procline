@@ -1,6 +1,6 @@
 # DR-0002: matcher の項目を登録制にして depends を持たせ、強さをクラスと深さの 2 軸で表す
 
-- Status: Active
+- Status: Superseded by DR-0006
 - Date: 2026-11-08
 
 ## Context
@@ -25,7 +25,7 @@ register(key, impl, depends: [key...])
 ```
 
 - `key`: 項目の名前。組み込みは接頭辞なし(`signing_id`、`cwd`)か `os.` / `time.`、アプリは `app.`。
-- `impl`: 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))。
+- `impl`: 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](../DR-0004-rule-grant-split-and-condition-advance.md))。
 - `depends`: この項目の値が意味を持つために、同じ `match`(寿命型なら同じ `conditions`)に値ごと pin されていなければならない項目の列。
 - 登録先は procline-acl の `Vocabulary`。matcher の項目、scope、条件が同じ器に入る。
 - `depends` に挙げた key が未登録なら、登録の時点でエラー。循環もエラー。
@@ -68,7 +68,7 @@ match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabular
 - 独立項目は 1 項目だけの連鎖で、自分が根。クラスは `process`、uid、署名系が Strong、実行パスと責任プロセスが Medium、名前、argv、cwd、tty、env が Weak。
 - bundle\_id は Strong の連鎖の葉(`team_id`、`signing_id` に依存)。実行パスは Medium の独立項目。
 - `Strength` は procline-core に置く共有型。どの項目がどのクラスかは Vocabulary が持つので、`ProcessInfo` の各項目は Strength を持たない。
-- ルールの強さの制約はクラスで判定する(算出の規則は [DR-0003](DR-0003-rule-strength-from-own-match.md))。深さは制約に使わず、UI の並び順と、アプリが追加で課す制約の材料にする。
+- ルールの強さの制約はクラスで判定する(算出の規則は [DR-0003](../DR-0003-rule-strength-from-own-match.md))。深さは制約に使わず、UI の並び順と、アプリが追加で課す制約の材料にする。
 
 ## Alternatives Considered
 
@@ -86,6 +86,6 @@ match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabular
 
 ## 関連
 
-- [DESIGN-ja の「項目の登録と depends」「強さ: クラスと深さ」](../DESIGN-ja.md)
-- [DR-0001](DR-0001-crate-naming.md): crate の分け方(`Strength` を置く procline-core、`Vocabulary` を置く procline-acl)
-- [DR-0003](DR-0003-rule-strength-from-own-match.md): ルールの強さを対象プロセス自身の条件から算出する
+- [DESIGN-ja の「項目の登録と depends」「強さ: クラスと深さ」](../../DESIGN-ja.md)
+- [DR-0001](../DR-0001-crate-naming.md): crate の分け方(`Strength` を置く procline-core、`Vocabulary` を置く procline-acl)
+- [DR-0003](../DR-0003-rule-strength-from-own-match.md): ルールの強さを対象プロセス自身の条件から算出する

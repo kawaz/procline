@@ -5,7 +5,7 @@
 
 ## Context
 
-ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入る静的な定義(誰が、何に、どんな条件で、どうなるか)で、条件は `"os.boot"` や `{"age": "1h"}` のような記号のまま書く。もう 1 つは、それを承認の瞬間の接続相手に適用し、寿命型の条件にその時点の世代を記録したもので、評価が実際に見るのはこちら。
+ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入る静的な定義(誰が、何に、どんな条件で、どうなるか)で、条件は `{"os.session": "boot"}` や `{"age": "1h"}` のような記号のまま書く。もう 1 つは、それを承認の瞬間の接続相手に適用し、寿命型の条件にその時点の世代を記録したもので、評価が実際に見るのはこちら。
 
 - 両者を同じ名前で呼ぶと、`uses`(残り回数)のように評価のたびに変わる値をどこが持つかが曖昧になる。静的な定義が持つなら、署名付きの一覧を評価のたびに書き換えることになる。
 - 適用して pin したものを 1 件ずつ永続化すれば、変わる値の更新はその 1 件の書き込みで済み、一覧の再署名が要らない。
@@ -39,7 +39,7 @@ grant の形:
   "subject": { "tags": ["claude-pj1"] },
   "targets": ["key:k1"],
   "conditions": [
-    { "key": "os.boot", "pinned": "7B1E…" },
+    { "key": "os.session", "args": "unlocked", "pinned": { "boot": "7B1E…", "awake": 12, "unlocked": 3 } },
     { "key": "app.unlock", "pinned": 12 },
     { "key": "until", "pinned": "2026-11-08T13:00:00+09:00" },
     { "key": "uses", "pinned": 3 },
@@ -51,7 +51,7 @@ grant の形:
 ```
 
 - `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には無い)。`age` は grant を作るときに `until` の pin 値に直す(`key` も `until` にする)。
-- depends の規則([DR-0002](DR-0002-matcher-depends-and-two-axis-strength.md))は grant にも当てはまる(`os.wake` の pin があるなら `os.boot` の pin もある)。
+- `os.session` の pin 値は段階以下の世代を全部持つ([DR-0006](DR-0006-structured-values-instead-of-depends.md))。
 
 ### condition の実装: observe / pin / check / advance
 
@@ -81,7 +81,7 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 | 項目 | observe | pin | check | advance |
 | --- | --- | --- | --- | --- |
-| 世代(`os.boot`、`os.wake`、`app.unlock` …) | 今の世代 | observed の値(無ければ Err) | pinned == observed | None |
+| 世代(`os.session`、`app.unlock` …) | 今の世代 | observed の値(無ければ Err)。`os.session` は段階以下の世代の複合 | pinned == observed。`os.session` は段階以下の世代が全部一致 | None |
 | `until` | None | args の時刻 | obs.now < pinned | None |
 | `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
 | `uses` | None | args の N | pinned > 0 | pinned − 1 |
@@ -121,18 +121,18 @@ impl Policy {
 ### grant の保存
 
 - grant はメモリ上に持ち、デーモンの意図しない終了に備えて、作成時と更新時に 1 件ずつ署名して永続化し、起動時に全部読み直す。保存と署名はアプリの責務(一覧と同じ)。crate は `Grant` の JSON の形と、2 つの入口を持つ。
-  - `Policy::load_grant(bytes, sig, &verifier) -> Grant`: 1 件のバイト列と署名を検証し、一覧と同じ検査(未登録の項目、depends の欠け・矛盾)をする。落ちればエラー。
+  - `Policy::load_grant(bytes, sig, &verifier) -> Grant`: 1 件のバイト列と署名を検証し、一覧と同じ検査(未登録の項目、値の妥当性)をする。落ちればエラー。
   - `Policy::add_grant(grant)`: 読み直した grant をメモリ上の Policy に入れる。
 - 1 件ずつなので `uses` の更新の書き込みは軽い(実測は実装時のベンチで確かめる)。
-- 起動時に読み直した grant のうち、デーモンの起動中しか数えられない世代(`os.wake` 等)を pin したものは、観測値が無いか、pinned と observed が一致しないので `check` が偽になり失効する。「デーモン再起動で失効」は自動的に守られる。
+- 起動時に読み直した grant のうち、デーモンの起動中しか数えられない世代(`os.session` の `awake` 等)を pin したものは、観測値が無いか、pinned と observed が一致しないので `check` が偽になり失効する。「デーモン再起動で失効」は自動的に守られる。
 - 永続化先のディレクトリは、評価するデーモン以外(同じ uid の他プロセス)から書けない場所に置く。書けると、使い切る前の grant ファイルを差し戻して `uses` を戻せる。置き場はアプリが決める。
 - 静的な一覧(subject、tag、rule)の署名付き保存はそのまま。保存形は「一覧 1 本」と「grant 1 件ずつ」の 2 系統。
 
 ### builder と強さの制約
 
 - `SubjectBuilder` は変えない。
-- `RuleBuilder::build()` は静的な `Rule` を返す。検査するのは depends の欠けと、強さ(クラス)と scope の制約([DR-0003](DR-0003-rule-strength-from-own-match.md))。制約は寿命型・消費型の condition の有無で判定する(pin 値はまだ無い)。制約の表は変えず、`uses` は判定では世代の scope と同じ扱いにする(寿命型で、一度切れれば戻らないため)。
-- `Policy::grant(&mut self, rule: &Rule, ctx: &EvalContext) -> Result<Grant, GrantError>` が pin を行い、id を付けた grant をメモリ上の Policy にも入れて返す(署名と保存はアプリ)。`GrantError` は `pin` の失敗(`PinError`: 観測値が無い、引数が不正)と、depends の欠け。rule の再適用もこの入口で行う。
+- `RuleBuilder::build()` は静的な `Rule` を返す。検査するのは値の妥当性と、強さ(クラス)と scope の制約([DR-0003](DR-0003-rule-strength-from-own-match.md))。制約は寿命型・消費型の condition の有無で判定する(pin 値はまだ無い)。制約の表は変えず、`uses` は判定では世代の scope と同じ扱いにする(寿命型で、一度切れれば戻らないため)。
+- `Policy::grant(&mut self, rule: &Rule, ctx: &EvalContext) -> Result<Grant, GrantError>` が pin を行い、id を付けた grant をメモリ上の Policy にも入れて返す(署名と保存はアプリ)。`GrantError` は `pin` の失敗(`PinError`: 観測値が無い、引数が不正)と、値の妥当性の違反。rule の再適用もこの入口で行う。
 
 ## Alternatives Considered
 
@@ -159,5 +159,5 @@ impl Policy {
 
 - [DESIGN-ja の「rule」「grant」「評価」「条件の実装」「保存」](../DESIGN-ja.md)
 - [DR-0001](DR-0001-crate-naming.md): crate の分け方(rule と grant を置く procline-acl)
-- [DR-0002](DR-0002-matcher-depends-and-two-axis-strength.md): 項目の depends(grant の pin にも当てはまる)
+- [DR-0006](DR-0006-structured-values-instead-of-depends.md): 構造を持つ値の座(grant の `os.session` の pin 値の形)と、値の妥当性の検査
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): rule の強さと、`allow` に許す scope の制約

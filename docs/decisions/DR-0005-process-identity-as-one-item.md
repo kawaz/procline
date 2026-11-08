@@ -14,7 +14,7 @@
 - ルールの語彙では、プロセスの個体識別は `process` という 1 つの matcher 項目にする。意味は「この個体のプロセス」。収集の内部で使う識別子(audit token、unique\_id、pid と起動時刻、pidversion)はルール定義に個別には出さない。
 - pin 値は複合値で、builder がその時点で取れた識別子を全部持たせる(例 `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。
 - 照合は、両側に揃っている最も強い識別子で比べる。最悪でも pid と起動時刻の組の一致を見る。ルールを書く人はどれで比べたかを気にしない。
-- クラスは Strong で、depends を持たない独立項目。照合は完全一致だけ。`match` にも `ancestors` の中にも書ける(「このターミナルのタブのシェルの子孫」)。UI では「このプロセスだけ」の 1 選択肢として出す。
+- クラスは Strong。照合は完全一致だけ。`match` にも `ancestors` の中にも書ける(「このターミナルのタブのシェルの子孫」)。UI では「このプロセスだけ」の 1 選択肢として出す。
 - 寿命型の scope としての `process`(「指定プロセスの終了まで」)は持たない。chain に居るプロセスの寿命は matcher の `process` で表す(そのプロセスが終われば chain に居なくなり当たらない)。死んだプロセスを指す grant の削除は掃除(アプリ)の責務([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) の掃除と同じ)。
 
 ## Alternatives Considered
@@ -33,7 +33,7 @@
 
 ## 関連
 
-- [DESIGN-ja の「識別子」「matcher」「項目の登録と depends」](../DESIGN-ja.md)
-- [DR-0002](DR-0002-matcher-depends-and-two-axis-strength.md): 項目の depends と強さのクラス(`process` は depends の無い Strong の独立項目)
+- [DESIGN-ja の「識別子」「matcher」「項目の登録」](../DESIGN-ja.md)
+- [DR-0006](DR-0006-structured-values-instead-of-depends.md): 構造を持つ値の座と強さのクラス(`process` は Strong)
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): ルールの強さと、`allow` に許す scope の制約
 - [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md): condition の observe / pin / check / advance と、grant の掃除
