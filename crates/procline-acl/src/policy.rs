@@ -15,6 +15,8 @@ use crate::vocabulary::{PinError, Vocabulary};
 pub struct Policy<'v> {
     vocab: &'v Vocabulary,
     constraints: AllowConstraints,
+    /// The effect when no grant is adopted.
+    default_effect: Effect,
     subjects: Vec<(String, Subject)>,
     tags: Vec<Tag>,
     rules: Vec<Rule>,
@@ -23,17 +25,30 @@ pub struct Policy<'v> {
 
 /// Verifies the signature over serialized bytes (the list, or one grant).
 pub trait PolicyVerifier {
-    fn verify(&self, bytes: &[u8], signature: &[u8]) -> bool;
+    /// `kind` tells what the bytes are, so a signature made for one kind does not verify as the other.
+    fn verify(&self, kind: SignedKind, bytes: &[u8], signature: &[u8]) -> bool;
+}
+
+/// What signed bytes are: the list or one grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignedKind {
+    List,
+    Grant,
 }
 
 impl<'v> Policy<'v> {
-    /// Verifies the signature, then parses and checks the list against the vocabulary (unknown items, validity of the values), the names of tags and subjects, and the `allow` rules against `constraints`. Rules without lifetime conditions become permanent grants. A placeholder outside the inline subject of a rule, or in a rule that becomes a permanent grant, is `InvalidValue`.
+    /// Verifies the signature (as `SignedKind::List`), then parses and checks the list against the vocabulary (unknown items, validity of the values), the names of tags and subjects, and the `allow` rules against `constraints`. `default_effect` is the effect when no grant is adopted.
+    ///
+    /// A rule becomes a permanent grant when it has no lifetime or consumable condition, no placeholder, and no condition whose pin needs the chain or an observed value (`os.login_session` and the like); any other rule becomes a grant only through approval (`grant`). A placeholder outside the inline subject of a rule is `InvalidValue`.
+    ///
+    /// After loading the list again, check the stored grants again with `load_grant`: a changed tag definition can lower their strength.
     pub fn load_verified(
         _bytes: &[u8],
         _signature: &[u8],
         _verifier: &dyn PolicyVerifier,
         _vocab: &'v Vocabulary,
         _constraints: AllowConstraints,
+        _default_effect: Effect,
     ) -> Result<Self, LoadError> {
         todo!()
     }
@@ -43,7 +58,7 @@ impl<'v> Policy<'v> {
         RuleBuilder::new(self, id.into(), subject)
     }
 
-    /// Verifies the signature of one stored grant, then parses and checks it against the vocabulary (unknown items, validity of the values), the tag names, and an `allow` grant against the `AllowConstraints`. Does not add it; call `add_grant`.
+    /// Verifies the signature of one stored grant (as `SignedKind::Grant`), then parses and checks it against the vocabulary (unknown items, validity of the values), the tag names, and an `allow` grant against the `AllowConstraints`. A `ScopeOption::UntilWithin` is measured from the grant's `created_at`. Does not add it; call `add_grant`.
     pub fn load_grant(
         &self,
         _bytes: &[u8],
@@ -96,6 +111,8 @@ impl<'v> Policy<'v> {
     }
 
     /// Decides the effect for the target and advances the adopted grant. Memory is not changed: the application stores `updated_grant` and replaces it with `add_grant`, and removes the grants in `expired`.
+    ///
+    /// The application serializes `evaluate`, storing and `add_grant`: evaluations running at once can consume a `uses` beyond its limit.
     pub fn evaluate(
         &self,
         _tagged: &TaggedChain<'_>,
@@ -106,6 +123,8 @@ impl<'v> Policy<'v> {
     }
 
     /// Decides the effect for the target without advancing any grant; `updated_grant` is always `None`.
+    ///
+    /// `expired` is filled in but does not make expiry final: the application does not remove grants because of it.
     pub fn explain(
         &self,
         _tagged: &TaggedChain<'_>,
@@ -121,21 +140,25 @@ pub struct TaggedChain<'a> {
     pub vocab: &'a Vocabulary,
     pub chain: &'a ProcessChain,
     pub tags: Vec<BTreeSet<String>>,
+    /// The tags whose presence could not be decided because the chain is truncated. An approval screen shows them apart from the tags a process does not carry.
+    pub undecidable_tags: BTreeSet<String>,
 }
 
 /// Result of an evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub effect: Effect,
-    /// The adopted grant; `None` when the default effect applied.
+    /// The adopted grant; `None` when the default effect of the policy applied.
     pub grant_id: Option<String>,
     /// For display to the user; not for the peer, since it shows which condition failed.
     pub trace: Trace,
     /// The new version of the adopted grant when `advance` changed it. The application signs and stores it before handing out the value.
     pub updated_grant: Option<Grant>,
-    /// Ids of the grants whose lifetime condition was false in this evaluation. Expiry is final; the application removes them.
+    /// Ids of the grants whose lifetime condition was false in this evaluation. From `evaluate`, expiry is final and the application removes them; from `explain`, it is not.
     pub expired: Vec<String>,
-    /// Ids of the grants with `ancestors` that could not be decided because the chain is truncated. They did not take part in deciding the effect.
+    /// Ids of the grants that could not be decided in this evaluation, neither allowed nor expired. They did not take part in deciding the effect.
+    ///
+    /// A grant is listed when the chain is truncated, the grant has conditions on the ancestors (`ancestors`, or a tag whose definition has them, following tags that reference other tags), and it did not match: the conditions of a subject only add requirements, so a grant that matches the truncated chain also matches the whole chain and takes part. A grant is also listed when `observe` of one of its conditions failed.
     pub undecidable: Vec<String>,
 }
 

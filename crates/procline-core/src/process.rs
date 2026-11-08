@@ -9,15 +9,22 @@ use crate::signature::{Bundle, CodeSigning, SignatureTrust};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessChain {
     processes: Vec<ProcessInfo>,
-    /// Why the ancestor walk stopped before reaching the root; `None` when it reached the root. Grants with `ancestors` cannot be decided on a truncated chain.
+    /// The boot UUID (`kern.bootsessionuuid`) of the system the chain was collected on; `Identity::process_identity` takes it.
+    pub boot_uuid: String,
+    /// Why the ancestor walk stopped before reaching the root; `None` when it reached the root. On a truncated chain, a grant with conditions on the ancestors that does not match cannot be decided; one that matches also matches the whole chain.
     pub truncated: Option<Truncated>,
 }
 
 impl ProcessChain {
-    /// Builds a chain from the target and its ancestors in order.
-    pub fn new(processes: Vec<ProcessInfo>, truncated: Option<Truncated>) -> Self {
+    /// Builds a chain from the target and its ancestors in order, with the boot UUID of the system they run on.
+    pub fn new(
+        processes: Vec<ProcessInfo>,
+        boot_uuid: String,
+        truncated: Option<Truncated>,
+    ) -> Self {
         Self {
             processes,
+            boot_uuid,
             truncated,
         }
     }
@@ -51,9 +58,10 @@ pub struct ProcessInfo {
     pub path_meta: Option<PathMeta>,
     /// Hash of the contents of the file at `path` (`sha256:…`); collected only when `digest` of the collect options is set.
     pub digest: Option<String>,
+    /// The app bundle found by walking up from `path`; for display only. Matching on `bundle_id` uses `Signature.bundle_id`.
     pub bundle: Option<Bundle>,
-    /// pid of the responsible process.
-    pub responsible_pid: Option<i32>,
+    /// The individual responsible process, identified like the `process` matcher item.
+    pub responsible: Option<ProcessIdentity>,
     pub name: Option<String>,
     pub argv: Option<Vec<String>>,
     pub cwd: Option<PathBuf>,
@@ -92,7 +100,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// The identifiers that make up the pin value of the `process` matcher item, with the boot UUID (`kern.bootsessionuuid`) of the running system.
+    /// The identifiers that make up the pin value of the `process` matcher item, with the boot UUID of the chain (`ProcessChain.boot_uuid`).
     pub fn process_identity(&self, boot_uuid: &str) -> ProcessIdentity {
         ProcessIdentity {
             boot_uuid: boot_uuid.to_owned(),
@@ -104,6 +112,8 @@ impl Identity {
 }
 
 /// The pin value of the `process` matcher item ("this individual process"): every identifier available when it was pinned.
+///
+/// It identifies the individual, which stays the same across an `exec` that replaces its code; the identity of the code is the `binary` item's, so pin both to pin both.
 ///
 /// Matching compares every identifier present on both sides and requires all of them to be equal. The derived `==` compares the fields as written and is not that matching.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -8,7 +8,7 @@ pub struct Rule {
     pub id: String,
     pub effect: Effect,
     pub subject: SubjectRef,
-    /// Patterns over targets; the target vocabulary belongs to the application.
+    /// Globs over the strings of `Target`; empty matches every target. The target vocabulary belongs to the application.
     pub targets: Vec<String>,
     /// ANDed conditions, lifetime and state alike.
     pub conditions: Vec<ConditionUse>,
@@ -56,6 +56,7 @@ pub struct Grant {
     pub effect: Effect,
     /// The subject of the rule with a named subject expanded and every placeholder filled in. Tag names stay as names.
     pub subject: Subject,
+    /// Globs over the strings of `Target`, as in the rule; empty matches every target.
     pub targets: Vec<String>,
     pub conditions: Vec<PinnedCondition>,
     pub created_at: SystemTime,

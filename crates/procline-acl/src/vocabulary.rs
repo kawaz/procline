@@ -13,7 +13,7 @@ pub struct Vocabulary {
 }
 
 impl Vocabulary {
-    /// The built-in items (`process` (identifies the individual process), `binary` and the other matcher items, `os.session` and the other `os.*` items, `time.*`, `until` / `age` / `uses`).
+    /// The built-in items, all independent of the OS: the matcher items (`process` (identifies the individual process), `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible`), `time.window`, and `until` / `age` / `uses`. The `os.*` items come from the collector crate of the OS (`procline_macos::os_items`); the application adds them with `register`.
     pub fn builtin() -> Self {
         todo!()
     }
@@ -176,13 +176,15 @@ impl std::error::Error for ResolveError {}
 pub trait Condition: Send + Sync {
     fn kind(&self) -> ConditionKind;
 
-    /// Observes the current value (an epoch, the screen lock state, ...). `EvalContext::capture` calls it once per evaluation. `None` when there is nothing to observe.
-    fn observe(&self) -> Option<serde_json::Value>;
+    /// Observes the current value (an epoch, the screen lock state, ...). `EvalContext::capture` calls it once per evaluation.
+    ///
+    /// `Ok(None)` when there is nothing to observe or the current time is outside the period (for a lifetime condition, `check` is then false and the grant expires). `Err` when observing failed (a system call failed); a grant using the condition is then undecidable in that evaluation, neither allowed nor expired.
+    fn observe(&self) -> Result<Option<serde_json::Value>, ObserveError>;
 
     /// Checks the arguments written in the rule. Loading the list and `RuleBuilder::build` call it; `Err` holds the reason.
     fn validate_args(&self, args: Option<&serde_json::Value>) -> Result<(), String>;
 
-    /// Called once when a grant is made. `chain` is the chain being approved, for conditions that pin a value of the peer (the asid of `os.login_session`). State conditions return `Ok(None)`; a lifetime condition without an observed value fails with `Unobservable`, so no grant is made.
+    /// Called once when a grant is made. `chain` is the chain being approved, for conditions that pin a value of the peer (the asid of `os.login_session`). State conditions return `Ok(None)`; a lifetime condition whose observation is `Ok(None)` or `Err` fails with `Unobservable`, so no grant is made.
     fn pin(
         &self,
         args: Option<&serde_json::Value>,
@@ -202,6 +204,20 @@ pub trait Condition: Send + Sync {
     /// Called only for the adopted grant. Returns the new pin value, or `None` when unchanged.
     fn advance(&self, pinned: Option<&serde_json::Value>) -> Option<serde_json::Value>;
 }
+
+/// Observing the current value of a condition failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserveError {
+    pub reason: String,
+}
+
+impl fmt::Display for ObserveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cannot observe the current value: {}", self.reason)
+    }
+}
+
+impl std::error::Error for ObserveError {}
 
 /// Whether a false condition expires the grant forever or only while false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

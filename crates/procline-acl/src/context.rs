@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use crate::vocabulary::Vocabulary;
+use crate::vocabulary::{ObserveError, Vocabulary};
 
 /// Time and observed values captured once at the start of an evaluation, so they do not change midway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalContext {
     now: SystemTime,
-    observed: BTreeMap<String, Option<serde_json::Value>>,
+    observed: BTreeMap<String, Result<Option<serde_json::Value>, ObserveError>>,
 }
 
 impl EvalContext {
@@ -24,11 +24,11 @@ impl EvalContext {
         }
     }
 
-    /// Sets the observed value of a condition item; `None` means nothing could be observed.
+    /// Sets the result of `observe` for a condition item: `Ok(None)` when there is nothing to observe, `Err` when observing failed.
     pub fn with_observed(
         mut self,
         key: impl Into<String>,
-        value: Option<serde_json::Value>,
+        value: Result<Option<serde_json::Value>, ObserveError>,
     ) -> Self {
         self.observed.insert(key.into(), value);
         self
@@ -38,9 +38,13 @@ impl EvalContext {
         self.now
     }
 
-    /// The observed value of a condition item.
-    pub fn observed(&self, key: &str) -> Option<&serde_json::Value> {
-        self.observed.get(key).and_then(Option::as_ref)
+    /// The result of `observe` for a condition item; `Ok(None)` also for a key that was not observed.
+    pub fn observed(&self, key: &str) -> Result<Option<&serde_json::Value>, &ObserveError> {
+        match self.observed.get(key) {
+            Some(Ok(value)) => Ok(value.as_ref()),
+            Some(Err(err)) => Err(err),
+            None => Ok(None),
+        }
     }
 }
 
@@ -48,6 +52,6 @@ impl EvalContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observed<'a> {
     pub now: SystemTime,
-    /// The result of `observe`; `None` when nothing was observed.
-    pub value: Option<&'a serde_json::Value>,
+    /// The result of `observe`: `Ok(None)` when there is nothing to observe, `Err` when observing failed.
+    pub value: Result<Option<&'a serde_json::Value>, &'a ObserveError>,
 }

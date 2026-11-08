@@ -14,6 +14,7 @@ pub struct BinaryPin {
     pub digest: Option<Pinnable<String>>,
     pub team_id: Option<Pinnable<String>>,
     pub signing_id: Option<Pinnable<String>>,
+    /// Matched against `Signature.bundle_id` (the sealed Info.plist), not `ProcessInfo.bundle`.
     pub bundle_id: Option<Pinnable<String>>,
     /// Determines every other signature field, so it is the strongest field.
     pub cdhash: Option<Pinnable<CdHash>>,

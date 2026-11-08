@@ -22,6 +22,8 @@ pub struct Signature {
     pub validity: SignatureValidity,
     pub signing_id: Option<String>,
     pub team_id: Option<String>,
+    /// The bundle identifier from the sealed Info.plist (`kSecCodeInfoPList`); `binary`'s `bundle_id` matches against it.
+    pub bundle_id: Option<String>,
     pub cdhash: Option<CdHash>,
     /// Signer certificate chain, leaf first.
     pub certificates: Vec<Certificate>,
@@ -138,6 +140,8 @@ pub struct Certificate {
 #[serde(rename_all = "snake_case")]
 pub enum SignatureTrust {
     Platform,
+    /// Distributed through the App Store: signed by Apple, without a notarization ticket. Shown without a warning.
+    AppStore,
     Notarized,
     DeveloperId,
     AdHoc,
@@ -145,7 +149,7 @@ pub enum SignatureTrust {
     Invalid,
 }
 
-/// App bundle found by walking up from the executable path.
+/// App bundle found by walking up from the executable path. For display only; matching uses `Signature.bundle_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bundle {
     pub id: Option<String>,

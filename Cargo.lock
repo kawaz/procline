@@ -51,6 +51,7 @@ dependencies = [
 name = "procline-macos"
 version = "0.1.0"
 dependencies = [
+ "procline-acl",
  "procline-core",
 ]
 

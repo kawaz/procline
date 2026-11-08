@@ -21,7 +21,9 @@ pub enum ScopeRequirement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeOption {
     /// The condition with this key is among the conditions (for example `os.session`, `app.unlock`, `uses`).
+    ///
+    /// `Condition("age")` and `Condition("until")` can be written, but a grant holds an `age` converted to an `until`, so `Condition("age")` is never satisfied by a grant. Constrain time with `UntilWithin`.
     Condition(String),
-    /// The grant expires within the duration of being made: an `age` no longer than it (checked by `RuleBuilder::build` and loading), or an `until` no later than the time of granting plus it (checked by `Policy::grant` with the `now` of the context).
+    /// The grant expires within the duration of being made: an `age` no longer than it (checked by `RuleBuilder::build` and loading), or an `until` no later than the time of granting plus it (checked by `Policy::grant` with the `now` of the context, and by `Policy::load_grant` from the grant's `created_at`).
     UntilWithin(Duration),
 }

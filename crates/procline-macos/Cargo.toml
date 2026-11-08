@@ -1,6 +1,6 @@
 [package]
 name = "procline-macos"
-description = "Collect a peer process and its ancestors on macOS (audit token, unique IDs, code signature)"
+description = "Collect a peer process and its ancestors on macOS (audit token, unique IDs, code signature verification, icon) and provide the os.* vocabulary items"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,4 @@ repository.workspace = true
 
 [dependencies]
 procline-core.workspace = true
+procline-acl.workspace = true

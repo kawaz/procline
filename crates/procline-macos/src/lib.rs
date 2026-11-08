@@ -1,19 +1,37 @@
-//! Collects a process and its ancestors on macOS.
+//! Collects a process and its ancestors on macOS, and provides the `os.*` vocabulary items.
 
 use std::fmt;
 use std::io;
 use std::os::fd::AsFd;
 
-use procline_core::{EnvPolicy, ProcessChain};
+use procline_core::{EnvPolicy, ProcessChain, Redaction};
 
 /// What to collect besides the always-collected items.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectOptions {
     pub env: EnvPolicy,
+    /// How the collected environment values are redacted.
+    pub redaction: Redaction,
     pub icon: bool,
     /// Hash the contents of the executable (`ProcessInfo.digest`); off unless set.
     pub digest: bool,
     pub max_ancestors: usize,
+}
+
+/// Design rationale: `Redaction` holds closures, which have no `Debug`, `Clone` or `PartialEq`, so `CollectOptions` derives none of them; `Debug` is written by hand and leaves out `redaction`.
+impl fmt::Debug for CollectOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CollectOptions")
+            .field("env", &self.env)
+            .field("icon", &self.icon)
+            .field("digest", &self.digest)
+            .field("max_ancestors", &self.max_ancestors)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The `os.*` items (`os.session`, `os.console_user`, `os.login_session`, `os.not_remote`, `os.console_active`), for the application to add with `Vocabulary::register`.
+pub fn os_items() -> Vec<procline_acl::Item> {
+    todo!()
 }
 
 /// Collects the peer of a connected UNIX domain socket and its ancestors.
