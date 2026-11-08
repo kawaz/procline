@@ -50,7 +50,7 @@
 
 - `ProcessChain.truncated: Option<Truncated>`。`enum Truncated { MaxAncestors, AncestorExited, Unavailable }` が途切れた理由を表す。
 - subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。
-- `Decision.undecidable: Vec<String>` は、祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、途切れた列で当たらなかった grant の id。効果の決定にはそれらを使わない。
+- `Decision.undecidable: Vec<String>` は、祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、対象自身への条件は当たったのに祖先の条件が途切れた列の中で見つからなかった grant の id。自身への条件で外れた grant は全列でも外れるので含めない。効果の決定にはそれらを使わない。
 - `TaggedChain.undecidable_tags: BTreeSet<String>` は、途切れた列で有無を判定できなかったタグ。承認画面は「付いていない」と区別して見せる。
 - 判定できない deny があるのに allow を通してよいかはアプリが決める。crate は事実を返す。
 

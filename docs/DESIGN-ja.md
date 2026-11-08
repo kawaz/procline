@@ -402,7 +402,7 @@ register(key, impl)
    - 寿命型の `check` が偽になった grant は、その評価でその場で失効を確定し、`Decision.expired` に id を載せる。失効は一度確定したら戻らない(時計の巻き戻しや観測の回復で復活しない)。
    - targets が対象に当たらない grant を除く。
    - 各 grant の subject を照合し、状態型の `check` を取る。subject の `match` と `tags` は対象自身と、`ancestors` は列を近い側から貪欲に部分列として照合する。
-   - 列が途切れている(`ProcessChain.truncated` が `Some`)とき: subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、途切れた列で subject が当たらなかった grant は判定できない。その id を `Decision.undecidable` に載せ、効果の決定には使わない。subject は当たったが状態型の `check` が偽の grant は、全列でも偽なので判定できなかったとは扱わない。
+   - 列が途切れている(`ProcessChain.truncated` が `Some`)とき: subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、対象自身への条件 (`match` と `tags` の自身の部分) は当たったのに、祖先の条件が途切れた列の中で見つからなかった grant は判定できない (自身への条件で外れた grant は全列でも外れるので、判定できなかったとは扱わない)。その id を `Decision.undecidable` に載せ、効果の決定には使わない。subject は当たったが状態型の `check` が偽の grant は、全列でも偽なので判定できなかったとは扱わない。
 2. effect を決める。順序は deny > allow > ask。
    - `deny` が 1 つでも当たれば拒否。
    - `allow` が当たれば許可。当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順。他の grant で通るのに、限りある `uses` を減らさないため。
@@ -613,8 +613,8 @@ for item in procline_macos::os_items() {             // os.* の項目(os.sessio
 // matcher の項目、寿命型、状態型を同じ register で足す。key の重複と名前空間の違反はエラー
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // クラスが値によらず一定の項目は、クラスを明示してクロージャで登録する
 // クラスが値で変わる項目は Matcher trait を実装し、Item::matcher(key, impl) で登録する
-//   matches: 照合 / class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は弱い側)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)
-//   resolve(&self, value: &MatchValue, process: &ProcessInfo) -> Result<MatchValue, ResolveError>(placeholder を実値に。ResolveError::ValueUnavailable { field: Option<String> })
+//   matches(&self, target: &MatchTarget, value) -> bool(MatchTarget { process: &ProcessInfo, boot_uuid: &str }。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は弱い側)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)
+//   resolve(&self, value: &MatchValue, target: &MatchTarget) -> Result<MatchValue, ResolveError>(placeholder を実値に。ResolveError::ValueUnavailable { field: Option<String> })
 // vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: 項目が値(とプロセス)から決めたクラス(未登録の key と条件の項目は None)
 vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // Condition を実装した値(寿命型)
 // 状態型も同じ Item::condition(...) で register に渡す。寿命型か状態型かは Condition::kind が返す
