@@ -3,7 +3,7 @@ title: p_puniqueid の reparent 時の挙動を実機確認する
 status: open
 category: tech-memo
 created: 2026-11-08T19:16:35+09:00
-last_read:
+last_read: 2026-11-09T03:37:43+09:00
 open_entered: 2026-11-08T19:16:35+09:00
 wip_entered:
 blocked_entered:
