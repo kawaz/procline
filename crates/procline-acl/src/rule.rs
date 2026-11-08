@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::subject::SubjectRef;
+use crate::subject::{Subject, SubjectRef};
 
 /// A static definition: who, on what, until when and under which state, with which effect. Conditions stay symbolic; evaluation sees only the grants made from rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,9 +52,10 @@ impl ConditionUse {
 pub struct Grant {
     pub id: String,
     /// The rule the grant was made from, for display and cleanup.
-    pub rule_id: Option<String>,
+    pub rule_id: String,
     pub effect: Effect,
-    pub subject: SubjectRef,
+    /// The subject of the rule with a named subject expanded and every placeholder filled in. Tag names stay as names.
+    pub subject: Subject,
     pub targets: Vec<String>,
     pub conditions: Vec<PinnedCondition>,
     pub created_at: SystemTime,

@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use procline_core::ProcessChain;
+use procline_core::{ProcessChain, Strength};
 
+use crate::builder::RuleBuilder;
+use crate::constraints::AllowConstraints;
 use crate::context::EvalContext;
 use crate::rule::{Effect, Grant, Rule, Target};
 use crate::subject::{Subject, SubjectRef, Tag};
@@ -12,6 +14,7 @@ use crate::vocabulary::{PinError, Vocabulary};
 #[expect(dead_code, reason = "read once loading and evaluation are implemented")]
 pub struct Policy<'v> {
     vocab: &'v Vocabulary,
+    constraints: AllowConstraints,
     subjects: Vec<(String, Subject)>,
     tags: Vec<Tag>,
     rules: Vec<Rule>,
@@ -24,17 +27,23 @@ pub trait PolicyVerifier {
 }
 
 impl<'v> Policy<'v> {
-    /// Verifies the signature, then parses and checks the list against the vocabulary (unknown items, validity of the values). Rules without lifetime conditions become permanent grants.
+    /// Verifies the signature, then parses and checks the list against the vocabulary (unknown items, validity of the values), the names of tags and subjects, and the `allow` rules against `constraints`. Rules without lifetime conditions become permanent grants. A placeholder outside the inline subject of a rule, or in a rule that becomes a permanent grant, is `InvalidValue`.
     pub fn load_verified(
         _bytes: &[u8],
         _signature: &[u8],
         _verifier: &dyn PolicyVerifier,
         _vocab: &'v Vocabulary,
+        _constraints: AllowConstraints,
     ) -> Result<Self, LoadError> {
         todo!()
     }
 
-    /// Verifies the signature of one stored grant, then parses and checks it against the vocabulary (unknown items, validity of the values).
+    /// Starts a rule with the given id and subject; `RuleBuilder::build` checks it against this policy's vocabulary, list and `AllowConstraints`.
+    pub fn rule_builder(&self, id: impl Into<String>, subject: SubjectRef) -> RuleBuilder<'_> {
+        RuleBuilder::new(self, id.into(), subject)
+    }
+
+    /// Verifies the signature of one stored grant, then parses and checks it against the vocabulary (unknown items, validity of the values), the tag names, and an `allow` grant against the `AllowConstraints`. Does not add it; call `add_grant`.
     pub fn load_grant(
         &self,
         _bytes: &[u8],
@@ -44,14 +53,24 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Adds a grant read back by `load_grant`.
+    /// Adds a grant to the ones evaluation looks at, replacing the grant with the same id. Call it once the application has stored the grant (a new one from `grant`, an `updated_grant`, or one read back by `load_grant`).
     pub fn add_grant(&mut self, _grant: Grant) {
         todo!()
     }
 
-    /// Fills in the placeholders of the rule's subject from `tagged` (via `resolve_subject`), pins the conditions, and adds the resulting grant; the application signs and stores the returned grant.
+    /// Removes the grant with the id, for example one listed in `Decision.expired`. Returns the removed grant.
+    pub fn remove_grant(&mut self, _id: &str) -> Option<Grant> {
+        todo!()
+    }
+
+    /// Every grant evaluation looks at, for cleanup.
+    pub fn grants(&self) -> impl Iterator<Item = &Grant> {
+        self.grants.iter()
+    }
+
+    /// Fills in the placeholders of the rule's subject from `tagged` (via `resolve_subject`), checks an `allow` rule against the `AllowConstraints`, pins the conditions, and returns the resulting grant without adding it. The application signs and stores it, then calls `add_grant`.
     pub fn grant(
-        &mut self,
+        &self,
         _rule: &Rule,
         _tagged: &TaggedChain<'_>,
         _ctx: &EvalContext,
@@ -68,14 +87,17 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Attaches the tags each process of the chain carries.
-    pub fn tag<'c>(&'c self, _chain: &'c ProcessChain) -> TaggedChain<'c> {
+    /// Attaches the tags each process of the chain carries. The result borrows the vocabulary and the chain, not the policy.
+    pub fn tag<'c>(&self, _chain: &'c ProcessChain) -> TaggedChain<'c>
+    where
+        'v: 'c,
+    {
         todo!()
     }
 
-    /// Decides the effect for the target and advances the adopted grant, replacing it in memory.
+    /// Decides the effect for the target and advances the adopted grant. Memory is not changed: the application stores `updated_grant` and replaces it with `add_grant`, and removes the grants in `expired`.
     pub fn evaluate(
-        &mut self,
+        &self,
         _tagged: &TaggedChain<'_>,
         _target: &Target,
         _ctx: &EvalContext,
@@ -107,9 +129,14 @@ pub struct Decision {
     pub effect: Effect,
     /// The adopted grant; `None` when the default effect applied.
     pub grant_id: Option<String>,
+    /// For display to the user; not for the peer, since it shows which condition failed.
     pub trace: Trace,
     /// The new version of the adopted grant when `advance` changed it. The application signs and stores it before handing out the value.
     pub updated_grant: Option<Grant>,
+    /// Ids of the grants whose lifetime condition was false in this evaluation. Expiry is final; the application removes them.
+    pub expired: Vec<String>,
+    /// Ids of the grants with `ancestors` that could not be decided because the chain is truncated. They did not take part in deciding the effect.
+    pub undecidable: Vec<String>,
 }
 
 /// Why each grant matched or did not.
@@ -137,13 +164,26 @@ pub enum LoadError {
     UnknownItem {
         key: String,
     },
+    /// A tag name is not defined in the list.
+    UnknownTag {
+        name: String,
+    },
+    /// A rule references a subject name that is not defined in the list.
+    UnknownSubject {
+        name: String,
+    },
     TagCycle {
         tags: Vec<String>,
     },
-    /// The value of an item breaks the item's validity rules, or a grant still holds a placeholder in its subject.
+    /// The value of an item breaks the item's validity rules, or a placeholder is written where none is allowed (a grant, a tag definition, a named subject, a rule that becomes a permanent grant).
     InvalidValue {
         key: String,
         reason: String,
+    },
+    /// The conditions of an `allow` rule or grant do not satisfy the `AllowConstraints` for the class of its strength.
+    ScopeTooWeak {
+        rule_id: String,
+        class: Strength,
     },
 }
 
@@ -158,12 +198,28 @@ impl fmt::Display for LoadError {
                     "{key:?} is not registered in the vocabulary; register it before loading"
                 )
             }
+            Self::UnknownTag { name } => {
+                write!(
+                    f,
+                    "no tag named {name:?} in the list; define it in the list"
+                )
+            }
+            Self::UnknownSubject { name } => {
+                write!(
+                    f,
+                    "no subject named {name:?} in the list; define it in the list"
+                )
+            }
             Self::TagCycle { tags } => {
                 write!(f, "tag definitions form a cycle: {}", tags.join(" -> "))
             }
             Self::InvalidValue { key, reason } => {
                 write!(f, "the value of {key:?} is not valid: {reason}")
             }
+            Self::ScopeTooWeak { rule_id, class } => write!(
+                f,
+                "the allow rule {rule_id:?} of class {class:?} lacks the scope the constraints require for that class; add a scope they accept"
+            ),
         }
     }
 }
@@ -202,6 +258,10 @@ pub enum GrantError {
         key: String,
         field: Option<String>,
     },
+    /// The `allow` rule does not satisfy the `AllowConstraints` for the class of its strength, decided from the matched process (`path`) or by an `until` beyond the allowed time from now.
+    ScopeTooWeak {
+        class: Strength,
+    },
 }
 
 impl fmt::Display for GrantError {
@@ -225,6 +285,10 @@ impl fmt::Display for GrantError {
             } => write!(
                 f,
                 "the process has no value for {field:?} of {key:?}; choose another field"
+            ),
+            Self::ScopeTooWeak { class } => write!(
+                f,
+                "an allow rule of class {class:?} lacks the scope the constraints require for that class; add a scope they accept"
             ),
         }
     }

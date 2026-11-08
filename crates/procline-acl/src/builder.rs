@@ -2,9 +2,9 @@ use std::fmt;
 
 use procline_core::{BinaryField, Strength};
 
+use crate::policy::Policy;
 use crate::rule::{ConditionUse, Effect, Rule};
 use crate::subject::{AncestorMatch, MatchValue, Subject, SubjectRef};
-use crate::vocabulary::Vocabulary;
 
 /// Builds a subject from chosen items. It holds no collected values: a pinned item is written as a placeholder, and `Policy::grant` fills in the actual values.
 #[derive(Debug, Clone, Default)]
@@ -105,20 +105,22 @@ pub enum PinSpec {
     Binary(Vec<BinaryField>),
 }
 
-/// Builds a static rule and checks its values and its strength against its scopes.
+/// Builds a static rule and checks its values and its strength against its scopes. Made by `Policy::rule_builder`, since the strength needs the definitions of tags and named subjects in the list as well as the vocabulary.
 #[expect(dead_code, reason = "read once build is implemented")]
-pub struct RuleBuilder<'v> {
-    vocab: &'v Vocabulary,
+pub struct RuleBuilder<'p> {
+    policy: &'p Policy<'p>,
+    id: String,
     subject: SubjectRef,
     targets: Vec<String>,
     conditions: Vec<ConditionUse>,
     effect: Option<Effect>,
 }
 
-impl<'v> RuleBuilder<'v> {
-    pub fn new(subject: SubjectRef, vocab: &'v Vocabulary) -> Self {
+impl<'p> RuleBuilder<'p> {
+    pub(crate) fn new(policy: &'p Policy<'p>, id: String, subject: SubjectRef) -> Self {
         Self {
-            vocab,
+            policy,
+            id,
             subject,
             targets: Vec::new(),
             conditions: Vec::new(),
@@ -154,7 +156,7 @@ impl<'v> RuleBuilder<'v> {
         self
     }
 
-    /// Checks the keys of the subject and the conditions against the vocabulary, the validity of the values, and the strength / scope constraint (by the presence of lifetime conditions), and returns the static rule.
+    /// Checks the keys of the subject and the conditions against the vocabulary, the names of tags and subjects against the list, the validity of the values (`Matcher::validate`, `Condition::validate_args`), and the strength of an `allow` rule against the policy's `AllowConstraints`, and returns the static rule. The strength is decided without a process (`path` counts as `Medium`). Of the scopes, the presence of lifetime conditions and the length of `age` are checked here; the time of an `until` is checked by `Policy::grant` against the time of granting.
     pub fn build(self) -> Result<Rule, BuildError> {
         todo!()
     }
@@ -165,6 +167,14 @@ impl<'v> RuleBuilder<'v> {
 pub enum BuildError {
     UnknownItem {
         key: String,
+    },
+    /// A tag name is not defined in the list.
+    UnknownTag {
+        name: String,
+    },
+    /// The subject is referenced by a name that is not defined in the list.
+    UnknownSubject {
+        name: String,
     },
     /// The value of an item breaks the item's validity rules.
     InvalidValue {
@@ -178,7 +188,7 @@ pub enum BuildError {
     },
     /// The subject or the `ancestors` entry has no condition at all.
     Empty,
-    /// The scopes are too long-lived for the strength of the subject.
+    /// The conditions of an `allow` rule do not satisfy the `AllowConstraints` for the class of its strength.
     ScopeTooWeak {
         class: Strength,
     },
@@ -190,6 +200,16 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownItem { key } => write!(f, "{key:?} is not registered in the vocabulary"),
+            Self::UnknownTag { name } => {
+                write!(
+                    f,
+                    "no tag named {name:?} in the list; define it in the list"
+                )
+            }
+            Self::UnknownSubject { name } => write!(
+                f,
+                "no subject named {name:?} in the list; define it in the list"
+            ),
             Self::InvalidValue { key, reason } => {
                 write!(f, "the value of {key:?} is not valid: {reason}")
             }
@@ -203,7 +223,7 @@ impl fmt::Display for BuildError {
             Self::Empty => f.write_str("no condition is given; give an item, a tag or an ancestor"),
             Self::ScopeTooWeak { class } => write!(
                 f,
-                "an allow rule of class {class:?} needs a shorter scope; add an epoch scope, a shorter `until` or `uses`"
+                "an allow rule of class {class:?} lacks the scope the constraints require for that class; add a scope they accept"
             ),
             Self::MissingEffect => f.write_str("no effect chosen; call allow, deny or ask"),
         }

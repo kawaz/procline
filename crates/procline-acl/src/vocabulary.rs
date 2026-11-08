@@ -28,8 +28,13 @@ impl Vocabulary {
         self.items.get(key)
     }
 
-    /// The class the matcher item decides from the value; `None` for an unregistered key or a condition item.
-    pub fn class(&self, _key: &str, _value: &MatchValue) -> Option<Strength> {
+    /// The class the matcher item decides from the value, and from the process when one is given (see `Matcher::class`); `None` for an unregistered key or a condition item.
+    pub fn class(
+        &self,
+        _key: &str,
+        _value: &MatchValue,
+        _process: Option<&ProcessInfo>,
+    ) -> Option<Strength> {
         todo!()
     }
 }
@@ -88,12 +93,24 @@ pub enum ItemKind {
     Condition(Box<dyn Condition>),
 }
 
-/// Matches one process against the value written in `match`, and decides the class of that value.
+/// Matches one process against the value written in `match`, checks and resolves that value, and decides its class.
 pub trait Matcher: Send + Sync {
     fn matches(&self, process: &ProcessInfo, value: &MatchValue) -> bool;
 
     /// The class of the value, placeholders included (a placeholder names its field, so the class is known before the value is). Most items return a constant; `binary` returns the strongest field present (`Strong` with a signature field, `Medium` with `digest` alone).
-    fn class(&self, value: &MatchValue) -> Strength;
+    ///
+    /// `process` is the matched process when granting or evaluating, and `None` when building or loading. An item whose class depends on the process decides it from `process` when given, and returns the weaker class otherwise: `path` is `Strong` when its `PathMeta` shows a root-owned path the user cannot write, `Medium` otherwise or without `process`.
+    fn class(&self, value: &MatchValue, process: Option<&ProcessInfo>) -> Strength;
+
+    /// Checks the shape and validity of the value, placeholders included. Loading the list and `RuleBuilder::build` call it; `Err` holds the reason.
+    fn validate(&self, value: &MatchValue) -> Result<(), String>;
+
+    /// Replaces every placeholder of the value with the actual value of the process; a value without placeholders comes back as is.
+    fn resolve(
+        &self,
+        value: &MatchValue,
+        process: &ProcessInfo,
+    ) -> Result<MatchValue, ResolveError>;
 }
 
 /// A closure matcher whose class is the same for every value.
@@ -110,10 +127,50 @@ where
         (self.matches)(process, value)
     }
 
-    fn class(&self, _value: &MatchValue) -> Strength {
+    fn class(&self, _value: &MatchValue, _process: Option<&ProcessInfo>) -> Strength {
         self.class
     }
+
+    /// A closure item does not check its values: every value is accepted.
+    fn validate(&self, _value: &MatchValue) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// A closure item cannot read the actual value of a process, so a placeholder fails; write concrete values for it.
+    fn resolve(
+        &self,
+        value: &MatchValue,
+        _process: &ProcessInfo,
+    ) -> Result<MatchValue, ResolveError> {
+        match value {
+            MatchValue::Pin => Err(ResolveError::ValueUnavailable { field: None }),
+            other => Ok(other.clone()),
+        }
+    }
 }
+
+/// Resolving a placeholder of a matcher value failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// The process has no actual value for the placeholder (for example `team_id: true` on an unsigned process); `field` names the field of a structured value.
+    ValueUnavailable { field: Option<String> },
+}
+
+impl fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ValueUnavailable { field: None } => {
+                f.write_str("the process has no value for the placeholder; choose another item")
+            }
+            Self::ValueUnavailable { field: Some(field) } => write!(
+                f,
+                "the process has no value for {field:?}; choose another field"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
 
 /// A lifetime, consumable or state condition, as pure functions over its own pin value only.
 pub trait Condition: Send + Sync {
@@ -122,11 +179,15 @@ pub trait Condition: Send + Sync {
     /// Observes the current value (an epoch, the screen lock state, ...). `EvalContext::capture` calls it once per evaluation. `None` when there is nothing to observe.
     fn observe(&self) -> Option<serde_json::Value>;
 
-    /// Called once when a grant is made. State conditions return `Ok(None)`; a lifetime condition without an observed value fails with `Unobservable`, so no grant is made.
+    /// Checks the arguments written in the rule. Loading the list and `RuleBuilder::build` call it; `Err` holds the reason.
+    fn validate_args(&self, args: Option<&serde_json::Value>) -> Result<(), String>;
+
+    /// Called once when a grant is made. `chain` is the chain being approved, for conditions that pin a value of the peer (the asid of `os.login_session`). State conditions return `Ok(None)`; a lifetime condition without an observed value fails with `Unobservable`, so no grant is made.
     fn pin(
         &self,
         args: Option<&serde_json::Value>,
         obs: &Observed<'_>,
+        chain: &ProcessChain,
     ) -> Result<Option<serde_json::Value>, PinError>;
 
     /// Decides whether the condition holds. No side effects.
@@ -172,10 +233,6 @@ impl fmt::Display for PinError {
 }
 
 impl std::error::Error for PinError {}
-
-/// How far a value narrows: its level, or the number of pinned fields. Orders the choices in the UI and feeds the application's extra constraints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Depth(pub u8);
 
 /// Registering an item failed.
 #[derive(Debug, Clone, PartialEq, Eq)]

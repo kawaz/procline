@@ -11,6 +11,8 @@ use procline_core::{EnvPolicy, ProcessChain};
 pub struct CollectOptions {
     pub env: EnvPolicy,
     pub icon: bool,
+    /// Hash the contents of the executable (`ProcessInfo.digest`); off unless set.
+    pub digest: bool,
     pub max_ancestors: usize,
 }
 

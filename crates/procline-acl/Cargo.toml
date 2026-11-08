@@ -1,6 +1,6 @@
 [package]
 name = "procline-acl"
-description = "Access control rules over a process lineage: vocabulary registration, subjects, tags, scopes, evaluation"
+description = "Access control rules over a process lineage: vocabulary registration, subjects, tags, rules, grants, scopes, evaluation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

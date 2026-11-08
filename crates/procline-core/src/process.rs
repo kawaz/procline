@@ -9,13 +9,13 @@ use crate::signature::{Bundle, CodeSigning, SignatureTrust};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessChain {
     processes: Vec<ProcessInfo>,
-    /// The ancestor walk stopped before reaching the root.
-    pub truncated: bool,
+    /// Why the ancestor walk stopped before reaching the root; `None` when it reached the root. Grants with `ancestors` cannot be decided on a truncated chain.
+    pub truncated: Option<Truncated>,
 }
 
 impl ProcessChain {
     /// Builds a chain from the target and its ancestors in order.
-    pub fn new(processes: Vec<ProcessInfo>, truncated: bool) -> Self {
+    pub fn new(processes: Vec<ProcessInfo>, truncated: Option<Truncated>) -> Self {
         Self {
             processes,
             truncated,
@@ -28,6 +28,18 @@ impl ProcessChain {
     }
 }
 
+/// Why the ancestor walk of a chain stopped before reaching the root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Truncated {
+    /// The walk reached `max_ancestors` of the collect options.
+    MaxAncestors,
+    /// An ancestor exited during the walk.
+    AncestorExited,
+    /// An ancestor could not be read.
+    Unavailable,
+}
+
 /// What was collected about one process. Items that could not be collected are empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessInfo {
@@ -35,6 +47,10 @@ pub struct ProcessInfo {
     pub credentials: Option<Credentials>,
     pub code_signing: Option<CodeSigning>,
     pub path: Option<PathBuf>,
+    /// The owner of the file at `path` and whether the user can write it; decides the class of `path`.
+    pub path_meta: Option<PathMeta>,
+    /// Hash of the contents of the file at `path` (`sha256:…`); collected only when `digest` of the collect options is set.
+    pub digest: Option<String>,
     pub bundle: Option<Bundle>,
     /// pid of the responsible process.
     pub responsible_pid: Option<i32>,
@@ -55,6 +71,14 @@ impl ProcessInfo {
     }
 }
 
+/// Attributes of the file at the executable path that decide how much the path pins down the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PathMeta {
+    pub owner_uid: u32,
+    /// The user running the process can replace the file: it can write the file itself or any directory on the path to it.
+    pub writable_by_user: bool,
+}
+
 /// Identifiers that pin down one process stronger than a pid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
@@ -68,9 +92,10 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// The identifiers that make up the pin value of the `process` matcher item.
-    pub fn process_identity(&self) -> ProcessIdentity {
+    /// The identifiers that make up the pin value of the `process` matcher item, with the boot UUID (`kern.bootsessionuuid`) of the running system.
+    pub fn process_identity(&self, boot_uuid: &str) -> ProcessIdentity {
         ProcessIdentity {
+            boot_uuid: boot_uuid.to_owned(),
             unique_id: self.unique_id,
             pid: self.pid,
             start_time: self.start_time,
@@ -80,10 +105,12 @@ impl Identity {
 
 /// The pin value of the `process` matcher item ("this individual process"): every identifier available when it was pinned.
 ///
-/// Matching compares by the strongest identifier present on both sides, at worst the pair of pid and start time. The derived `==` compares the fields as written and is not that matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Matching compares every identifier present on both sides and requires all of them to be equal. The derived `==` compares the fields as written and is not that matching.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessIdentity {
+    /// The boot the process ran in, so identifiers reused after a restart do not match.
+    pub boot_uuid: String,
     pub unique_id: Option<u64>,
     pub pid: i32,
     pub start_time: Option<StartTime>,

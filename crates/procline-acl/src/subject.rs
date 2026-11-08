@@ -27,19 +27,21 @@ pub struct AncestorMatch {
 }
 
 /// A value to match an item against.
+///
+/// Placeholders (`true`) are written only in the inline subject of a rule; a grant, a tag definition and a named subject hold none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchValue {
     /// Placeholder of an item with an unstructured value (`true` in JSON): a grant pins the actual value of the matched process, compared for exact match.
     Pin,
+    /// A number or a string in JSON, as is.
     Exact(Literal),
+    /// `{"glob": "…"}` in JSON.
     Glob(String),
+    /// `{"regex": "…"}` in JSON. On `argv` it is matched against each element, not against the joined string.
     Regex(String),
-    /// Inclusive numeric range.
-    Range {
-        min: i64,
-        max: i64,
-    },
-    /// The individual process (`process` item), or a placeholder for the matched one. Compared by the strongest identifier present on both sides.
+    /// Inclusive numeric range, `{"min": …, "max": …}` in JSON.
+    Range { min: i64, max: i64 },
+    /// The individual process (`process` item), or a placeholder for the matched one. Every identifier present on both sides is compared, and all must be equal.
     Process(Pinnable<ProcessIdentity>),
     /// The identity of the code (`binary` item). Every field present is checked; each field may be a placeholder.
     Binary(BinaryPin),

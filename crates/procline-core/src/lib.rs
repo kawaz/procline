@@ -13,8 +13,8 @@ pub use binary::{BinaryField, BinaryPin, BinaryPinError};
 pub use env::{EnvPolicy, IsSecretFn, RedactFn, Redaction, default_is_secret, default_redact};
 pub use pin::Pinnable;
 pub use process::{
-    AuditToken, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity, ProcessInfo,
-    StartTime,
+    AuditToken, Credentials, Identity, NamedId, PathMeta, ProcessChain, ProcessIdentity,
+    ProcessInfo, StartTime, Truncated,
 };
 pub use sanitize::sanitize_for_display;
 pub use session::SessionLevel;
