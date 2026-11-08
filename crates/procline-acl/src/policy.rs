@@ -4,27 +4,27 @@ use std::fmt;
 use procline_core::ProcessChain;
 
 use crate::context::EvalContext;
-use crate::rule::{Effect, Preset, Rule, Target};
+use crate::rule::{Effect, Grant, Rule, Target};
 use crate::subject::{Subject, Tag};
-use crate::vocabulary::Vocabulary;
+use crate::vocabulary::{PinError, Vocabulary};
 
-/// The verified list of subjects, tags, rules and presets.
+/// The verified list of subjects, tags and rules, and the grants evaluation looks at.
 #[expect(dead_code, reason = "read once loading and evaluation are implemented")]
 pub struct Policy<'v> {
     vocab: &'v Vocabulary,
     subjects: Vec<(String, Subject)>,
     tags: Vec<Tag>,
     rules: Vec<Rule>,
-    presets: Vec<Preset>,
+    grants: Vec<Grant>,
 }
 
-/// Verifies the signature over the serialized list.
+/// Verifies the signature over serialized bytes (the list, or one grant).
 pub trait PolicyVerifier {
     fn verify(&self, bytes: &[u8], signature: &[u8]) -> bool;
 }
 
 impl<'v> Policy<'v> {
-    /// Verifies the signature, then parses and checks the list against the vocabulary.
+    /// Verifies the signature, then parses and checks the list against the vocabulary. Rules without lifetime conditions become permanent grants.
     pub fn load_verified(
         _bytes: &[u8],
         _signature: &[u8],
@@ -34,14 +34,34 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
+    /// Verifies the signature of one stored grant, then parses and checks it against the vocabulary.
+    pub fn load_grant(
+        &self,
+        _bytes: &[u8],
+        _signature: &[u8],
+        _verifier: &dyn PolicyVerifier,
+    ) -> Result<Grant, LoadError> {
+        todo!()
+    }
+
+    /// Adds a grant read back by `load_grant`.
+    pub fn add_grant(&mut self, _grant: Grant) {
+        todo!()
+    }
+
+    /// Pins the conditions of the rule and adds the resulting grant; the application signs and stores the returned grant.
+    pub fn grant(&mut self, _rule: &Rule, _ctx: &EvalContext) -> Result<Grant, GrantError> {
+        todo!()
+    }
+
     /// Attaches the tags each process of the chain carries.
     pub fn tag<'c>(&'c self, _chain: &'c ProcessChain) -> TaggedChain<'c> {
         todo!()
     }
 
-    /// Decides the effect for the target and explains why.
+    /// Decides the effect for the target and advances the adopted grant, replacing it in memory.
     pub fn evaluate(
-        &self,
+        &mut self,
         _tagged: &TaggedChain<'_>,
         _target: &Target,
         _ctx: &EvalContext,
@@ -49,13 +69,13 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Records the current epochs into the preset and returns it as a normal rule.
-    pub fn instantiate_preset(&self, _name: &str, _ctx: &EvalContext) -> Result<Rule, PresetError> {
-        todo!()
-    }
-
-    /// Counts one actual use of the rule for `uses`.
-    pub fn record_use(&mut self, _rule_id: &str) -> Result<(), RecordUseError> {
+    /// Decides the effect for the target without advancing any grant; `updated_grant` is always `None`.
+    pub fn explain(
+        &self,
+        _tagged: &TaggedChain<'_>,
+        _target: &Target,
+        _ctx: &EvalContext,
+    ) -> Decision {
         todo!()
     }
 }
@@ -71,28 +91,30 @@ pub struct TaggedChain<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub effect: Effect,
-    /// The rule that decided the effect; `None` when the default effect applied.
-    pub matched_rule: Option<String>,
+    /// The adopted grant; `None` when the default effect applied.
+    pub grant_id: Option<String>,
     pub trace: Trace,
+    /// The new version of the adopted grant when `advance` changed it. The application signs and stores it before handing out the value.
+    pub updated_grant: Option<Grant>,
 }
 
-/// Why each rule matched or did not.
+/// Why each grant matched or did not.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Trace {
     pub entries: Vec<TraceEntry>,
 }
 
-/// One checked item of one rule.
+/// One checked item of one grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceEntry {
-    pub rule_id: String,
+    pub grant_id: String,
     pub key: String,
     /// Index into the chain of the process the item matched, if any.
     pub process: Option<usize>,
     pub matched: bool,
 }
 
-/// Loading the list failed.
+/// Loading the list or a grant failed.
 #[derive(Debug)]
 pub enum LoadError {
     InvalidSignature,
@@ -118,8 +140,8 @@ pub enum LoadError {
 impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidSignature => f.write_str("the signature of the rule list does not verify"),
-            Self::Parse(err) => write!(f, "cannot parse the rule list: {err}"),
+            Self::InvalidSignature => f.write_str("the signature does not verify"),
+            Self::Parse(err) => write!(f, "cannot parse: {err}"),
             Self::UnknownItem { key } => {
                 write!(
                     f,
@@ -149,46 +171,44 @@ impl std::error::Error for LoadError {
     }
 }
 
-/// Instantiating a preset failed.
+/// Making a grant from a rule failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PresetError {
-    UnknownPreset {
-        name: String,
-    },
-    /// The epoch of a lifetime item could not be determined.
-    EpochUnavailable {
+pub enum GrantError {
+    UnknownItem {
         key: String,
     },
+    /// A condition is used without an item it depends on.
+    MissingDependency {
+        key: String,
+        missing: String,
+    },
+    /// A condition could not be pinned.
+    Pin {
+        key: String,
+        error: PinError,
+    },
 }
 
-impl fmt::Display for PresetError {
+impl fmt::Display for GrantError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownPreset { name } => write!(f, "no preset named {name:?}"),
-            Self::EpochUnavailable { key } => {
+            Self::UnknownItem { key } => write!(f, "{key:?} is not registered in the vocabulary"),
+            Self::MissingDependency { key, missing } => {
                 write!(
                     f,
-                    "the current epoch of {key:?} cannot be determined; the rule would expire at once"
+                    "{key:?} is used without {missing:?}, which it depends on; add {missing:?} to the rule"
                 )
             }
+            Self::Pin { key, error } => write!(f, "cannot pin {key:?}: {error}"),
         }
     }
 }
 
-impl std::error::Error for PresetError {}
-
-/// Recording a use failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecordUseError {
-    UnknownRule { rule_id: String },
-}
-
-impl fmt::Display for RecordUseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::error::Error for GrantError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::UnknownRule { rule_id } => write!(f, "no rule with id {rule_id:?}"),
+            Self::Pin { error, .. } => Some(error),
+            _ => None,
         }
     }
 }
-
-impl std::error::Error for RecordUseError {}

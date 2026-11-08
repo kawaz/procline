@@ -1,32 +1,36 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use crate::vocabulary::{Epoch, Vocabulary};
+use crate::vocabulary::Vocabulary;
 
-/// Time and epochs captured once at the start of an evaluation, so they do not change midway.
+/// Time and observed values captured once at the start of an evaluation, so they do not change midway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalContext {
     now: SystemTime,
-    epochs: BTreeMap<String, Option<Epoch>>,
+    observed: BTreeMap<String, Option<serde_json::Value>>,
 }
 
 impl EvalContext {
-    /// Captures the current time and the epoch of every lifetime item.
+    /// Captures the current time and calls `observe` once on every condition item, keeping the results by key.
     pub fn capture(_vocab: &Vocabulary) -> Self {
         todo!()
     }
 
-    /// A context with the given time and no epochs; tests fill epochs with `with_epoch`.
+    /// A context with the given time and no observed values; tests fill them with `with_observed`.
     pub fn new(now: SystemTime) -> Self {
         Self {
             now,
-            epochs: BTreeMap::new(),
+            observed: BTreeMap::new(),
         }
     }
 
-    /// Sets the epoch of a lifetime item; `None` means it cannot be determined.
-    pub fn with_epoch(mut self, key: impl Into<String>, epoch: Option<Epoch>) -> Self {
-        self.epochs.insert(key.into(), epoch);
+    /// Sets the observed value of a condition item; `None` means nothing could be observed.
+    pub fn with_observed(
+        mut self,
+        key: impl Into<String>,
+        value: Option<serde_json::Value>,
+    ) -> Self {
+        self.observed.insert(key.into(), value);
         self
     }
 
@@ -34,8 +38,16 @@ impl EvalContext {
         self.now
     }
 
-    /// The captured epoch of a lifetime item.
-    pub fn epoch(&self, key: &str) -> Option<&Epoch> {
-        self.epochs.get(key).and_then(Option::as_ref)
+    /// The observed value of a condition item.
+    pub fn observed(&self, key: &str) -> Option<&serde_json::Value> {
+        self.observed.get(key).and_then(Option::as_ref)
     }
+}
+
+/// What one condition sees: the captured time and its own observed value. The policy builds it per condition, since a condition does not know its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Observed<'a> {
+    pub now: SystemTime,
+    /// The result of `observe`; `None` when nothing was observed.
+    pub value: Option<&'a serde_json::Value>,
 }

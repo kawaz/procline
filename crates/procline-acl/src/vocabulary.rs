@@ -3,7 +3,7 @@ use std::fmt;
 
 use procline_core::{ProcessChain, ProcessInfo, Strength};
 
-use crate::context::EvalContext;
+use crate::context::Observed;
 use crate::subject::MatchValue;
 
 /// Every item usable in a rule: `match` keys, lifetime scopes and state conditions.
@@ -82,21 +82,7 @@ impl Item {
         }
     }
 
-    /// A lifetime scope item.
-    pub fn epoch<D: Into<String>>(
-        key: impl Into<String>,
-        depends: impl IntoIterator<Item = D>,
-        provider: impl EpochProvider + 'static,
-    ) -> Self {
-        Self {
-            key: key.into(),
-            depends: depends.into_iter().map(Into::into).collect(),
-            class: None,
-            kind: ItemKind::Epoch(Box::new(provider)),
-        }
-    }
-
-    /// A state condition item.
+    /// A condition item, lifetime or state as its implementation tells.
     pub fn condition<D: Into<String>>(
         key: impl Into<String>,
         depends: impl IntoIterator<Item = D>,
@@ -129,10 +115,9 @@ impl Item {
 
     /// Lifetime or state for condition items, `None` for matcher items.
     pub fn condition_kind(&self) -> Option<ConditionKind> {
-        match self.kind {
+        match &self.kind {
             ItemKind::Matcher(_) => None,
-            ItemKind::Epoch(_) => Some(ConditionKind::Lifetime),
-            ItemKind::Condition(_) => Some(ConditionKind::State),
+            ItemKind::Condition(condition) => Some(condition.kind()),
         }
     }
 }
@@ -140,7 +125,6 @@ impl Item {
 /// The implementation of an item.
 pub enum ItemKind {
     Matcher(Box<dyn Matcher>),
-    Epoch(Box<dyn EpochProvider>),
     Condition(Box<dyn Condition>),
 }
 
@@ -158,26 +142,63 @@ where
     }
 }
 
-/// Returns the current epoch of a lifetime scope; `None` means the scope cannot be determined (treated as expired).
-pub trait EpochProvider: Send + Sync {
-    fn current(&self, ctx: &EvalContext) -> Option<Epoch>;
-}
-
-/// Evaluates a state condition.
+/// A lifetime, consumable or state condition, as pure functions over its own pin value only.
 pub trait Condition: Send + Sync {
-    fn eval(&self, chain: &ProcessChain, args: &serde_json::Value, ctx: &EvalContext) -> bool;
+    fn kind(&self) -> ConditionKind;
+
+    /// Observes the current value (an epoch, the screen lock state, ...). `EvalContext::capture` calls it once per evaluation. `None` when there is nothing to observe.
+    fn observe(&self) -> Option<serde_json::Value>;
+
+    /// Called once when a grant is made. State conditions return `Ok(None)`; a lifetime condition without an observed value fails with `Unobservable`, so no grant is made.
+    fn pin(
+        &self,
+        args: Option<&serde_json::Value>,
+        obs: &Observed<'_>,
+    ) -> Result<Option<serde_json::Value>, PinError>;
+
+    /// Decides whether the condition holds. No side effects.
+    fn check(
+        &self,
+        args: Option<&serde_json::Value>,
+        pinned: Option<&serde_json::Value>,
+        obs: &Observed<'_>,
+        chain: &ProcessChain,
+    ) -> bool;
+
+    /// Called only for the adopted grant. Returns the new pin value, or `None` when unchanged.
+    fn advance(&self, pinned: Option<&serde_json::Value>) -> Option<serde_json::Value>;
 }
 
-/// Whether a false condition expires the rule forever or only while false.
+/// Whether a false condition expires the grant forever or only while false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConditionKind {
     Lifetime,
     State,
 }
 
-/// Opaque epoch value recorded when a rule is created.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Epoch(pub String);
+/// Pinning a condition failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinError {
+    /// The current value cannot be observed; the grant would expire at once.
+    Unobservable,
+    /// The arguments of the condition are not valid.
+    InvalidArgs { reason: String },
+}
+
+impl fmt::Display for PinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unobservable => {
+                f.write_str("the current value cannot be observed; the grant would expire at once")
+            }
+            Self::InvalidArgs { reason } => {
+                write!(f, "invalid arguments: {reason}; fix them in the rule")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PinError {}
 
 /// Items connected by `depends`, with the class taken from its roots.
 #[derive(Debug, Clone, PartialEq, Eq)]

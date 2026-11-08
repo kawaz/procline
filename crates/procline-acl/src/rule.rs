@@ -1,7 +1,8 @@
-use crate::subject::SubjectRef;
-use crate::vocabulary::Epoch;
+use std::time::SystemTime;
 
-/// Who, on what, until when and under which state, with which effect.
+use crate::subject::SubjectRef;
+
+/// A static definition: who, on what, until when and under which state, with which effect. Conditions stay symbolic; evaluation sees only the grants made from rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
@@ -11,10 +12,9 @@ pub struct Rule {
     pub targets: Vec<String>,
     /// ANDed conditions, lifetime and state alike.
     pub conditions: Vec<ConditionUse>,
-    pub created_from: Option<String>,
 }
 
-/// Outcome of a matching rule.
+/// Outcome of a matching grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     Allow,
@@ -22,12 +22,11 @@ pub enum Effect {
     Ask,
 }
 
-/// One entry of `conditions`: the item key, its arguments and, for lifetime items, the recorded epoch.
+/// One entry of a rule's `conditions`: the item key and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionUse {
     pub key: String,
     pub args: Option<serde_json::Value>,
-    pub epoch: Option<Epoch>,
 }
 
 impl ConditionUse {
@@ -36,7 +35,6 @@ impl ConditionUse {
         Self {
             key: key.into(),
             args: None,
-            epoch: None,
         }
     }
 
@@ -45,19 +43,30 @@ impl ConditionUse {
         Self {
             key: key.into(),
             args: Some(args),
-            epoch: None,
         }
     }
 }
 
-/// A rule before its epochs are recorded.
+/// A rule applied to an actual process, with each condition pinned to a concrete value. Self-contained and immutable: an update is a new value made by the policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Preset {
-    pub name: String,
+pub struct Grant {
+    pub id: String,
+    /// The rule the grant was made from, for display and cleanup.
+    pub rule_id: Option<String>,
     pub effect: Effect,
     pub subject: SubjectRef,
     pub targets: Vec<String>,
-    pub conditions: Vec<ConditionUse>,
+    pub conditions: Vec<PinnedCondition>,
+    pub created_at: SystemTime,
+    pub created_from: Option<String>,
+}
+
+/// One entry of a grant's `conditions`: the item key, the original arguments if needed, and the pin value (absent for state conditions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedCondition {
+    pub key: String,
+    pub args: Option<serde_json::Value>,
+    pub pinned: Option<serde_json::Value>,
 }
 
 /// The thing being accessed, in the application's target vocabulary.

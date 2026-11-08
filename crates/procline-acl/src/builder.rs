@@ -45,7 +45,7 @@ impl<'a> SubjectBuilder<'a> {
     }
 }
 
-/// Builds a rule and checks its depends and its strength against its scopes.
+/// Builds a static rule and checks its depends and its strength against its scopes.
 #[expect(dead_code, reason = "read once build is implemented")]
 pub struct RuleBuilder<'v> {
     vocab: &'v Vocabulary,
@@ -71,7 +71,7 @@ impl<'v> RuleBuilder<'v> {
         self
     }
 
-    /// Adds a condition; lifetime conditions record the current epoch at build.
+    /// Adds a condition; it stays symbolic until the rule is granted.
     pub fn condition(mut self, condition: ConditionUse) -> Self {
         self.conditions.push(condition);
         self
@@ -94,7 +94,7 @@ impl<'v> RuleBuilder<'v> {
         self
     }
 
-    /// Checks depends and the strength / scope constraint, then records epochs.
+    /// Checks depends and the strength / scope constraint (by the presence of lifetime conditions) and returns the static rule.
     pub fn build(self) -> Result<Rule, BuildError> {
         todo!()
     }
@@ -141,7 +141,7 @@ impl fmt::Display for BuildError {
             }
             Self::ScopeTooWeak { class } => write!(
                 f,
-                "an allow rule of class {class:?} needs a shorter scope; add an epoch scope or a shorter `until`"
+                "an allow rule of class {class:?} needs a shorter scope; add an epoch scope, a shorter `until` or `uses`"
             ),
             Self::MissingEffect => f.write_str("no effect chosen; call allow, deny or ask"),
         }

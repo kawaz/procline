@@ -8,16 +8,15 @@ mod subject;
 mod vocabulary;
 
 pub use builder::{BuildError, RuleBuilder, SubjectBuilder};
-pub use context::EvalContext;
+pub use context::{EvalContext, Observed};
 pub use policy::{
-    Decision, LoadError, Policy, PolicyVerifier, PresetError, RecordUseError, TaggedChain, Trace,
-    TraceEntry,
+    Decision, GrantError, LoadError, Policy, PolicyVerifier, TaggedChain, Trace, TraceEntry,
 };
-pub use rule::{ConditionUse, Effect, Preset, Rule, Target};
+pub use rule::{ConditionUse, Effect, Grant, PinnedCondition, Rule, Target};
 pub use subject::{
     AncestorCondition, AncestorSelector, Literal, MatchValue, Subject, SubjectRef, Tag,
 };
 pub use vocabulary::{
-    Chain, Condition, ConditionKind, Depth, Epoch, EpochProvider, Item, ItemKind, Matcher,
-    RegisterError, Vocabulary,
+    Chain, Condition, ConditionKind, Depth, Item, ItemKind, Matcher, PinError, RegisterError,
+    Vocabulary,
 };
