@@ -51,7 +51,7 @@ The collection result is a sequence that starts with the target process (usually
 | --- | --- | --- | --- |
 | audit token (peer) | `getsockopt(LOCAL_PEERTOKEN)` | Strong | Public API. Contains pid, pidversion, uid, asid |
 | unique\_id / parent\_unique\_id | `p_uniqueid` and `p_puniqueid` from `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` | Strong | 64-bit ID unique per launch. Lets ancestors be traced reliably. It is an SPI under `#ifdef PRIVATE`, so if unavailable, fall back to the pair of pid and start time |
-| pid, start time | `proc_pidinfo(PROC_PIDTBSDINFO)` | Strong (as a pair) | Together they form an identifier (identification when unique\_id is unavailable). The pidversion in the audit token changes on exec, so it can be used to detect a peer that exec'd after connecting |
+| pid, start time | `kinfo_proc` from `sysctl(KERN_PROC_PID)` (readable regardless of uid) | Strong (as a pair) | Together they form an identifier (identification when unique\_id is unavailable). The pidversion in the audit token changes on exec, so it can be used to detect a peer that exec'd after connecting |
 | asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. It is reused across boots, so it is used for the pinned value of `os.login_session` paired with the boot UUID |
 
 These identifiers are an internal classification of collection: in the rule vocabulary, the audit token, unique\_id, and pid with start time are folded into the single item `process` that identifies the individual process ("matcher"), and the asid is used only internally as the pinned value of `os.login_session` (`{boot_uuid, asid}`) and does not appear in the vocabulary.
@@ -60,15 +60,17 @@ These identifiers are an internal classification of collection: in the rule voca
 
 | Item | How to obtain (macOS) | Strength |
 | --- | --- | --- |
-| uid, gid, supplementary groups (matched numerically; names are also kept for display, as a list since one ID can have multiple names) | `LOCAL_PEERCRED`, audit token | Weak |
+| uid, gid, supplementary groups (matched numerically; names are also kept for display, as a list since one ID can have multiple names) | `LOCAL_PEERCRED`, audit token (peer), `kinfo_proc` (ancestors. Supplementary groups are up to 16 entries of `cr_groups`, the first being the effective gid) | Weak |
 | Code signature (identifier, Team ID, cdhash, signer certificate chain, whether ad-hoc / hardened runtime / platform binary, entitlements, notarization) | `SecCodeCopyGuestWithAttributes` (audit token for the peer, pid for ancestors), `SecCodeCheckValidity`, `SecCodeCopySigningInformation` | Strong (only when verification passes) |
 | Executable path. Its owner (whether root) and whether the user can write to it are also collected (used for deciding the class. "Writable" means the user can write to the file itself or to any directory on the path) | `proc_pidpath` | Strong (a root-owned location the user cannot write to), Medium (a location the user can write to) |
 | Executable digest | sha256 of the contents of the file at the executable path | Medium (same as the path. If the file is replaced after exec, it diverges from the running image. On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively strong) |
 | app bundle (bundle ID, version) | Taken from `kSecCodeInfoPList` of `SecCodeCopySigningInformation` (the Info.plist sealed by the signature) and held in `Signature.bundle_id` (used for matching). `ProcessInfo.bundle`, read by walking up from the executable path to the `.app`, is for display | Strong (a field of `binary`. Paired with `team_id` and `signing_id`) |
 | Responsible process | `responsibility_get_pid_responsible_for_pid` (private API). Held as the identification of the individual process (`ProcessInfo.responsible: Option<ProcessIdentity>`) rather than a pid | Medium |
-| Process name, argv, cwd, tty | `KERN_PROCARGS2`, `PROC_PIDVNODEPATHINFO`, `kinfo_proc` | Weak |
-| env | `KERN_PROCARGS2` (same uid or root only) | Display only (it holds only the values after redaction, so it cannot be used for matching. Policy below) |
+| Process name, argv, cwd, tty | `kinfo_proc` (name and tty), `KERN_PROCARGS2` (argv), `PROC_PIDVNODEPATHINFO` (cwd). argv and cwd for the same uid or root only | Weak |
+| env | `KERN_PROCARGS2` (same uid or root only. `KERN_PROCARGS2` does not return the env of a platform binary, so it is unavailable and becomes `None` rather than empty) | Display only (it holds only the values after redaction, so it cannot be used for matching. Policy below) |
 | Icon | `NSWorkspace.icon(forFile:)` scaled down to a 64px PNG | Display only (not used for matching) |
+
+BSD information (pid, ppid, uid / gid, start time, name, tty) is taken from `kinfo_proc` via `sysctl(KERN_PROC_PID)`. It is readable regardless of uid, so ancestors with a different uid (such as launchd) can be traced too. `proc_pidinfo(PROC_PIDTBSDINFO)` fails with `EPERM` for processes with a different uid, so it is used only to supplement the name with the 32-byte `pbi_name` for the same uid (`p_comm` in `kinfo_proc` is shorter).
 
 Items that depend on SPIs or private APIs are simply left empty if unavailable; collection as a whole does not stop. On real hardware, they are verified only on the latest macOS in use. If an older version cannot provide them, they just end up empty, which fails safe.
 
@@ -83,7 +85,10 @@ Icons and names are "what it looks like"; the signature is "who it actually is".
 | notarized | Developer ID signed and notarized | No warning (signer name and Team ID shown alongside) |
 | developer\_id | Developer ID signed but not notarized | ⚠️ Not notarized |
 | adhoc | ad-hoc signed (no Team ID) | ⚠️ ad-hoc |
+| unknown | Validly signed, but the chain cannot be confirmed to end at an Apple root (a self-made or third-party certificate, or it could not be evaluated) | ⚠️ Signer cannot be confirmed |
 | unsigned / invalid | Unsigned, or verification failed | ⛔ Unsigned / Invalid signature |
+
+platform, app\_store, notarized, and developer\_id presuppose that the signature's certificate chain ends at an Apple root (`Signature.apple_anchored`, the result of `SecCodeCheckValidity` with the requirement `anchor apple generic`). The platform binary mark and the certificate names can both be written by the signer, so a signature whose chain cannot be confirmed is unknown. The decision order is: unsigned → invalid → ad-hoc → unknown if not anchored at Apple (including when it could not be evaluated) → platform → App Store → Developer ID (notarized if notarized). An ad-hoc signature has no chain, and the OS's platform binaries are not ad-hoc signed, so placing ad-hoc before the anchor check does not produce false warnings for OS binaries. The kind of certificate is decided by the string of the leaf certificate's subject summary (`Apple Mac OS Application Signing` is App Store, `Developer ID Application: …` is Developer ID) (provisional. Other Apple certificates fall back to developer\_id).
 
 Since anyone can imitate icons and names, the UI always shows the signer name and Team ID side by side. There is no mechanism that compares against past approvals and warns "the signer changed". Rules and tags match on the signer, so when the signer changes they naturally stop matching.
 
@@ -103,7 +108,7 @@ env can contain secrets such as tokens, so the caller chooses whether to collect
 | `allowlist` | Only the listed variables (e.g. `PWD`, `SSH_CONNECTION`, `SUDO_COMMAND`) |
 | `all` | Everything, but always passed through the redaction rules |
 
-Redaction lives in the core and is replaceable as two functions (a `Redaction` passed via `CollectOptions.redaction`): the target predicate `Fn(&str) -> bool` (takes the variable name) and the redaction function `Fn(&str, &str) -> String` (takes the name and value). By default, variables whose name contains `TOKEN`, `SECRET`, `PASS`, `KEY`, `CRED`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`, `CERT`, `SALT`, `PWD`, or `OTP` (case-insensitive) have their value redacted, keeping only the name. The word choice follows existing lists such as Rails' `filter_parameters` and Sentry's default redaction. `PWD` also catches the working directory variable, but this is not a problem because the working directory is available as the cwd item. To exclude it, replace the predicate with one that wraps the default and excludes PWD. The env in the collection result holds only the values after redaction, so it cannot be used for matching (display only).
+Redaction lives in the core and is replaceable as two functions (a `Redaction` passed via `CollectOptions.redaction`): the target predicate `Fn(&str) -> bool` (takes the variable name) and the redaction function `Fn(&str, &str) -> String` (takes the name and value). By default, variables whose name contains `TOKEN`, `SECRET`, `PASS`, `KEY`, `CRED`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`, `CERT`, `SALT`, `PWD`, or `OTP` (case-insensitive) have their value replaced with `[redacted]`, keeping only the name. The word choice follows existing lists such as Rails' `filter_parameters` and Sentry's default redaction. `PWD` also catches the working directory variable, but this is not a problem because the working directory is available as the cwd item. To exclude it, replace the predicate with one that wraps the default and excludes PWD. The env in the collection result holds only the values after redaction, so it cannot be used for matching (display only).
 
 ### Sanitization for Display
 
@@ -120,7 +125,7 @@ Collection takes time, and processes may be replaced in the meantime.
 1. At the start of collection, record the audit token for the peer and the unique\_id (or pid and start time if unavailable) for ancestors.
 2. Verify the signature by referring to the peer via its audit token (referring by pid could hit a different process in the meantime).
 3. At the end of collection, confirm that the recorded identifiers have not changed. If they have, discard the result and return an error.
-4. An ancestor may have exited partway through. In that case, end the sequence in a form that shows "it was cut off here".
+4. An ancestor may have exited partway through. In that case, end the sequence in a form that shows "it was cut off here". For a process reparented to launchd after its parent exited, the ppid becomes 1 but `p_puniqueid` keeps the original parent's value, so the sequence ends there as `ancestor_exited` (linking launchd as the parent would record a parent-child relationship that does not exist).
 
 ## ACL Rule Shape and Evaluation
 
@@ -568,8 +573,11 @@ Cleanup (deleting grants that are no longer needed) is the app's responsibility,
 
 The entry points are collection, evaluation, rule creation, and grant issuance. Vocabulary extension registers matcher items, scopes, and conditions with the same `register`.
 
+In JSON, byte strings (such as certificate DER) are written as base64url (without padding), and enum values are written in snake\_case. `code_signing` is `{"state": "signed", …}` or `{"state": "unsigned"}`.
+
 ```rust
 // Collection (procline-macos)
+// examples/dump.rs prints the chain collected with collect_pid as JSON (cargo run -p procline --example dump -- <pid>)
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
     icon: true,
@@ -580,7 +588,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // chain.processes()[0] is the target, the rest are ancestors
 // chain.truncated: Option<Truncated>. The reason the sequence was cut off: enum Truncated { MaxAncestors, AncestorExited, Unavailable }
 // chain.boot_uuid: String. The collection side obtains kern.bootsessionuuid
-// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
+// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unknown / Unsigned / Invalid
 // ProcessInfo holds digest: Option<String> and path_meta: Option<PathMeta>. PathMeta { owner_uid: u32, writable_by_user: bool } (used for deciding the class of path)
 // ProcessInfo.responsible: Option<ProcessIdentity>. The responsible process is held as the identification of the individual process rather than a pid
 // Signature.bundle_id: Option<String> (from kSecCodeInfoPList. Used for matching; what BinaryPin.bundle_id is matched against). ProcessInfo.bundle (read by walking up from the executable path to the .app) is for display

@@ -51,7 +51,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | --- | --- | --- | --- |
 | audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む |
 | unique\_id / parent\_unique\_id | `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` の `p_uniqueid`、`p_puniqueid` | 強 | 起動ごとに一意な 64bit ID。祖先を確実に辿れる。`#ifdef PRIVATE` の SPI なので、取れなければ pid と起動時刻の組に落とす |
-| pid、起動時刻 | `proc_pidinfo(PROC_PIDTBSDINFO)` | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、接続後に exec した相手の検出に使える |
+| pid、起動時刻 | `sysctl(KERN_PROC_PID)` の `kinfo_proc`(uid を問わず読める) | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、接続後に exec した相手の検出に使える |
 | asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。起動ごとに再利用されるので、`os.login_session` の pin 値に boot UUID と組で使う |
 
 これらの識別子は収集の内部の分類で、ルールの語彙では audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれ(「matcher」)、asid は `os.login_session` の pin 値(`{boot_uuid, asid}`)として内部で使われるだけで語彙には出ません。
@@ -60,15 +60,17 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 | 項目 | 取り方(macOS) | 強さ |
 | --- | --- | --- |
-| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。1つの ID に名前が複数あり得るので列で持つ) | `LOCAL_PEERCRED`、audit token | 弱 |
+| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。1つの ID に名前が複数あり得るので列で持つ) | `LOCAL_PEERCRED`、audit token(接続相手)、`kinfo_proc`(祖先。所属グループは `cr_groups` の最大 16 件で、先頭が実効 gid) | 弱 |
 | コード署名(識別子、Team ID、cdhash、署名者の証明書チェーン、ad-hoc・hardened runtime・platform binary の別、entitlements、公証) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid)、`SecCodeCheckValidity`、`SecCodeCopySigningInformation` | 強(検証が通ったときだけ) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所)、中(利用者が書ける場所) |
 | 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い) |
 | app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取り、`Signature.bundle_id` に持つ(照合に使う)。実行パスから `.app` を遡って読む `ProcessInfo.bundle` は表示用 | 強(`binary` の field。`team_id`・`signing_id` と組) |
 | 責任プロセス | `responsibility_get_pid_responsible_for_pid`(私的 API)。pid でなく個体の識別(`ProcessInfo.responsible: Option<ProcessIdentity>`)で持つ | 中 |
-| プロセス名、argv、cwd、tty | `KERN_PROCARGS2`、`PROC_PIDVNODEPATHINFO`、`kinfo_proc` | 弱 |
-| env | `KERN_PROCARGS2`(同じ uid か root のみ) | 表示専用(伏せた後の値しか持たないので照合に使えない。方針は後述) |
+| プロセス名、argv、cwd、tty | `kinfo_proc`(名前と tty)、`KERN_PROCARGS2`(argv)、`PROC_PIDVNODEPATHINFO`(cwd)。argv と cwd は同じ uid か root のみ | 弱 |
+| env | `KERN_PROCARGS2`(同じ uid か root のみ。platform binary の env は `KERN_PROCARGS2` が返さないので取れず、空でなく `None` になる) | 表示専用(伏せた後の値しか持たないので照合に使えない。方針は後述) |
 | アイコン | `NSWorkspace.icon(forFile:)` を 64px PNG に縮小 | 表示専用(照合に使わない) |
+
+BSD の情報(pid、ppid、uid / gid、起動時刻、名前、tty)は、`sysctl(KERN_PROC_PID)` の `kinfo_proc` から取ります。uid を問わず読めるので、別 uid の祖先(launchd など)も辿れます。`proc_pidinfo(PROC_PIDTBSDINFO)` は別 uid のプロセスには `EPERM` で失敗するので、同じ uid のときに名前を 32 バイトの `pbi_name` で補うのにだけ使います(`kinfo_proc` の `p_comm` はそれより短い)。
 
 SPI や私的 API に依存する項目は、取れなければ空にするだけで、収集全体は止めません。実機では自分が使う最新の macOS だけで確かめます。古い版で取れなくても空になるだけで、安全側に倒れるためです。
 
@@ -83,7 +85,10 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 | notarized | Developer ID 署名で公証済み | 警告なし(署名者名と Team ID を併記) |
 | developer\_id | Developer ID 署名だが公証なし | ⚠️ 未公証 |
 | adhoc | ad-hoc 署名(Team ID なし) | ⚠️ ad-hoc |
+| unknown | 有効な署名だが、Apple のルートへの連鎖を確かめられない(自作や第三者の証明書、または評価できなかった) | ⚠️ 署名者を確かめられない |
 | unsigned / invalid | 署名なし、または検証に失敗 | ⛔ 署名なし / 署名が無効 |
+
+platform、app\_store、notarized、developer\_id は、署名の証明書チェーンが Apple のルートに連鎖していること(`Signature.apple_anchored`。requirement `anchor apple generic` を渡した `SecCodeCheckValidity` の結果)を前提にします。platform binary の印も証明書の名前も署名者が書けるので、連鎖を確かめられない署名は unknown です。判定は、未署名 → 無効 → ad-hoc → Apple に連鎖しない(評価できなかったときも含む)なら unknown → platform → App Store → Developer ID(公証済みなら notarized)の順です。ad-hoc 署名は連鎖を持たず、OS の platform binary は ad-hoc で署名されていないので、ad-hoc を連鎖の判定より先に置いても OS のバイナリに誤った警告は出ません。証明書の種別は leaf の証明書の subject summary の文字列(`Apple Mac OS Application Signing` なら App Store、`Developer ID Application: …` なら Developer ID)で判定しています(暫定。それ以外の Apple の証明書は developer\_id に倒す)。
 
 アイコンや名前は誰でも真似できるので、画面では署名者名と Team ID を常に並べて出します。過去の承認と比べて「署名者が変わった」と警告する仕組みは持ちません。ルールやタグは署名者で照合するので、署名者が変われば自然に当たらなくなるためです。
 
@@ -103,7 +108,7 @@ env にはトークンなどの秘密が混ざるので、収集するかどう�
 | `allowlist` | 列挙した変数だけ(例: `PWD`、`SSH_CONNECTION`、`SUDO_COMMAND`) |
 | `all` | すべて。ただし伏せ字の規則を必ず通す |
 
-伏せ字は core に置き、2つの関数として差し替えられるようにします(`Redaction` を `CollectOptions.redaction` で渡す)。対象の判定 `Fn(&str) -> bool`(変数名を受け取る)と、伏せ方 `Fn(&str, &str) -> String`(名前と値を受け取る)です。既定は、名前に `TOKEN`、`SECRET`、`PASS`、`KEY`、`CRED`、`AUTH`、`COOKIE`、`SESSION`、`PRIVATE`、`CERT`、`SALT`、`PWD`、`OTP` を含む変数(大文字小文字を区別しない)の値を伏せ、名前だけ残します。語の選び方は Rails の `filter_parameters` や Sentry の既定の伏せ字など、既存のリストに合わせます。`PWD` は作業ディレクトリの変数も巻き込みますが、作業ディレクトリは cwd の項目で取れるので困りません。外したいときは、既定の判定関数を包んで PWD を除く関数に差し替えます。収集結果の env は伏せた後の値しか持たないので、照合には使えません(表示専用)。
+伏せ字は core に置き、2つの関数として差し替えられるようにします(`Redaction` を `CollectOptions.redaction` で渡す)。対象の判定 `Fn(&str) -> bool`(変数名を受け取る)と、伏せ方 `Fn(&str, &str) -> String`(名前と値を受け取る)です。既定は、名前に `TOKEN`、`SECRET`、`PASS`、`KEY`、`CRED`、`AUTH`、`COOKIE`、`SESSION`、`PRIVATE`、`CERT`、`SALT`、`PWD`、`OTP` を含む変数(大文字小文字を区別しない)の値を `[redacted]` に置き換え、名前だけ残します。語の選び方は Rails の `filter_parameters` や Sentry の既定の伏せ字など、既存のリストに合わせます。`PWD` は作業ディレクトリの変数も巻き込みますが、作業ディレクトリは cwd の項目で取れるので困りません。外したいときは、既定の判定関数を包んで PWD を除く関数に差し替えます。収集結果の env は伏せた後の値しか持たないので、照合には使えません(表示専用)。
 
 ### 表示用の無害化
 
@@ -120,7 +125,7 @@ argv、パス、env の値など、相手が自由に決められる文字列を
 1. 接続相手は audit token、祖先は unique\_id(なければ pid と起動時刻)を、収集の最初に記録する。
 2. 署名は、接続相手を audit token で参照して検証する(pid で参照すると、その間に別のプロセスになり得る)。
 3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。
-4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。
+4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。親が終了して launchd に付け替えられたプロセスは、ppid が 1 になっても `p_puniqueid` は元の親の値のままなので、列はそこで `ancestor_exited` として終わる(launchd を親として繋ぐと、実在しない親子関係になる)。
 
 ## ACL ルールの形と評価
 
@@ -568,8 +573,11 @@ struct ObserveError { reason: String }
 
 収集、評価、rule の作成、grant の発行が入口です。語彙の拡張は、matcher の項目、scope、条件を同じ `register` で登録します。
 
+JSON では、バイト列(証明書の DER など)を base64url(padding なし)で書き、enum の値を snake\_case で書きます。`code_signing` は `{"state": "signed", …}` か `{"state": "unsigned"}` です。
+
 ```rust
 // 収集(procline-macos)
+// examples/dump.rs は collect_pid で集めた列を JSON で出す(cargo run -p procline --example dump -- <pid>)
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
     icon: true,
@@ -580,7 +588,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // chain.processes()[0] が対象、以降が祖先
 // chain.truncated: Option<Truncated>。列が途切れた理由 enum Truncated { MaxAncestors, AncestorExited, Unavailable }
 // chain.boot_uuid: String。収集側が kern.bootsessionuuid を取る
-// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
+// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unknown / Unsigned / Invalid
 // ProcessInfo は digest: Option<String> と path_meta: Option<PathMeta> を持つ。PathMeta { owner_uid: u32, writable_by_user: bool }(path のクラスの判定に使う)
 // ProcessInfo.responsible: Option<ProcessIdentity>。責任プロセスは pid でなく個体の識別で持つ
 // Signature.bundle_id: Option<String>(kSecCodeInfoPList 由来。照合に使い、BinaryPin.bundle_id の照合元)。ProcessInfo.bundle(実行パスから .app を遡って読む)は表示用
