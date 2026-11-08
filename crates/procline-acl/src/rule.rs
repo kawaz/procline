@@ -8,7 +8,7 @@ pub struct Rule {
     pub id: String,
     pub effect: Effect,
     pub subject: SubjectRef,
-    /// Globs over the strings of `Target`; empty matches every target. The target vocabulary belongs to the application.
+    /// Globs over the strings of `Target`; empty matches every target. The target vocabulary belongs to the application, so a target is an opaque string: `*` matches any characters, `/` included.
     pub targets: Vec<String>,
     /// ANDed conditions, lifetime and state alike.
     pub conditions: Vec<ConditionUse>,

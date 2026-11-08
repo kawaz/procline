@@ -31,13 +31,6 @@ pub(crate) enum Placeholders {
     /// The values are concrete (a grant, a tag definition, a named subject). A placeholder never matches.
     Reject,
     /// The inline subject of a rule, before a grant fills in its placeholders: a value matches a process when the item can resolve it from that process and the resolved value matches. An entry made only of placeholders matches the nearest process that has the values.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Policy::resolve_subject fills placeholders from the processes the entries matched"
-        )
-    )]
     Fill,
 }
 
@@ -129,7 +122,8 @@ impl Matching<'_> {
         truth
     }
 
-    fn ancestors(
+    /// The `ancestors` entries as a subsequence of the processes from `start` on. Returns the truth and the chain index each entry matched, in order; when an entry finds no process, the indexes of the entries before it.
+    pub fn ancestors(
         &self,
         entries: &[AncestorMatch],
         start: usize,
@@ -195,21 +189,7 @@ pub(crate) fn tag_chain<'c>(
     chain: &'c ProcessChain,
 ) -> TaggedChain<'c> {
     let len = chain.processes().len();
-    let mut index = BTreeMap::new();
-    for (position, tag) in definitions.iter().enumerate() {
-        index.entry(tag.name.as_str()).or_insert(position);
-    }
-    let mut tagger = Tagger {
-        matching: Matching {
-            vocab,
-            chain,
-            placeholders: Placeholders::Reject,
-        },
-        definitions,
-        subjects,
-        index,
-        states: vec![vec![TagState::Pending; len]; definitions.len()],
-    };
+    let mut tagger = Tagger::new(vocab, subjects, definitions, chain);
     let names: Vec<&str> = tagger.index.keys().copied().collect();
     let mut tags = vec![BTreeSet::new(); len];
     let mut undecidable_tags = BTreeSet::new();
@@ -252,6 +232,29 @@ struct Tagger<'a> {
 }
 
 impl<'a> Tagger<'a> {
+    fn new(
+        vocab: &'a Vocabulary,
+        subjects: &'a [(String, Subject)],
+        definitions: &'a [Tag],
+        chain: &'a ProcessChain,
+    ) -> Self {
+        let mut index = BTreeMap::new();
+        for (position, tag) in definitions.iter().enumerate() {
+            index.entry(tag.name.as_str()).or_insert(position);
+        }
+        Self {
+            matching: Matching {
+                vocab,
+                chain,
+                placeholders: Placeholders::Reject,
+            },
+            definitions,
+            subjects,
+            index,
+            states: vec![vec![TagState::Pending; chain.processes().len()]; definitions.len()],
+        }
+    }
+
     /// The subject of the definition at `position`, with a named subject resolved; `None` when the name is not in the list.
     fn subject(&self, position: usize) -> Option<&'a Subject> {
         let definitions: &'a [Tag] = self.definitions;
@@ -289,6 +292,46 @@ impl TagLookup for Tagger<'_> {
         };
         self.states[position][index] = TagState::Done(truth);
         truth
+    }
+}
+
+/// The tags of a tagged chain, for matching a grant or a rule against it.
+///
+/// A tag a process carries is `True` and a tag that is not in `undecidable_tags` is `False`, as `TaggedChain` says. A tag in `undecidable_tags` is decided again at the asked process, since the set does not say at which processes it was undecidable: a tag that is `False` at the target is `False` there even when it was undecidable at another process.
+pub(crate) struct ChainTags<'a> {
+    tags: &'a [BTreeSet<String>],
+    undecidable: &'a BTreeSet<String>,
+    tagger: Tagger<'a>,
+}
+
+impl<'a> ChainTags<'a> {
+    pub fn new(
+        vocab: &'a Vocabulary,
+        subjects: &'a [(String, Subject)],
+        definitions: &'a [Tag],
+        tagged: &'a TaggedChain<'_>,
+    ) -> Self {
+        Self {
+            tags: &tagged.tags,
+            undecidable: &tagged.undecidable_tags,
+            tagger: Tagger::new(vocab, subjects, definitions, tagged.chain),
+        }
+    }
+}
+
+impl TagLookup for ChainTags<'_> {
+    fn tag(&mut self, name: &str, index: usize) -> Truth {
+        if self
+            .tags
+            .get(index)
+            .is_some_and(|carried| carried.contains(name))
+        {
+            Truth::True
+        } else if self.undecidable.contains(name) {
+            self.tagger.tag(name, index)
+        } else {
+            Truth::False
+        }
     }
 }
 

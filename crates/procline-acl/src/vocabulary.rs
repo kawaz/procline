@@ -61,6 +61,32 @@ impl Vocabulary {
         self.items.get(key)
     }
 
+    /// The condition item registered under the key; `None` for an unregistered key or a matcher item.
+    pub(crate) fn condition(&self, key: &str) -> Option<&dyn Condition> {
+        match self.items.get(key)?.kind() {
+            ItemKind::Condition(condition) => Some(condition.as_ref()),
+            ItemKind::Matcher(_) => None,
+        }
+    }
+
+    /// The matcher item registered under the key; `None` for an unregistered key or a condition item.
+    pub(crate) fn matcher(&self, key: &str) -> Option<&dyn Matcher> {
+        match self.items.get(key)?.kind() {
+            ItemKind::Matcher(matcher) => Some(matcher.as_ref()),
+            ItemKind::Condition(_) => None,
+        }
+    }
+
+    /// Every condition item with its key.
+    pub(crate) fn conditions(&self) -> impl Iterator<Item = (&str, &dyn Condition)> {
+        self.items
+            .iter()
+            .filter_map(|(key, item)| match item.kind() {
+                ItemKind::Condition(condition) => Some((key.as_str(), condition.as_ref())),
+                ItemKind::Matcher(_) => None,
+            })
+    }
+
     /// The class the matcher item decides from the value, and from the process when one is given (see `Matcher::class`); `None` for an unregistered key or a condition item.
     pub fn class(
         &self,

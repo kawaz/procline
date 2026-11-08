@@ -3,8 +3,9 @@
 #![allow(dead_code, reason = "each test file uses part of the helpers")]
 
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use procline_acl::{ItemKind, MatchTarget, Matcher, Vocabulary};
+use procline_acl::{Condition, ItemKind, MatchTarget, Matcher, Vocabulary};
 use procline_core::{
     CdHash, CodeSigning, Credentials, Identity, NamedId, ProcessChain, ProcessInfo, Signature,
     SignatureValidity, StartTime,
@@ -123,4 +124,68 @@ pub fn matcher<'v>(vocab: &'v Vocabulary, key: &str) -> &'v dyn Matcher {
         Some(ItemKind::Matcher(matcher)) => matcher.as_ref(),
         _ => panic!("{key:?} is not a built-in matcher item"),
     }
+}
+
+/// The condition of a registered item.
+pub fn condition<'v>(vocab: &'v Vocabulary, key: &str) -> &'v dyn Condition {
+    match vocab.get(key).map(|item| item.kind()) {
+        Some(ItemKind::Condition(condition)) => condition.as_ref(),
+        _ => panic!("{key:?} is not a registered condition item"),
+    }
+}
+
+/// The time `secs` seconds after the epoch.
+pub fn at(secs: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+/// 2026-11-08T04:00:00Z (13:00 at +09:00), the time the tests treat as now.
+pub const NOW: u64 = 1_794_110_400;
+
+/// An epoch-style lifetime condition, as `os.session` or `app.unlock` would be: `pin` takes the observed value (`Unobservable` without one), `check` holds while the observed value equals the pinned one.
+pub struct Epoch;
+
+impl Condition for Epoch {
+    fn kind(&self) -> procline_acl::ConditionKind {
+        procline_acl::ConditionKind::Lifetime
+    }
+    /// Tests give the observed value with `EvalContext::with_observed`.
+    fn observe(&self) -> Result<Option<serde_json::Value>, procline_acl::ObserveError> {
+        Ok(None)
+    }
+    fn validate_args(&self, _args: Option<&serde_json::Value>) -> Result<(), String> {
+        Ok(())
+    }
+    fn pin(
+        &self,
+        _args: Option<&serde_json::Value>,
+        obs: &procline_acl::Observed<'_>,
+        _chain: &ProcessChain,
+    ) -> Result<Option<serde_json::Value>, procline_acl::PinError> {
+        match obs.value {
+            Ok(Some(value)) => Ok(Some(value.clone())),
+            _ => Err(procline_acl::PinError::Unobservable),
+        }
+    }
+    fn check(
+        &self,
+        _args: Option<&serde_json::Value>,
+        pinned: Option<&serde_json::Value>,
+        obs: &procline_acl::Observed<'_>,
+        _chain: &ProcessChain,
+    ) -> bool {
+        matches!((pinned, obs.value), (Some(pinned), Ok(Some(observed))) if pinned == observed)
+    }
+    fn advance(&self, _pinned: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+        None
+    }
+}
+
+/// The built-in vocabulary with `app.unlock` as an `Epoch`.
+pub fn vocabulary() -> Vocabulary {
+    let mut vocab = Vocabulary::builtin();
+    vocab
+        .register(procline_acl::Item::condition("app.unlock", Epoch))
+        .unwrap();
+    vocab
 }

@@ -47,6 +47,43 @@ pub enum MatchValue {
     Binary(BinaryPin),
 }
 
+impl MatchValue {
+    /// The value is or holds a placeholder (`Pin`, `Process(Pin)`, or a `Binary` with a placeholder field).
+    pub(crate) fn has_placeholder(&self) -> bool {
+        match self {
+            Self::Pin | Self::Process(Pinnable::Pin) => true,
+            Self::Binary(pin) => {
+                matches!(pin.digest, Some(Pinnable::Pin))
+                    || matches!(pin.team_id, Some(Pinnable::Pin))
+                    || matches!(pin.signing_id, Some(Pinnable::Pin))
+                    || matches!(pin.bundle_id, Some(Pinnable::Pin))
+                    || matches!(pin.cdhash, Some(Pinnable::Pin))
+            }
+            Self::Exact(_)
+            | Self::Glob(_)
+            | Self::Regex(_)
+            | Self::Range { .. }
+            | Self::Process(Pinnable::Value(_)) => false,
+        }
+    }
+
+    /// The name of the first placeholder field of a `Binary` value, for an error that names it.
+    pub(crate) fn placeholder_field(&self) -> Option<&'static str> {
+        let Self::Binary(pin) = self else {
+            return None;
+        };
+        [
+            ("digest", matches!(pin.digest, Some(Pinnable::Pin))),
+            ("team_id", matches!(pin.team_id, Some(Pinnable::Pin))),
+            ("signing_id", matches!(pin.signing_id, Some(Pinnable::Pin))),
+            ("bundle_id", matches!(pin.bundle_id, Some(Pinnable::Pin))),
+            ("cdhash", matches!(pin.cdhash, Some(Pinnable::Pin))),
+        ]
+        .into_iter()
+        .find_map(|(name, pinned)| pinned.then_some(name))
+    }
+}
+
 /// A literal compared for exact match. There is no boolean literal: `true` in JSON is the placeholder; an item with a truth value takes a string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {

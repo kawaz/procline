@@ -12,8 +12,14 @@ pub struct EvalContext {
 
 impl EvalContext {
     /// Captures the current time and calls `observe` once on every condition item, keeping the results by key.
-    pub fn capture(_vocab: &Vocabulary) -> Self {
-        todo!()
+    pub fn capture(vocab: &Vocabulary) -> Self {
+        Self {
+            now: SystemTime::now(),
+            observed: vocab
+                .conditions()
+                .map(|(key, condition)| (key.to_owned(), condition.observe()))
+                .collect(),
+        }
     }
 
     /// A context with the given time and no observed values; tests fill them with `with_observed`.

@@ -300,6 +300,34 @@ pub(crate) fn boot_session_uuid() -> io::Result<String> {
     Ok(uuid)
 }
 
+/// `sysctlbyname("kern.waketime")`: the seconds since the epoch of the last wake from sleep (`struct timeval`, the microseconds dropped).
+pub(crate) fn wake_time_secs() -> io::Result<i64> {
+    let mut buf = MaybeUninit::<libc::timeval>::zeroed();
+    let mut size = size_of::<libc::timeval>();
+    // SAFETY: the name is NUL-terminated, `buf` is writable for one `struct timeval` (`size` bytes), and the kernel stores the written length in `size`.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.waketime".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if size != size_of::<libc::timeval>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kern.waketime is not a struct timeval",
+        ));
+    }
+    // SAFETY: `sysctlbyname` succeeded and wrote a whole `struct timeval`, which holds only integers.
+    let wake = unsafe { buf.assume_init() };
+    Ok(wake.tv_sec)
+}
+
 /// `MNT_RDONLY` (`<sys/mount.h>`).
 const MNT_RDONLY: u32 = 0x0000_0001;
 
