@@ -41,12 +41,12 @@ pub fn os_items() -> Vec<procline_acl::Item> {
     todo!()
 }
 
-/// Collects the peer of a connected UNIX domain socket and its ancestors.
+/// Collects the peer of a connected UNIX domain socket and its ancestors. The peer's audit token identifies its process and addresses its code signature; the other processes' signatures are looked up by pid.
 pub fn collect_peer<S: AsFd>(
-    _stream: &S,
-    _options: &CollectOptions,
+    stream: &S,
+    options: &CollectOptions,
 ) -> Result<ProcessChain, CollectError> {
-    todo!()
+    collect::collect_peer(stream.as_fd(), options)
 }
 
 /// Collects the process with the given pid and its ancestors.

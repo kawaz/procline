@@ -1,6 +1,6 @@
 //! The code signature of a running process.
 
-use procline_core::{CdHash, Certificate, CodeSigning, Signature, SignatureValidity};
+use procline_core::{AuditToken, CdHash, Certificate, CodeSigning, Signature, SignatureValidity};
 use security_framework::os::macos::code_signing::SecCode;
 
 use crate::sys::security;
@@ -20,7 +20,15 @@ const SIGNATURE_RUNTIME: u32 = 0x1_0000;
 ///
 /// Notarization is not checked (`notarized` is `None`).
 pub(crate) fn code_signing(pid: i32) -> Option<CodeSigning> {
-    let code = security::guest_for_pid(pid).ok()?;
+    signing_for_code(security::guest_for_pid(pid).ok()?)
+}
+
+/// Look up the socket peer by its audit token, not by a pid that another process could acquire before verification.
+pub(crate) fn code_signing_for_peer(token: AuditToken) -> Option<CodeSigning> {
+    signing_for_code(security::guest_for_audit_token(token).ok()?)
+}
+
+fn signing_for_code(code: SecCode) -> Option<CodeSigning> {
     let validity = match security::check_validity(&code) {
         Ok(()) => SignatureValidity::Valid,
         Err(ERR_SEC_CS_UNSIGNED) => return Some(CodeSigning::Unsigned),

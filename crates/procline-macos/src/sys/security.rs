@@ -15,6 +15,8 @@ use security_framework::os::macos::code_signing::{
 };
 use security_framework_sys::code_signing::SecCodeRef;
 
+use procline_core::AuditToken;
+
 use super::cf;
 
 /// `kSecCSSigningInformation` (`<Security/SecCode.h>`, `1 << 1`).
@@ -47,6 +49,15 @@ unsafe extern "C" {
 pub(crate) fn guest_for_pid(pid: i32) -> Result<SecCode, OSStatus> {
     let mut attributes = GuestAttributes::new();
     attributes.set_pid(pid);
+    SecCode::copy_guest_with_attribues(None, &attributes, Flags::empty()).map_err(|e| e.code())
+}
+
+/// The code object addressed by a socket peer's audit token (`kSecGuestAttributeAudit` in `<Security/SecCode.h>`), never by its reusable pid.
+pub(crate) fn guest_for_audit_token(token: AuditToken) -> Result<SecCode, OSStatus> {
+    let bytes = token.0.map(u32::to_ne_bytes);
+    let data = CFData::from_buffer(bytes.as_flattened());
+    let mut attributes = GuestAttributes::new();
+    attributes.set_audit_token(data.as_concrete_TypeRef());
     SecCode::copy_guest_with_attribues(None, &attributes, Flags::empty()).map_err(|e| e.code())
 }
 

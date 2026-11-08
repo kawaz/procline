@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::BorrowedFd;
 
 use procline_core::{
-    Credentials, Identity, NamedId, ProcessChain, ProcessIdentity, ProcessInfo, StartTime,
-    Truncated,
+    AuditToken, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity, ProcessInfo,
+    StartTime, Truncated,
 };
 
+use crate::sys::peer;
 use crate::sys::proc::{self as sys, KinfoProc, UniqueIds};
 use crate::{CollectError, CollectOptions, file, path_meta, procargs, signing};
 
@@ -159,6 +161,7 @@ fn process_info(
     boot_uuid: &str,
     options: &CollectOptions,
     names: &mut Names,
+    peer_token: Option<AuditToken>,
 ) -> ProcessInfo {
     let pid = record.pid;
     let path = sys::pid_path(pid).ok();
@@ -177,10 +180,18 @@ fn process_info(
         let comm = record.kinfo.comm.clone();
         (!comm.is_empty()).then_some(comm)
     });
+    let mut identity = record.identity();
+    if let Some(token) = peer_token {
+        identity.audit_token = Some(token);
+        identity.asid = Some(peer::asid(token));
+    }
     ProcessInfo {
-        identity: record.identity(),
+        identity,
         credentials: credentials(&record.kinfo, names),
-        code_signing: signing::code_signing(pid),
+        code_signing: match peer_token {
+            Some(token) => signing::code_signing_for_peer(token),
+            None => signing::code_signing(pid),
+        },
         path_meta: path
             .as_deref()
             .and_then(|p| path_meta::path_meta(p, record.kinfo.uid, &record.kinfo.groups)),
@@ -212,27 +223,77 @@ pub(crate) fn collect_pid(
     options: &CollectOptions,
 ) -> Result<ProcessChain, CollectError> {
     let boot_uuid = sys::boot_session_uuid().map_err(CollectError::BootUuid)?;
-    let target = Recorded::read(pid).map_err(|source| {
+    let target = read_target(pid)?;
+    collect_recorded(target, &boot_uuid, options, None)
+}
+
+/// Capture the socket identity before reading any process attributes. The token's pid version ties the pid-based reads to the same executable image used by the audit-token-based signature lookup.
+pub(crate) fn collect_peer(
+    fd: BorrowedFd<'_>,
+    options: &CollectOptions,
+) -> Result<ProcessChain, CollectError> {
+    let token = peer::peer_token(fd).map_err(CollectError::Peer)?;
+    let pid = peer::pid(token);
+    let boot_uuid = sys::boot_session_uuid().map_err(CollectError::BootUuid)?;
+    let target = read_target(pid)?;
+    if target
+        .ids
+        .is_some_and(|ids| ids.id_version != peer::pidversion(token))
+    {
+        return Err(CollectError::IdentityChanged);
+    }
+    let chain = collect_recorded(target, &boot_uuid, options, Some(token))?;
+    if peer::peer_token(fd).ok() != Some(token) {
+        return Err(CollectError::IdentityChanged);
+    }
+    Ok(chain)
+}
+
+fn read_target(pid: i32) -> Result<Recorded, CollectError> {
+    Recorded::read(pid).map_err(|source| {
         if is_no_such_process(&source) {
             CollectError::NoSuchProcess { pid }
         } else {
             CollectError::Unreadable { pid, source }
         }
-    })?;
+    })
+}
+
+fn collect_recorded(
+    target: Recorded,
+    boot_uuid: &str,
+    options: &CollectOptions,
+    peer_token: Option<AuditToken>,
+) -> Result<ProcessChain, CollectError> {
+    let pid = target.pid;
     let (records, mut truncated) = walk(target, options.max_ancestors);
     let mut names = Names::default();
     let mut processes: Vec<ProcessInfo> = records
         .iter()
-        .map(|record| process_info(record, &boot_uuid, options, &mut names))
+        .enumerate()
+        .map(|(index, record)| {
+            process_info(
+                record,
+                boot_uuid,
+                options,
+                &mut names,
+                if index == 0 { peer_token } else { None },
+            )
+        })
         .collect();
 
-    // Everything above was read by pid, which another process can take over once the recorded one exits; reading the identifiers again shows whether the information still belongs to the recorded processes.
+    // Everything except the peer signature was read by pid, which another process can take over once the recorded one exits; rechecking the identifiers rejects mixed-up data.
     for (index, record) in records.iter().enumerate() {
         let now = Recorded::read(record.pid);
         if index == 0 {
             match now {
-                Ok(now) if record.same_image(&now) => {}
-                Err(err) if is_no_such_process(&err) => {
+                Ok(now)
+                    if record.same_image(&now)
+                        && peer_token.is_none_or(|token| {
+                            now.ids
+                                .is_none_or(|ids| ids.id_version == peer::pidversion(token))
+                        }) => {}
+                Err(err) if is_no_such_process(&err) && peer_token.is_none() => {
                     return Err(CollectError::NoSuchProcess { pid });
                 }
                 _ => return Err(CollectError::IdentityChanged),
@@ -243,5 +304,9 @@ pub(crate) fn collect_pid(
             break;
         }
     }
-    Ok(ProcessChain::new(processes, boot_uuid, truncated))
+    Ok(ProcessChain::new(
+        processes,
+        boot_uuid.to_owned(),
+        truncated,
+    ))
 }

@@ -16,3 +16,6 @@ security-framework.workspace = true
 security-framework-sys.workspace = true
 sha2.workspace = true
 plist.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
