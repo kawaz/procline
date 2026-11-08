@@ -30,20 +30,20 @@ The adversary is another process with the same uid. root and impersonation of th
 
 ## Structure
 
-Collection is implemented in per-OS crates, while the types and matching live in an OS-independent core. Apps use only the entry crate procline, which pulls in the per-OS crate for the build target (`[target.'cfg(target_os = "macos")'.dependencies]`). The core itself is not the entry point because the per-OS crates depend on the core's types, so having the core load them would create a cycle. The ACL depends only on the types, so it works unchanged when Linux collection is added. The name comes from process lineage (a process and the sequence of its ancestors) (decision record: [DR-0001](decisions/DR-0001-crate-naming.md)).
+Collection is implemented in per-OS crates, while the types and matching live in an OS-independent core. Apps use only the entry crate procline, which pulls in the per-OS crate for the build target (`[target.'cfg(target_os = "macos")'.dependencies]`). The core itself is not the entry point because the per-OS crates depend on the core's types, so having the core load them would create a cycle. The ACL depends only on the types, so it works unchanged when Linux collection is added. The `os.*` vocabulary is provided by the per-OS crate as `procline_acl::Item`s, so procline-macos also depends on procline-acl (procline-acl depends only on the core, so there is no cycle). The name comes from process lineage (a process and the sequence of its ancestors) (decision record: [DR-0001](decisions/DR-0001-crate-naming.md)).
 
 | crate | Contents | Depends on |
 | --- | --- | --- |
 | procline | Entry point. Re-exports the core types and the collect of the build target's OS | core, a per-OS crate (only one, per target) |
 | procline-core | Types for collection results, the strength class type (`Strength`), signature trust evaluation, sanitization for display, env policy and redaction, the JSON shape | none (OS-independent) |
-| procline-macos | Collection of the peer and ancestors, code signature verification, icons, OS epochs (boot, sleep, screen lock, etc.) | core, Security framework, AppKit |
-| procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, rule creation and grant issuance | core |
+| procline-macos | Collection of the peer and ancestors, code signature verification, icons, providing the `os.*` vocabulary (`procline_macos::os_items()`) | core, procline-acl, Security framework, AppKit |
+| procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, the OS-independent built-in vocabulary, rule creation and grant issuance | core |
 
-Apps (cw, pam-passkey) use only what they need. pam-passkey uses only collection; cw uses everything. cw-specific vocabulary (`app.unlock` and so on) is defined on the cw side and registered into procline-acl under `app.` names.
+Apps (cw, pam-passkey) use only what they need. pam-passkey uses only collection; cw uses everything. cw registers the `os.*` items from `procline_macos::os_items()` with `Vocabulary::register`. cw-specific vocabulary (`app.unlock` and so on) is defined on the cw side and registered into procline-acl under `app.` names.
 
 ## Collected Information
 
-The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the class when the item is used for matching, determined by how much the condition pins down the approved individual process or code ("Strength: Class and Depth").
+The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. The sequence also holds the boot UUID of the boot it was collected in (`kern.bootsessionuuid`, `ProcessChain.boot_uuid`). Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the class when the item is used for matching, determined by how much the condition pins down the approved individual process or code ("Strength: Class and Depth").
 
 ### Identifiers
 
@@ -52,9 +52,9 @@ The collection result is a sequence that starts with the target process (usually
 | audit token (peer) | `getsockopt(LOCAL_PEERTOKEN)` | Strong | Public API. Contains pid, pidversion, uid, asid |
 | unique\_id / parent\_unique\_id | `p_uniqueid` and `p_puniqueid` from `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` | Strong | 64-bit ID unique per launch. Lets ancestors be traced reliably. It is an SPI under `#ifdef PRIVATE`, so if unavailable, fall back to the pair of pid and start time |
 | pid, start time | `proc_pidinfo(PROC_PIDTBSDINFO)` | Strong (as a pair) | Together they form an identifier (identification when unique\_id is unavailable). The pidversion in the audit token changes on exec, so it can be used to detect a peer that exec'd after connecting |
-| asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. Used for the pinned value of `os.login_session` |
+| asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. It is reused across boots, so it is used for the pinned value of `os.login_session` paired with the boot UUID |
 
-These identifiers are an internal classification of collection: in the rule vocabulary, the audit token, unique\_id, and pid with start time are folded into the single item `process` that identifies the individual process ("matcher"), and the asid is used only internally as the pinned value of `os.login_session` and does not appear in the vocabulary.
+These identifiers are an internal classification of collection: in the rule vocabulary, the audit token, unique\_id, and pid with start time are folded into the single item `process` that identifies the individual process ("matcher"), and the asid is used only internally as the pinned value of `os.login_session` (`{boot_uuid, asid}`) and does not appear in the vocabulary.
 
 ### Process Attributes
 
@@ -64,8 +64,8 @@ These identifiers are an internal classification of collection: in the rule voca
 | Code signature (identifier, Team ID, cdhash, signer certificate chain, whether ad-hoc / hardened runtime / platform binary, entitlements, notarization) | `SecCodeCopyGuestWithAttributes` (audit token for the peer, pid for ancestors), `SecCodeCheckValidity`, `SecCodeCopySigningInformation` | Strong (only when verification passes) |
 | Executable path. Its owner (whether root) and whether the user can write to it are also collected (used for deciding the class. "Writable" means the user can write to the file itself or to any directory on the path) | `proc_pidpath` | Strong (a root-owned location the user cannot write to), Medium (a location the user can write to) |
 | Executable digest | sha256 of the contents of the file at the executable path | Medium (same as the path. If the file is replaced after exec, it diverges from the running image. On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively strong) |
-| app bundle (bundle ID, version) | Taken from `kSecCodeInfoPList` of `SecCodeCopySigningInformation` (the Info.plist sealed by the signature). Walking up from the executable path to the `.app` and reading it is for display | Strong (a field of `binary`. Paired with `team_id` and `signing_id`) |
-| Responsible process | `responsibility_get_pid_responsible_for_pid` (private API) | Medium |
+| app bundle (bundle ID, version) | Taken from `kSecCodeInfoPList` of `SecCodeCopySigningInformation` (the Info.plist sealed by the signature) and held in `Signature.bundle_id` (used for matching). `ProcessInfo.bundle`, read by walking up from the executable path to the `.app`, is for display | Strong (a field of `binary`. Paired with `team_id` and `signing_id`) |
+| Responsible process | `responsibility_get_pid_responsible_for_pid` (private API). Held as the identification of the individual process (`ProcessInfo.responsible: Option<ProcessIdentity>`) rather than a pid | Medium |
 | Process name, argv, cwd, tty | `KERN_PROCARGS2`, `PROC_PIDVNODEPATHINFO`, `kinfo_proc` | Weak |
 | env | `KERN_PROCARGS2` (same uid or root only) | Display only (it holds only the values after redaction, so it cannot be used for matching. Policy below) |
 | Icon | `NSWorkspace.icon(forFile:)` scaled down to a 64px PNG | Display only (not used for matching) |
@@ -79,6 +79,7 @@ Icons and names are "what it looks like"; the signature is "who it actually is".
 | Trust level | State | Display |
 | --- | --- | --- |
 | platform | Apple platform binary | No warning |
+| app\_store | Distributed through the App Store (Apple signed, no notarization ticket) | No warning |
 | notarized | Developer ID signed and notarized | No warning (signer name and Team ID shown alongside) |
 | developer\_id | Developer ID signed but not notarized | ⚠️ Not notarized |
 | adhoc | ad-hoc signed (no Team ID) | ⚠️ ad-hoc |
@@ -102,7 +103,7 @@ env can contain secrets such as tokens, so the caller chooses whether to collect
 | `allowlist` | Only the listed variables (e.g. `PWD`, `SSH_CONNECTION`, `SUDO_COMMAND`) |
 | `all` | Everything, but always passed through the redaction rules |
 
-Redaction lives in the core and is replaceable as two functions: the target predicate `Fn(&str) -> bool` (takes the variable name) and the redaction function `Fn(&str, &str) -> String` (takes the name and value). By default, variables whose name contains `TOKEN`, `SECRET`, `PASS`, `KEY`, `CRED`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`, `CERT`, `SALT`, `PWD`, or `OTP` (case-insensitive) have their value redacted, keeping only the name. The word choice follows existing lists such as Rails' `filter_parameters` and Sentry's default redaction. `PWD` also catches the working directory variable, but this is not a problem because the working directory is available as the cwd item. To exclude it, replace the predicate with one that wraps the default and excludes PWD. The env in the collection result holds only the values after redaction, so it cannot be used for matching (display only).
+Redaction lives in the core and is replaceable as two functions (a `Redaction` passed via `CollectOptions.redaction`): the target predicate `Fn(&str) -> bool` (takes the variable name) and the redaction function `Fn(&str, &str) -> String` (takes the name and value). By default, variables whose name contains `TOKEN`, `SECRET`, `PASS`, `KEY`, `CRED`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`, `CERT`, `SALT`, `PWD`, or `OTP` (case-insensitive) have their value redacted, keeping only the name. The word choice follows existing lists such as Rails' `filter_parameters` and Sentry's default redaction. `PWD` also catches the working directory variable, but this is not a problem because the working directory is available as the cwd item. To exclude it, replace the predicate with one that wraps the default and excludes PWD. The env in the collection result holds only the values after redaction, so it cannot be used for matching (display only).
 
 ### Sanitization for Display
 
@@ -132,7 +133,7 @@ The ACL is made of four parts. subject, tag, and rule are static definitions tha
 | rule | Who (subject), on what (targets), until when and under what circumstances (conditions), with what outcome (effect). The conditions stay symbolic | The source of grants. Pick "the usual allow" in the approval UI and apply it with a single passkey |
 | grant | A rule applied to the peer at the moment of approval, with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value | Evaluation |
 
-If no grant matches, the default effect applies (usually `ask`), and deny takes precedence over allow.
+If no grant matches, the default effect applies (given by the app as `default_effect` of `Policy::load_verified`), and deny takes precedence over allow.
 
 ### subject
 
@@ -148,7 +149,7 @@ A subject is a condition on one process and does not distinguish between the pee
 }
 ```
 
-This example is a process that "has claude-code above it, and above that a process tagged `terminal-app`"; the target's own Team ID and signing identifier, and claude-code's Team ID, are fixed to the values at the time of approval.
+This example is a process that "has claude-code above it, and above that a process tagged `terminal-app`"; the target's own Team ID and signing identifier, and claude-code's Team ID, are fixed to the values at the time of approval. The terminal app does not appear among the ancestors of a shell inside tmux. The tmux server daemonizes and becomes a child of launchd, so the lineage is cut at the tmux server.
 
 | Element | Contents |
 | --- | --- |
@@ -162,7 +163,7 @@ This example is a process that "has claude-code above it, and above that a proce
 `ancestors` is matched as a subsequence.
 
 - The list is ordered nearest first relative to the target, the same direction as the collection result sequence `[target, parent, grandparent, …]`.
-- Each entry only needs to match somewhere among the ancestors above the one the previous entry matched, in this order, and other ancestors may sit in between. Depth is not stable because of the presence or absence of tmux, direnv, or wrappers, so there is no way of writing that distinguishes "nothing in between".
+- Each entry only needs to match somewhere among the ancestors above the one the previous entry matched, in this order, and other ancestors may sit in between. Depth is not stable because of the presence or absence of direnv or wrappers, so there is no way of writing that distinguishes "nothing in between".
 - Matching is decided greedily from the near side. Entry 1 goes to the nearest matching ancestor, entry 2 to the nearest matching ancestor above that, and so on, so which ancestor's values fill an entry's placeholders is uniquely determined. An entry with no concrete values and no tags (only `{"match": {"binary": {"team_id": true}}}`) matches the nearest ancestor that has that value.
 - `ancestors` is not nested inside an entry, and entries are not referenced by name. Deep conditions are confined to tag definitions.
 
@@ -197,6 +198,7 @@ With this, a rule's subject only needs `{"tags": ["claude-pj1"]}`. The UI shows 
 - Placeholders (`true`) cannot be written in a tag definition ("rule").
 - Tag definitions go into the same signed list as rules. If a process with the same uid could rewrite a definition, every rule conditioned on that tag would widen.
 - A tag definition may refer to another tag; cycles are an error at load time.
+- When the sequence is cut off, whether a tag with conditions on ancestors is attached may not be decidable. Such tags go into `TaggedChain.undecidable_tags`, and the approval UI shows them distinguished from "not attached" ("Evaluation").
 
 ### rule
 
@@ -217,7 +219,7 @@ A rule is a static definition. Its conditions are written symbolically and do no
 | id | The rule's name. A grant points to it via `rule_id` |
 | effect | `allow` (pass without authentication), `deny` (reject), `ask` (require the app's re-authentication) |
 | subject | The subject above. May be referenced by name |
-| targets | What the rule applies to (key globs, tags). The target vocabulary is decided by the app. Apps that do not need it omit it |
+| targets | The list of what the rule applies to. Each element is a glob over the target (the string of a `Target`). The target vocabulary is decided by the app. An empty `targets` matches every target |
 | conditions | A list of condition names (all AND). There are lifetime and state conditions; which one is decided by the vocabulary (below) |
 
 A subject value is either a concrete value or a placeholder (`true`) (decision record: [DR-0007](decisions/DR-0007-pin-placeholders-and-ordered-ancestors.md)).
@@ -232,7 +234,7 @@ A subject value is either a concrete value or a placeholder (`true`) (decision r
 - Simple items (`cwd`, `uid`, `path` …) also take `true`, and pin the actual value as an exact match.
 - This way "the usual allow" needs only one rule, and there is no need to save a separate rule per app.
 
-Placeholders can be written only in a rule's inline subject (decision record: [DR-0008](decisions/DR-0008-evaluation-semantics.md)). If a tag definition, a named subject, or a rule that automatically becomes a permanent grant at load time (below) contains `true`, loading is an error (`LoadError::InvalidValue`).
+Placeholders can be written only in a rule's inline subject (decision record: [DR-0008](decisions/DR-0008-evaluation-semantics.md)). If a tag definition or a named subject contains `true`, loading is an error (`LoadError::InvalidValue`). A rule containing placeholders does not automatically become a grant at load time; it becomes a grant only through approval (below).
 
 There are two kinds of conditions, and which kind is decided when it is registered in the vocabulary. A rule just lists names in `conditions`, with no separate place per kind (all AND).
 
@@ -243,7 +245,7 @@ There are two kinds of conditions, and which kind is decided when it is register
 
 `uses` (consumable) is also a lifetime condition. Once it reaches 0, it never comes back. The kind is known by the vocabulary, not by the person writing the rule, so the approval UI and the trace show the kind next to each condition, letting readers see which meaning applies.
 
-A static rule is never used directly in evaluation. Evaluation looks only at grants. Rules in the list that have no lifetime or consumable conditions automatically become permanent grants at load time. This lets a hand-written deny take effect without an "allow" operation. Rules containing lifetime or consumable conditions become grants only through approval.
+A static rule is never used directly in evaluation. Evaluation looks only at grants. Rules in the list that have no lifetime or consumable conditions, contain no placeholders, and contain no conditions whose pin needs the chain or an observed value (`os.login_session`, etc.) automatically become permanent grants at load time. This lets a hand-written deny take effect without an "allow" operation. Other rules become grants only through approval.
 
 ### grant
 
@@ -274,7 +276,7 @@ A grant is a rule applied to an actual process (the peer at the moment of approv
 - No placeholder remains in the subject (if one does, it is a load error). If there is no value to fill one with (such as `team_id: true` without a signature), the grant cannot be created (`GrantError::ValueUnavailable`).
 - A grant is self-contained. It holds its own effect, targets, pinned conditions, and the subject with its placeholders resolved, and holds the id of the original rule as `rule_id` (used for display and cleanup). Even if the rule changes later, existing grants do not change.
 - A grant's subject is an inline subject. If the rule's subject refers to one by name, it is expanded when the grant is created. Only references to tag names inside the subject are kept as names. Tag definitions live in the signed list and updating them is an intended change, so it is fine for that to reach existing grants too.
-- A grant created from a rule without lifetime or consumable conditions has no pinned values and never expires (a permanent grant). A deny is usually of this kind.
+- A grant created from a rule without lifetime or consumable conditions never expires (a permanent grant). A deny is usually of this kind.
 - `Policy::grant` only returns the grant and does not put it into the in-memory Policy. It takes effect when the app signs and persists it and, after the write succeeds, puts it in with `Policy::add_grant` ("Storage").
 
 A saved rule is itself what gets reapplied. Thanks to placeholders, the same rule can also be used to approve a different app. The approval UI shows the list of rules; picking one and passing a single passkey creates a grant. The flow of choosing conditions on the spot in the approval UI and allowing is two steps: "assemble a rule, then immediately turn it into a grant". Whether to save the rule to the list is the user's choice; if not saved, it becomes a throwaway rule.
@@ -311,9 +313,9 @@ The item checks the validity of values (`Matcher::validate`, called by loading a
 
 `process`, `binary`, and `os.session` are structured values and allow exact match only (every field of `binary` is exact match). Signature conditions are considered a match only when signature verification passed. An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
 
-**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). In a rule it is written as `true` (pin the approved individual process) or a concrete composite value, and in a grant it becomes a composite value that `Policy::grant` gives every identifier obtainable at that moment plus the boot UUID (`kern.bootsessionuuid`) (e.g. `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares every identifier present on both sides, and matches only when all of them match. At worst it checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process".
+**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). In a rule it is written as `true` (pin the approved individual process) or a concrete composite value, and in a grant it becomes a composite value that `Policy::grant` gives every identifier obtainable at that moment plus the boot UUID (`kern.bootsessionuuid`) (e.g. `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares every identifier present on both sides, and matches only when all of them match. At worst it checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process". `process` is the identity of the individual process, and it stays the same individual even when exec changes the code inside it. The identity of the code is carried by `binary`, so to also fix the code, pin `binary` together with it.
 
-**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Each field value is a string or the placeholder `true`, and in a grant every one is a string. `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature and the Info.plist sealed by the signature as is. No field takes a boolean value, so `true` only has the meaning of a placeholder. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification passed. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
+**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Each field value is a string or the placeholder `true`, and in a grant every one is a string. `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature and the Info.plist sealed by the signature as is (`bundle_id` is matched against `Signature.bundle_id`). No field takes a boolean value, so `true` only has the meaning of a placeholder. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification passed. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`. Apple's OS binaries (Terminal.app, `/bin/zsh`, etc.) have no Team ID, so they are written with a root-owned `path` rather than `binary` (Strong).
 
 The validity rules for values are closed within `binary`.
 
@@ -346,6 +348,9 @@ register(key, impl)
 
 Registration goes into procline-acl's `Vocabulary`, where matcher items, scopes, and conditions share the same container. The only checks at registration time are duplicate keys and the namespace.
 
+- `Vocabulary::builtin()` holds only the OS-independent items: the matcher items (`process`, `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible`), `until`, `age`, `uses`, and `time.window`.
+- The `os.*` items (`os.session`, `os.console_user`, `os.login_session`, `os.not_remote`, `os.console_active`) are provided by procline-macos as `Item`s (`procline_macos::os_items() -> Vec<procline_acl::Item>`), and the app registers them with `register`.
+
 Namespaces are aligned with the item's category.
 
 - Unprefixed: attributes of the target process itself (`process`, `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible` …). A subject is "a condition on that process", so these are unprefixed.
@@ -355,7 +360,7 @@ Namespaces are aligned with the item's category.
 An item holds the shape and validity of its own values. There are no dependencies across keys; where structure is needed, the value of a single key is given structure (`process`, `binary`, `os.session`).
 
 - The builder (`SubjectBuilder` / `RuleBuilder`, which create rules from the approval UI) does not hold the collection result; from what the user picked (`process`, a combination of `binary` fields, a level of `os.session`), it assembles a subject with the picked fields set to `true`. The actual values are filled in by `Policy::grant` with `Matcher::resolve`. For `binary`, it aligns the fields so that the validity rules are satisfied; the level of `os.session` is written as the argument of the rule's condition (the epochs are pinned when the grant is created).
-- Loading (`Policy::load_verified`, `Policy::load_grant`) has the item's implementation (`Matcher::validate`, `Condition::validate_args`) check values and treats invalid values (including unknown fields) as errors. If a placeholder is in a place where placeholders cannot be written (a grant, a tag definition, a named subject, a rule that automatically becomes a permanent grant), that too is treated as an invalid value and is an error (`LoadError::InvalidValue`). Tag names and subject names with no definition are `LoadError::UnknownTag` / `LoadError::UnknownSubject`.
+- Loading (`Policy::load_verified`, `Policy::load_grant`) has the item's implementation (`Matcher::validate`, `Condition::validate_args`) check values and treats invalid values (including unknown fields) as errors. If a placeholder is in a place where placeholders cannot be written (a grant, a tag definition, a named subject), that too is treated as an invalid value and is an error (`LoadError::InvalidValue`). Tag names and subject names with no definition are `LoadError::UnknownTag` / `LoadError::UnknownSubject`.
 - The UI (app side) shows one choice per key, and within it lets the user pick the level of the value or the combination of fields.
 - When an app's item is to be used together with a built-in item, they are placed side by side in the same `match` (AND).
 
@@ -388,31 +393,32 @@ The definition of the class and the decision record for the built-in classes are
 The target of evaluation is grants (decision record: [DR-0008](decisions/DR-0008-evaluation-semantics.md)). Evaluation separates the stage that decides the truth of each condition from the stage that decides adoption per grant.
 
 1. Check each grant's conditions.
+   - A grant that uses a condition whose observation failed (that key in `EvalContext` is `Err(ObserveError)`) cannot be decided in that evaluation. Its id is put in `Decision.undecidable`, and it is neither allowed nor expired.
    - A grant whose lifetime `check` became false has its expiry settled on the spot in that evaluation, and its id is put in `Decision.expired`. Once settled, an expiry never comes back (it is not revived by the clock going backwards or by an observation recovering).
    - Exclude grants whose targets do not match the target.
    - Match each grant's subject and take the state `check`. The subject's `match` and `tags` are matched against the target itself, and `ancestors` is matched against the sequence as a subsequence, greedily from the near side.
-   - When the sequence is cut off (`ProcessChain.truncated` is `Some`), a grant with `ancestors` is undecidable. For a tag whose definition has `ancestors`, whether it is attached cannot be decided on a cut-off sequence either, so a grant with that tag in its subject is likewise undecidable. Their ids are put in `Decision.undecidable`, and they are not used in deciding the effect.
+   - When the sequence is cut off (`ProcessChain.truncated` is `Some`): the subject's conditions (`match` ∧ `tags` ∧ the `ancestors` subsequence) are all positive conditions, and extending the sequence never turns "matched" into "did not match" (monotone). So a grant that matched on the cut-off sequence also matches on the full sequence, and it is used in deciding the effect. A grant that has conditions on ancestors (`ancestors`, or a tag whose definition has `ancestors`; when a tag refers to another tag, this is followed transitively) and whose subject did not match on the cut-off sequence is undecidable. Its id is put in `Decision.undecidable`, and it is not used in deciding the effect. A grant whose subject matched but whose state `check` is false is false on the full sequence too, so it is not treated as undecidable.
 2. Decide the effect. The order is deny > allow > ask.
    - If even one `deny` matches, reject.
    - If an `allow` matches, allow. Among the matching allows, exactly one is adopted. Grants that do not change under advance (permanent, or without `uses`) are preferred, and ties go to the oldest by creation. This avoids consuming limited `uses` when another grant would pass anyway.
    - If an `ask` matches, `Effect::Ask` (the app's re-authentication). `Decision.grant_id` is the id of the adopted ask grant.
-   - If nothing matches, the default effect.
+   - If nothing matches, the default effect (`default_effect` of `Policy::load_verified`). `Decision.grant_id` is None.
 3. Apply each condition's `advance` only to the adopted grant. If even one returns a new pinned value, create a new grant with the pinned values replaced (grants are immutable).
 4. The app signs and persists the changed grant, and uses the result (allow) only after the write succeeds.
 
 The evaluation result (`Decision`) returns not only the effect but also the id of the adopted grant and which item each condition matched (the trace). This is used for the UI's "why did this pass, why was I asked". `Decision.trace` is not returned to the peer (it would reveal which condition failed). When step 3 changed the grant, the new version is also returned (`updated_grant`).
 
-There are two entry points for evaluation. `evaluate` runs through step 3 and only returns `updated_grant`; it does not replace the in-memory grant. `explain` is for displaying the trace; it does not apply `advance`, and `updated_grant` is always empty.
+There are two entry points for evaluation. `evaluate` runs through step 3 and only returns `updated_grant`; it does not replace the in-memory grant. `explain` is for displaying the trace; it does not apply `advance`, and `updated_grant` is always empty. `explain` also fills `expired`, but it does not settle the expiry (the app does not use `explain`'s `expired` for deletion).
 
 - The app signs and persists `updated_grant`, and after the write succeeds replaces the in-memory grant with `Policy::add_grant` (replacing the one with the same id), then hands over the value. If the write fails, the allow is not used.
-- The app removes the grants in `expired` with `Policy::remove_grant` and from storage. A grant whose `uses` reached 0 also has its expiry settled on the next evaluation and appears here.
+- The app removes the grants in `evaluate`'s `expired` with `Policy::remove_grant` and from storage. A grant whose `uses` reached 0 also has its expiry settled on the next evaluation and appears here.
 - When `undecidable` is non-empty, whether to let an allow pass while there is an undecidable deny is decided by the app. The crate returns the facts.
 
 ## scope: Grant Lifetime
 
 Lifetime conditions (hereafter scopes) pin the epoch at that moment when a grant is created; on every evaluation the current epoch is compared with the pinned value, and if they differ the grant expires permanently. This means "during this particular unlock" rather than "while unlocked", so locking once and unlocking again does not revive the grant.
 
-With this shape, every scope is automatically guaranteed to "never come back once ended", and all an app has to add is a single implementation of the condition trait ("Condition Implementation"). If the current epoch cannot be observed when creating a grant, the grant cannot be created (`PinError::Unobservable`), and if it cannot be observed at evaluation, `check` becomes false and the expiry is settled. Both fail safe.
+With this shape, every scope is automatically guaranteed to "never come back once ended", and all an app has to add is a single implementation of the condition trait ("Condition Implementation"). If the current epoch cannot be observed when creating a grant, the grant cannot be created (`PinError::Unobservable`), and if at evaluation there is no observed value because it is outside the period (`observe` returns `Ok(None)`), `check` becomes false and the expiry is settled. Both fail safe. When the observation itself fails (`observe` returns `Err`), this is distinguished from being outside the period, and the grant is treated as undecidable in that evaluation (neither allowed nor expired; "Evaluation").
 
 Multiple scopes can be listed, and the grant is in effect only while all of them are alive (AND). They are combined like "24 hours, but only until reboot".
 
@@ -426,6 +432,8 @@ Multiple scopes can be listed, and the grant is in effect only while all of them
 | `os.session` | The end of any of the periods at or below the chosen level. `boot` ends on reboot, `awake` on sleep or hibernation, `unlocked` on screen lock (manual, automatic lock when away, screen saver) | `boot` is `kern.bootsessionuuid`, `awake` is the time of the most recent wake (`kern.waketime`), `unlocked` is the time of the most recent unlock |
 | `os.console_user` | User switch | A value intrinsic to the user switch event |
 
+`until`, `age`, and `uses` are in procline-acl's `Vocabulary::builtin()`, and `os.*` is provided by procline-macos's `os_items()` ("Item Registration").
+
 An epoch is a value intrinsic to the event (the boot UUID, the time of a wake or unlock, etc.). It is unique independently of daemon restarts, so grants reloaded across a restart can also be judged correctly.
 
 The level names of `os.session` are names of periods.
@@ -437,7 +445,7 @@ The level names of `os.session` are names of periods.
 
 ### Vocabulary Added by Apps
 
-App-specific vocabulary goes in the `app.` namespace. The only namespaces are the built-ins (`os.`, `time.`, etc.) and `app.`; apps do not create namespaces freely. Only one app evaluates at a time, so multiple namespaces are unnecessary, and allowing free creation could collide with namespaces added to the crates in the future. For cw, it would be things like:
+App-specific vocabulary goes in the `app.` namespace. The only namespaces are the ones the crates use (`os.`, `time.`, etc.) and `app.`; apps do not create namespaces freely. Only one app evaluates at a time, so multiple namespaces are unnecessary, and allowing free creation could collide with namespaces added to the crates in the future. For cw, it would be things like:
 
 - `app.unlock`: one opening of the vault. Ends on manual lock or vkey\_ttl expiry.
 - `app.passphrase`: one issuance of P. Ends when it becomes Sealed.
@@ -454,8 +462,7 @@ State conditions are ones whose truth value can change on every evaluation. Unli
 | --- | --- |
 | `os.not_remote` | The peer's asid belongs to the console session. Judged by the asid alone (the presence of ancestors can be changed by a double fork, so it is not used) |
 | `os.console_active` | The screen is not locked |
-| `os.login_session` | The peer's asid is the same as when the grant was created (it holds the asid at creation as its pinned value. Detecting logout is not promised) |
-| `os.tty` | The peer has the specified tty |
+| `os.login_session` | The peer's login session is the same as when the grant was created (it holds the pair of the boot UUID and asid at creation, `{boot_uuid, asid}`, as its pinned value. The asid is reused across boots, so it is paired with the boot UUID. Detecting logout is not promised) |
 | `time.window` | Within the specified days of the week and time range |
 
 Location conditions such as "while on the home Wi-Fi" are added by apps as needed.
@@ -468,14 +475,14 @@ Lifetime (scope), consumable (`uses`), and state conditions are expressed with t
 /// The observed value of this condition. EvalContext::capture observes it only once at the start of evaluation, and it does not change during evaluation
 pub struct Observed<'a> {
     pub now: SystemTime,
-    pub value: Option<&'a Value>,   // the result of observe(). None if absent
+    pub value: Result<Option<&'a Value>, &'a ObserveError>,   // the result of observe() as is. If Err, the Policy does not call check and treats it as undecidable, and pin returns PinError::Unobservable
 }
 
 trait Condition {
     fn kind(&self) -> ConditionKind;                                   // Lifetime / State
-    /// Observe the current value (an epoch uuid, screen lock state, etc.). EvalContext::capture calls it once for every condition at the start of evaluation. None for conditions with nothing to observe
-    fn observe(&self) -> Option<Value>;
-    /// Called once when creating a grant. Returns the pinned value. Values taken from the chain, such as the peer's asid, look at chain. State conditions normally return Ok(None); those that fix a value depending on the peer at creation (os.login_session) return a pinned value. Err(PinError::Unobservable) for a lifetime condition with no observed value. Err(PinError::InvalidArgs) if args are invalid
+    /// Observe the current value (an epoch uuid, screen lock state, etc.). EvalContext::capture calls it once for every condition at the start of evaluation. Ok(None) for conditions with nothing to observe and outside the period (for a lifetime condition, check becomes false and the expiry is settled). When the observation fails (a sysctl or IOKit call fails) it is Err, and grants that use that condition cannot be decided in that evaluation
+    fn observe(&self) -> Result<Option<Value>, ObserveError>;
+    /// Called once when creating a grant. Returns the pinned value. Values taken from the chain, such as the {boot_uuid, asid} of os.login_session, look at chain. State conditions normally return Ok(None); those that fix a value depending on the peer at creation (os.login_session) return a pinned value. Err(PinError::Unobservable) for a lifetime condition with no observed value. Err(PinError::InvalidArgs) if args are invalid
     fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;
     /// The check. No side effects
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
@@ -486,6 +493,7 @@ trait Condition {
 }
 
 enum PinError { Unobservable, InvalidArgs { reason: String } }
+struct ObserveError { reason: String }
 ```
 
 | Item | observe | pin | check | advance |
@@ -495,12 +503,12 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 | `age` | None | obs.now + the duration in args (becomes the pinned value of `until`) | obs.now < pinned | None |
 | `uses` | None | N from args | pinned > 0 | pinned − 1 |
 | State (`os.console_active`, etc.) | The current state (if there is something to observe) | None | Looks at observed / args / chain | None |
-| State `os.login_session` | None | The peer's asid from chain | The peer's asid from chain == pinned | None |
+| State `os.login_session` | None | `{boot_uuid, asid}` from chain (`ProcessChain.boot_uuid` and the peer's asid) | `{boot_uuid, asid}` from chain == pinned | None |
 
 - `ConditionKind` has two values, Lifetime / State. Epochs, `until`, `age`, and `uses` are Lifetime; `uses` too never comes back once it reaches 0.
-- `EvalContext` holds `now` and "key → the result of `observe()`". The Policy builds `Observed { now, value: ctx.observed(key) }` per condition and passes it (a condition does not know its own key).
+- `EvalContext` holds `now` and "key → the result of `observe()` (`Result<Option<Value>, ObserveError>`)". The Policy builds `Observed { now, value: ctx.observed(key) }` per condition and passes it (a condition does not know its own key). A grant that uses a condition whose key's result is `Err` is treated as undecidable in that evaluation and put in `Decision.undecidable` ("Evaluation").
 - `args` reaches the state `check`, so arguments such as the time range of `time.window` can be used in the check.
-- State conditions can also have pinned values. This is to fix a value depending on the peer (the asid of `os.login_session`) when the grant is created. The lifetime rule "once false, the expiry is settled" applies only to conditions that compare an observed value (the state of the world) with the pinned value. A value depending on the peer not matching just means a different peer came, not that the state of the world changed, so it is a state condition.
+- State conditions can also have pinned values. This is to fix a value depending on the peer (the `{boot_uuid, asid}` of `os.login_session`) when the grant is created. The lifetime rule "once false, the expiry is settled" applies only to conditions that compare an observed value (the state of the world) with the pinned value. A value depending on the peer not matching just means a different peer came, not that the state of the world changed, so it is a state condition.
 
 ### Rule Creation and Strength Constraints
 
@@ -523,7 +531,8 @@ A rule's strength is determined by the subject's conditions on the target proces
 The constraint table (the scope conditions allowed for `allow` per class, `AllowConstraints`) is given by the app to `RuleBuilder` / `Policy`. The crate has no default values and holds only the checking mechanism. `Policy` holds the `AllowConstraints` (given as an argument of `Policy::load_verified`), and `RuleBuilder::build`, `Policy::load_verified`, `Policy::grant`, and `Policy::load_grant` perform the same check and return an error if it is not met (`BuildError::ScopeTooWeak`, `LoadError::ScopeTooWeak`, `GrantError::ScopeTooWeak`). Constraints are judged by class; depth is not used. Which scopes satisfy the constraints is also decided by the app's constraint table.
 
 - The shape of the constraint table is three entries, `strong` / `medium` / `weak` (all required), each holding either `Unrestricted` (no restriction) or `AnyOf([...])` (satisfying any one of the listed options is enough). An element of `AnyOf` is either `Condition(key)` (contains a condition with that key) or `UntilWithin(duration)` (expires within that duration).
-- When it is judged: the length of `age` and the presence of lifetime conditions are judged at rule build (and at load time), and the absolute time of `until` is judged when creating the grant (against now at that moment). The class of `path` being decided by the process also happens when creating the grant (at build time it is judged as Medium).
+- Time constraints are expressed with `ScopeOption::UntilWithin`. `Condition("age")` / `Condition("until")` can also be written, but on the grant side `age` has been converted to `until`, so `Condition("age")` is never satisfied by a grant.
+- When it is judged: the length of `age` and the presence of lifetime conditions are judged at rule build (and at load time), and the absolute time of `until` is judged when creating the grant (against now at that moment). The reference time for `UntilWithin` in `Policy::load_grant` is the grant's `created_at`. The class of `path` being decided by the process also happens when creating the grant (at build time it is judged as Medium).
 
 | Rule strength (class) | Scopes allowed for `allow` (an example of constraints given by the app) |
 | --- | --- |
@@ -535,7 +544,7 @@ No constraint is placed on `deny`. Even a deny on weak conditions at least works
 
 ### Storage
 
-There are two storage forms: "one list" and "one grant per file". Both are JSON, and saving and signing are the app's responsibility.
+There are two storage forms: "one list" and "one grant per file". Both are JSON, and saving and signing are the app's responsibility. Signatures are verified with `PolicyVerifier::verify(&self, kind: SignedKind, bytes, sig)`, implemented by the app, and `enum SignedKind { List, Grant }` separates the purposes of the list's and grants' signatures.
 
 **The list** (subjects, tags, rules): the crate provides an entry point (`Policy::load_verified`) to "receive the bytes of the list and a signature, verify, then load". cw signs the list with the D-side key so that a process with the same uid cannot add allow rules on its own (treated the same as the PasskeyRegistry).
 
@@ -550,6 +559,8 @@ Cleanup (deleting grants that are no longer needed) is the app's responsibility,
 
 - Since it is one per file, the write for a `uses` update stays light (to be measured with a benchmark at implementation time).
 - `uses` is never consumed twice. The value is handed over only after the decremented grant has been persisted successfully, so when persisting fails the value has not been handed over either.
+- The app serializes `evaluate` → persisting → `add_grant`. If they run concurrently, both evaluations see the grant with the same remaining count, so it can be consumed beyond the limit.
+- After reloading the list, grants are also re-checked with `Policy::load_grant`. When a tag definition changes, the strength of grants with that tag in their subject can go down.
 - Epochs are values intrinsic to the event, so grants reloaded at startup can also be judged correctly across restarts ("scope: Grant Lifetime").
 - The persistence directory is placed where nothing other than the evaluating daemon (other processes with the same uid) can write. If it were writable, a grant file from before it was used up could be rolled back to restore `uses`. The location is decided by the app.
 
@@ -564,12 +575,16 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     icon: true,
     digest: false,                                   // executable digest (not collected by default)
     max_ancestors: 32,
+    redaction: Redaction::default(),                 // replaces env redaction (the two functions: target predicate and redaction)
 })?;
 // chain.processes()[0] is the target, the rest are ancestors
 // chain.truncated: Option<Truncated>. The reason the sequence was cut off: enum Truncated { MaxAncestors, AncestorExited, Unavailable }
-// p.signature_trust(): Platform / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
+// chain.boot_uuid: String. The collection side obtains kern.bootsessionuuid
+// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
 // ProcessInfo holds digest: Option<String> and path_meta: Option<PathMeta>. PathMeta { owner_uid: u32, writable_by_user: bool } (used for deciding the class of path)
-// ProcessIdentity (the pinned value of process) holds boot_uuid: String. Created with Identity::process_identity(&self, boot_uuid)
+// ProcessInfo.responsible: Option<ProcessIdentity>. The responsible process is held as the identification of the individual process rather than a pid
+// Signature.bundle_id: Option<String> (from kSecCodeInfoPList. Used for matching; what BinaryPin.bundle_id is matched against). ProcessInfo.bundle (read by walking up from the executable path to the .app) is for display
+// ProcessIdentity (the pinned value of process) holds boot_uuid: String. Created with Identity::process_identity(&self, boot_uuid), passing ProcessChain.boot_uuid as boot_uuid
 
 // Strength (shared types in procline-core). Which item has which class is held by Vocabulary, not by ProcessInfo items. depth is a UI concept and has no type
 enum Strength { Strong, Medium, Weak }               // class (decided by the item from the value)
@@ -583,7 +598,10 @@ struct BinaryPin { digest: Option<Pinnable<String>>, team_id: Option<Pinnable<St
 enum SessionLevel { Boot, Awake, Unlocked }          // level of os.session (the value of args. In JSON "boot" / "awake" / "unlocked")
 
 // Vocabulary (procline-acl)
-let mut vocab = Vocabulary::builtin();               // matcher items (process / binary / uid / cwd, etc.), os.* scopes and conditions (os.session, etc.), until / age / uses
+let mut vocab = Vocabulary::builtin();               // only OS-independent items: matcher items (process / binary / uid / gid / path / cwd / argv / name / tty / responsible), until / age / uses, time.window
+for item in procline_macos::os_items() {             // os.* items (os.session / os.console_user / os.login_session / os.not_remote / os.console_active) are provided by procline-macos
+    vocab.register(item)?;
+}
 // matcher items, lifetime, and state items are added with the same register. Duplicate keys and namespace violations are errors
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // items whose class is constant regardless of the value are registered with a closure, stating the class explicitly
 // items whose class changes with the value implement the Matcher trait and are registered with Item::matcher(key, impl)
@@ -595,12 +613,18 @@ vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;          
 
 trait Condition {
     fn kind(&self) -> ConditionKind;                 // Lifetime / State
-    fn observe(&self) -> Option<Value>;              // EvalContext::capture calls it once at the start of evaluation
-    fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;  // chain is for pinning the peer's asid
+    fn observe(&self) -> Result<Option<Value>, ObserveError>;  // EvalContext::capture calls it once at the start of evaluation. Ok(None) means nothing to observe / outside the period, Err is an observation failure
+    fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;  // chain is for pinning the {boot_uuid, asid} of os.login_session
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
     fn advance(&self, pinned: Option<&Value>) -> Option<Value>;
     fn validate_args(&self, args: Option<&Value>) -> Result<(), String>;  // validity of the arguments. Called by loading and the builder
 }
+struct ObserveError { reason: String }
+// EvalContext holds Result<Option<Value>, ObserveError> per key. Grants that use a condition that is Err cannot be decided in that evaluation (Decision.undecidable)
+
+// Signature verification (implemented by the app). kind separates the purposes of the list's and grants' signatures
+trait PolicyVerifier { fn verify(&self, kind: SignedKind, bytes: &[u8], sig: &[u8]) -> bool; }
+enum SignedKind { List, Grant }
 
 // Loading the list (subjects, tags, rules) and reloading saved grants
 // constraints: AllowConstraints is the constraint table given by the app (the scope conditions allowed for allow per class). The crate has no default values. Below is an example, not a default
@@ -609,15 +633,16 @@ let constraints = AllowConstraints {
     medium: ScopeRequirement::AnyOf(vec![ScopeOption::UntilWithin(Duration::from_secs(7 * 24 * 3600)), ScopeOption::Condition("os.session".into())]),
     weak: ScopeRequirement::AnyOf(vec![ScopeOption::Condition("os.session".into()), ScopeOption::Condition("app.unlock".into())]),
 };  // AnyOf is any one of the listed options (OR)
-let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab, constraints)?;  // unregistered items, tag cycles, validity of values, placeholder locations, constraint violations are errors
+let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab, constraints, default_effect)?;  // default_effect: Effect is the effect when no grant matches (Decision.grant_id is None). Unregistered items, tag cycles, validity of values, placeholder locations, constraint violations are errors
 // LoadError: InvalidValue (validity violation of a value, true in a place where placeholders cannot be written), UnknownTag { name }, UnknownSubject { name }, ScopeTooWeak (constraint violation) …
-let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // verifies one grant and checks it against the vocabulary and the constraints
+let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // verifies one grant and checks it against the vocabulary and the constraints (the reference time for UntilWithin is the grant's created_at). After reloading the list, grants are also re-checked with this
 policy.add_grant(saved);                             // puts it into the in-memory Policy (replaces one with the same id)
 // policy.remove_grant(id) / policy.grants() -> impl Iterator<Item = &Grant>: used for cleanup
 
 // Evaluation
 let tagged = policy.tag(&chain);                     // tags attached to each process (also used for display). TaggedChain borrows only the vocabulary and the chain, not the policy
-let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // applies advance to the adopted grant and returns the new version (does not change memory)
+// tagged.undecidable_tags: BTreeSet<String>. Tags whose presence could not be decided on a cut-off sequence (the approval UI shows them distinguished from "not attached")
+let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // applies advance to the adopted grant and returns the new version (does not change memory). The app serializes evaluate → persisting → add_grant (running them concurrently can consume uses beyond the limit)
 if let Some(grant) = &decision.updated_grant {
     // sign and persist, and after the write succeeds replace it with policy.add_grant(grant.clone()), then hand over the value
 }
@@ -626,15 +651,15 @@ for id in &decision.expired {
 }
 // when decision.undecidable is non-empty, whether to let an allow pass while leaving undecidable grants is decided by the app
 // decision.trace is not returned to the peer (it would reveal which condition failed)
-let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // no advance (for displaying the trace)
+let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // no advance (for displaying the trace). Fills expired but does not settle the expiry (the app does not use explain's expired for deletion)
 
 pub struct Decision {
     pub effect: Effect,
-    pub grant_id: Option<String>,        // the adopted grant (for ask, the adopted ask grant). None for the default effect
+    pub grant_id: Option<String>,        // the adopted grant (for ask, the adopted ask grant). If None, the effect is load_verified's default_effect
     pub trace: Trace,
     pub updated_grant: Option<Grant>,    // the new version of a grant changed by advance. Always None for explain
-    pub expired: Vec<String>,            // ids of grants whose expiry was settled in this evaluation. The app deletes them
-    pub undecidable: Vec<String>,        // ids of grants that are undecidable because the sequence is cut off. Not used in deciding the effect
+    pub expired: Vec<String>,            // ids of grants whose expiry was settled in this evaluation. The app deletes those from evaluate (those from explain are not used for deletion)
+    pub undecidable: Vec<String>,        // ids of undecidable grants (those with conditions on ancestors that did not match on a cut-off sequence, and those using a condition whose observation failed). Not used in deciding the effect
 }
 
 // The shape of a subject (procline-acl)
@@ -644,6 +669,7 @@ struct AncestorMatch { r#match: BTreeMap<String, MatchValue>, tags: Vec<String> 
 // In JSON, Exact is a string or a number, Glob is {"glob": …}, Regex is {"regex": …}, Range is {"min": …, "max": …}. The Regex of argv is applied per element
 // SubjectRef { Inline(Box<Subject>), Named(String) }: the position of a rule's subject. Placeholders can be written only in a rule's Inline
 // Grant { id, rule_id: String, effect, subject: Subject, targets, conditions, … }: a grant's subject is inline (a named subject is expanded when the grant is created. Tag names are kept as names)
+// targets (rule and grant): each element is a glob over the target (the string of a Target). An empty targets matches every target
 
 // Creating a rule from the approval UI (does not receive the collection result; assembles a subject containing true)
 let subject = SubjectBuilder::new()
