@@ -22,4 +22,12 @@
 
 ## 確認待ち
 
-(なし)
+### 👺PL-C1: 実装 worker の transcript にこのセッションの環境変数 (トークン類を含む) が乗った
+
+2026-11-09 の `collect_pid` 実装中、worker (collect-worker) が bash の `&` で起こした子プロセスの `KERN_PROCARGS2` を exec 前に読み、親から継いだ env をツール出力に表示した。出たのは worker の transcript (ローカルの jsonl) だけで、リポ・commit・公開物には出ていない。
+
+- [ ] a: 該当トークンを再発行する (どのトークンかは transcript を kawaz が確認)
+- [ ] b: worker の transcript jsonl から該当値を消す
+- [ ] c: 対応不要
+
+worker には以後 env の値を出力しないよう指示済み。
