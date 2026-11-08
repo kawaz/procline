@@ -24,7 +24,7 @@
 
 ## Consequences
 
-- `ancestors` だけで定義したタグ(DESIGN-ja の例の `claude-pj1`)は Weak で、それを subject にした `allow` ルールには世代の scope(`process`、`os.login_session`、`os.boot`、`app.unlock` など)が要る。
+- `ancestors` だけで定義したタグ(DESIGN-ja の例の `claude-pj1`)は Weak で、それを subject にした `allow` ルールには世代の scope(`os.login_session`、`os.boot`、`app.unlock` など)が要る。
 - 祖先で絞った上で制限の緩い許可を出したいときは、対象自身にも強い条件(署名の連鎖など)を付ける必要がある。
 
 ## 関連

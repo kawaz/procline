@@ -42,7 +42,7 @@ register(key, impl, depends: [key...])
 | `os.wake` | `os.boot` | 起床の回数は起動セッションの中でだけ意味を持つ |
 | `os.screen_unlock` | `os.boot` | 同上 |
 
-寿命型にも同じ規則を当てはめる。ルールの `conditions` に `os.wake` を置くなら `os.boot` も置く。表に無い組み込みの項目(`unique_id`、`uid`、`path`、`cwd`、`argv`、`os.login_session`、`process` など)は depends を持たない独立項目。
+寿命型にも同じ規則を当てはめる。ルールの `conditions` に `os.wake` を置くなら `os.boot` も置く。表に無い組み込みの項目(`process`、`uid`、`path`、`cwd`、`argv`、`os.login_session` など)は depends を持たない独立項目。
 
 ### 規則と各部品の責務
 
@@ -65,7 +65,7 @@ match の保存形は平坦な map(`key → 値`)。連鎖の構造は Vocabular
 | 深さ(連鎖の中) | どれだけ絞るか。葉ほど祖先の値をすべて pin するので厳しい | `Depth`(根からの距離) |
 
 - クラスは連鎖に 1 つ。登録するときに根(depends が空の項目)に与え、depends を持つ項目は根のクラスを引き継ぐ。複数の根に至る項目は、最も強い根のクラス(AND は条件を狭めるだけなので)。
-- 独立項目は 1 項目だけの連鎖で、自分が根。クラスは unique\_id、uid、署名系が Strong、実行パスと責任プロセスが Medium、名前、argv、cwd、tty、env が Weak。
+- 独立項目は 1 項目だけの連鎖で、自分が根。クラスは `process`、uid、署名系が Strong、実行パスと責任プロセスが Medium、名前、argv、cwd、tty、env が Weak。
 - bundle\_id は Strong の連鎖の葉(`team_id`、`signing_id` に依存)。実行パスは Medium の独立項目。
 - `Strength` は procline-core に置く共有型。どの項目がどのクラスかは Vocabulary が持つので、`ProcessInfo` の各項目は Strength を持たない。
 - ルールの強さの制約はクラスで判定する(算出の規則は [DR-0003](DR-0003-rule-strength-from-own-match.md))。深さは制約に使わず、UI の並び順と、アプリが追加で課す制約の材料にする。

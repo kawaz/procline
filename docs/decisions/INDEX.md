@@ -18,3 +18,4 @@ Status は各 DR ファイルの `Status:` 行が正本。ここに載るのは�
 | [DR-0002](DR-0002-matcher-depends-and-two-axis-strength.md) | ⬜ 未実装 | matcher の項目を depends 付きで登録し、depends は同じ match に値ごと pin する。強さはクラスと深さの 2 軸 |
 | [DR-0003](DR-0003-rule-strength-from-own-match.md) | ⬜ 未実装 | ルールの強さは対象プロセス自身への条件のクラスで決め、祖先への条件は数えない |
 | [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) | ⬜ 未実装 | 静的な rule と pin 済みの grant を分け、condition を observe / pin / check / advance で表す。評価は grant だけを見て、採用された grant だけを advance し、grant は 1 件ずつ永続化する |
+| [DR-0005](DR-0005-process-identity-as-one-item.md) | ⬜ 未実装 | プロセスの個体識別はルールの語彙では `process` 1 項目(Strong、独立項目)。pin 値は取れた識別子の複合値で、両側に揃う最も強い識別子で照合する。寿命型 scope の `process` は持たない |

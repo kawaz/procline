@@ -43,8 +43,10 @@ The collection result is a sequence that starts with the target process (usually
 | --- | --- | --- | --- |
 | audit token (peer) | `getsockopt(LOCAL_PEERTOKEN)` | Strong | Public API. Contains pid, pidversion, uid, asid |
 | unique\_id / parent\_unique\_id | `p_uniqueid` and `p_puniqueid` from `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` | Strong | 64-bit ID unique per launch. Lets ancestors be traced reliably. It is an SPI under `#ifdef PRIVATE`, so if unavailable, fall back to the pair of pid and start time |
-| pid, start time | `proc_pidinfo(PROC_PIDTBSDINFO)` | — | For display. Never used alone for matching |
-| asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. Used for the `login_session` scope |
+| pid, start time | `proc_pidinfo(PROC_PIDTBSDINFO)` | Strong (as a pair) | Together they form an identifier (identification when unique\_id is unavailable) |
+| asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. Used for the pinned value of `os.login_session` |
+
+These identifiers are an internal classification of collection: in the rule vocabulary, the audit token, unique\_id, and pid with start time are folded into the single item `process` that identifies the individual process ("matcher"), and the asid is used only internally as the pinned value of `os.login_session` and does not appear in the vocabulary.
 
 ### Process Attributes
 
@@ -271,7 +273,9 @@ The keys of `match` are names of items registered in the vocabulary (`Vocabulary
 | Regular expression | Paths, argv |
 | Numeric range | uid |
 
-`cdhash`, `unique_id`, and `team_id` allow exact match only. Signature conditions are considered a match only when signature verification passed (all signature-related items depend on `signature_valid`; see below). An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
+`cdhash`, `process`, and `team_id` allow exact match only. Signature conditions are considered a match only when signature verification passed (all signature-related items depend on `signature_valid`; see below). An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
+
+**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). Its pinned value is a composite value holding every identifier the builder could obtain at that moment (e.g. `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares by the strongest identifier present on both sides, and at worst checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong, and it is an independent item without depends. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process".
 
 ### Item Registration and depends
 
@@ -301,7 +305,7 @@ The depends of the built-in items are as follows.
 | `os.wake` | `os.boot` | The wake count is meaningful only within a boot session |
 | `os.screen_unlock` | `os.boot` | Same as above |
 
-The same rule applies to lifetime items. If a rule's `conditions` contains `os.wake`, it must also contain `os.boot`. Built-in items not in the table (`unique_id`, `uid`, `path`, `cwd`, `argv`, `os.login_session`, `process`, etc.) are independent items without depends.
+The same rule applies to lifetime items. If a rule's `conditions` contains `os.wake`, it must also contain `os.boot`. Built-in items not in the table (`process`, `uid`, `path`, `cwd`, `argv`, `os.login_session`, etc.) are independent items without depends.
 
 There is only one rule: **items listed in depends are pinned with their values in the same match**. For example, if `"signing_id": "com.anthropic.claude-code"` is a condition, the same match also contains `team_id` and `"signature_valid": true` (the subject example above has this shape). The responsibilities of each part are as follows.
 
@@ -322,7 +326,7 @@ An item's strength is expressed on two axes.
 | depth (within a chain) | How narrowly it constrains. The closer to the leaf, the stricter, since all ancestor values are pinned | Distance from the root |
 
 - There is one class per chain. It is given to the root (the item with empty depends) at registration, and items with depends inherit the root's class. An item that reaches multiple roots gets the strongest root's class (since AND only narrows the condition).
-- An independent item is a chain of one item and is its own root. Its class is as in the "Collected Information" tables (unique\_id, uid, and signature-related items are Strong; executable path and responsible process are Medium; name, argv, cwd, tty, and env are Weak).
+- An independent item is a chain of one item and is its own root. Its class is as in the "Collected Information" tables (`process`, uid, and signature-related items are Strong; executable path and responsible process are Medium; name, argv, cwd, tty, and env are Weak).
 - bundle\_id is a leaf of the Strong chain (depends on `team_id`, `signing_id`), and the executable path is a Medium independent item.
 - Which item has which class is held by the vocabulary. Items in the collection result do not carry a strength.
 - depth is material for UI ordering and for additional constraints an app may impose. It is not used for rule strength constraints ("Rule Creation and Strength Constraints").
@@ -365,7 +369,6 @@ Multiple scopes can be listed, and the grant is in effect only while all of them
 | `os.screen_unlock` | Screen lock, screen saver | Count from screen unlock notifications |
 | `os.login_session` | Logout, ssh disconnect | The asid in the audit token (of the peer when the grant is created) |
 | `os.console_user` | User switch | Count of console user changes |
-| `process` | Exit of the specified process | unique\_id of the peer or an ancestor. Can express "while the shell in this terminal tab is alive" |
 
 Notification-counted epochs (`os.wake`, `os.screen_unlock`, `os.console_user`) can only be counted while the daemon is running. When the daemon restarts, all grants that pinned them expire (since it is unknown what happened in between). For grants reloaded at startup, there is either no observed value for these epochs or pinned and observed do not match, so `check` becomes false; this too is guaranteed automatically ("Storage").
 
@@ -451,9 +454,9 @@ The following constraints are checked at build time, and an error is returned if
 
 | Rule strength (class) | Scopes allowed for `allow` (default) |
 | --- | --- |
-| Strong (signature, unique\_id) | No restriction |
+| Strong (signature, `process`) | No restriction |
 | Medium (executable path, responsible process) | `until` within 7 days, or includes an epoch scope |
-| Weak (name, cwd, argv, env) | Includes an epoch scope (`process`, `os.login_session`, `app.unlock`, etc.) |
+| Weak (name, cwd, argv, env) | Includes an epoch scope (`os.login_session`, `app.unlock`, etc.) |
 
 For the constraint check, `uses` is treated the same as an epoch scope (it is a lifetime condition and never comes back once exhausted).
 
@@ -495,7 +498,7 @@ struct Depth(u8);                                    // depth (distance from the
 // Chain: a set of items connected by depends. Vocabulary enumerates them and orders items by strength (UI choices)
 
 // Vocabulary (procline-acl)
-let mut vocab = Vocabulary::builtin();               // matcher items (signature_valid / team_id / signing_id / cwd, etc.), os.* scopes and conditions, until / age / uses / process
+let mut vocab = Vocabulary::builtin();               // matcher items (signature_valid / team_id / signing_id / process / cwd, etc.), os.* scopes and conditions, until / age / uses
 // matcher items, lifetime, and state items are added with the same register. Error if a depends key is unregistered or there is a cycle
 vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // matching function. A root (no depends) is given its class with Item::root_matcher(key, class, ...)
 vocab.register(Item::condition("app.unlock", depends: [], CwUnlock::new(&vault)))?;  // a value implementing Condition (lifetime)

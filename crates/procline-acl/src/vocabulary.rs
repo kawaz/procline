@@ -13,7 +13,7 @@ pub struct Vocabulary {
 }
 
 impl Vocabulary {
-    /// The built-in items (signature chain, identifiers, `os.*`, `time.*`, `until` / `age` / `uses` / `process`).
+    /// The built-in items (signature chain, `process` (identifies the individual process) and the other matcher items, `os.*`, `time.*`, `until` / `age` / `uses`).
     pub fn builtin() -> Self {
         todo!()
     }

@@ -43,8 +43,10 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | --- | --- | --- | --- |
 | audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む |
 | unique\_id / parent\_unique\_id | `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` の `p_uniqueid`、`p_puniqueid` | 強 | 起動ごとに一意な 64bit ID。祖先を確実に辿れる。`#ifdef PRIVATE` の SPI なので、取れなければ pid と起動時刻の組に落とす |
-| pid、起動時刻 | `proc_pidinfo(PROC_PIDTBSDINFO)` | — | 表示用。照合には単独で使わない |
-| asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。`login_session` scope に使う |
+| pid、起動時刻 | `proc_pidinfo(PROC_PIDTBSDINFO)` | 強(組で) | 組で識別子になる(unique\_id が無いときの識別) |
+| asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。`os.login_session` の pin 値に使う |
+
+これらの識別子は収集の内部の分類で、ルールの語彙では audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれ(「matcher」)、asid は `os.login_session` の pin 値として内部で使われるだけで語彙には出ません。
 
 ### プロセスの属性
 
@@ -271,7 +273,9 @@ subject、tag、rule、条件の組は、どれも名前を付けて一覧に置
 | 正規表現 | パス、argv |
 | 数値の範囲 | uid |
 
-`cdhash`、`unique_id`、`team_id` は完全一致だけにします。署名の条件は、署名の検証が通ったときだけ一致とみなします(署名系の項目はすべて `signature_valid` に依存します。下記)。ad-hoc 署名は Team ID が空なので、Team ID の条件には決して一致しません。
+`cdhash`、`process`、`team_id` は完全一致だけにします。署名の条件は、署名の検証が通ったときだけ一致とみなします(署名系の項目はすべて `signature_valid` に依存します。下記)。ad-hoc 署名は Team ID が空なので、Team ID の条件には決して一致しません。
+
+**`process`** は「この個体のプロセス」を表す項目です(決定の記録: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md))。pin 値は、builder がその時点で取れた識別子を全部持つ複合値です(例 `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。照合は両側に揃っている最も強い識別子で比べ、最悪でも pid と起動時刻の組の一致を見ます。ルールを書く人は、どの識別子で比べたかを気にしません。クラスは強で、depends を持たない独立項目です。`match` にも `ancestors` の中にも書けるので、「このターミナルのタブのシェルの子孫」が書けます。pin したプロセスが終わればそのプロセスは列に居なくなり、grant は当たらなくなります。列に居るプロセスの寿命はこれで表せます。終わったプロセスを指す grant の削除は掃除(アプリ)の責務です。UI では「このプロセスだけ」の 1 選択肢として出します。
 
 ### 項目の登録と depends
 
@@ -301,7 +305,7 @@ register(key, impl, depends: [key...])
 | `os.wake` | `os.boot` | 起床の回数は起動セッションの中でだけ意味を持つ |
 | `os.screen_unlock` | `os.boot` | 同上 |
 
-寿命型にも同じ規則を当てはめます。ルールの `conditions` に `os.wake` を置くなら、`os.boot` も置かなければなりません。表に無い組み込みの項目(`unique_id`、`uid`、`path`、`cwd`、`argv`、`os.login_session`、`process` など)は、depends を持たない独立項目です。
+寿命型にも同じ規則を当てはめます。ルールの `conditions` に `os.wake` を置くなら、`os.boot` も置かなければなりません。表に無い組み込みの項目(`process`、`uid`、`path`、`cwd`、`argv`、`os.login_session` など)は、depends を持たない独立項目です。
 
 規則は 1 つだけです: **depends に挙がった項目は、同じ match に値ごと pin されている**。例えば `"signing_id": "com.anthropic.claude-code"` を条件にするなら、同じ match に `team_id` と `"signature_valid": true` も入ります(上の subject の例がこの形です)。各部品の責務は次のとおりです。
 
@@ -322,7 +326,7 @@ register(key, impl, depends: [key...])
 | 深さ(連鎖の中) | どれだけ絞るか。葉ほど祖先の値をすべて pin するので厳しい | 根からの距離 |
 
 - クラスは連鎖に 1 つです。登録するときに根(depends が空の項目)に与え、depends を持つ項目は根のクラスを引き継ぎます。複数の根に至る項目は、最も強い根のクラスになります(AND は条件を狭めるだけなので)。
-- 独立項目は 1 項目だけの連鎖で、自分が根です。クラスは「収集する情報」の表のとおりです(unique\_id、uid、署名系は強、実行パスと責任プロセスは中、名前、argv、cwd、tty、env は弱)。
+- 独立項目は 1 項目だけの連鎖で、自分が根です。クラスは「収集する情報」の表のとおりです(`process`、uid、署名系は強、実行パスと責任プロセスは中、名前、argv、cwd、tty、env は弱)。
 - bundle\_id は強の連鎖の葉(`team_id`、`signing_id` に依存)で、実行パスは中の独立項目です。
 - どの項目がどのクラスかは語彙が持ちます。収集結果の各項目は強さを持ちません。
 - 深さは UI の並び順と、アプリが追加で課す制約の材料です。ルールの強さの制約には使いません(「ルールの作成と強さの制約」)。
@@ -365,7 +369,6 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 | `os.screen_unlock` | 画面ロック、スクリーンセーバー | 画面のロック解除の通知で数える回数 |
 | `os.login_session` | ログアウト、ssh の切断 | audit token の asid(grant を作るときの接続相手のもの) |
 | `os.console_user` | ユーザーの切り替え | コンソールユーザーの変化で数える回数 |
-| `process` | 指定プロセスの終了 | 接続相手または祖先の unique\_id。「このターミナルのタブのシェルが生きている間」が書ける |
 
 通知で数える世代(`os.wake`、`os.screen_unlock`、`os.console_user`)は、デーモンの起動中しか数えられません。デーモンが再起動したら、それらを pin した grant はすべて失効します(間に何が起きたか分からないため)。起動時に読み直した grant では、これらの世代の観測値が無いか、pinned と observed が一致しないので `check` が偽になり、これも自動的に守られます(「保存」)。
 
@@ -451,9 +454,9 @@ build 時に次の制約を検査し、満たさなければエラーにしま�
 
 | ルールの強さ(クラス) | `allow` で許される scope(既定) |
 | --- | --- |
-| 強(署名、unique\_id) | 制限なし |
+| 強(署名、`process`) | 制限なし |
 | 中(実行パス、責任プロセス) | `until` が 7 日以内、または世代の scope を含む |
-| 弱(名前、cwd、argv、env) | 世代の scope(`process`、`os.login_session`、`app.unlock` など)を含む |
+| 弱(名前、cwd、argv、env) | 世代の scope(`os.login_session`、`app.unlock` など)を含む |
 
 `uses` は制約の判定では世代の scope と同じ扱いです(寿命型で、一度切れれば戻らないため)。
 
@@ -495,7 +498,7 @@ struct Depth(u8);                                    // 深さ(連鎖の根か�
 // Chain: depends で繋がった項目の集まり。Vocabulary が列挙し、項目を強度順に並べる(UI の選択肢)
 
 // 語彙(procline-acl)
-let mut vocab = Vocabulary::builtin();               // matcher の項目(signature_valid / team_id / signing_id / cwd など)、os.* の scope と条件、until / age / uses / process
+let mut vocab = Vocabulary::builtin();               // matcher の項目(signature_valid / team_id / signing_id / process / cwd など)、os.* の scope と条件、until / age / uses
 // matcher の項目、寿命型、状態型を同じ register で足す。depends の key が未登録、または循環ならエラー
 vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // 照合する関数。根(depends なし)は Item::root_matcher(key, class, ...) でクラスを与える
 vocab.register(Item::condition("app.unlock", depends: [], CwUnlock::new(&vault)))?;  // Condition を実装した値(寿命型)

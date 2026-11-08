@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use procline_core::ProcessIdentity;
+
 /// A condition on one process, optionally with conditions on its ancestors. All parts are ANDed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Subject {
@@ -21,6 +23,8 @@ pub enum MatchValue {
         min: i64,
         max: i64,
     },
+    /// The individual process (`process` item). Compared by the strongest identifier present on both sides.
+    Process(ProcessIdentity),
 }
 
 /// A literal compared for exact match.

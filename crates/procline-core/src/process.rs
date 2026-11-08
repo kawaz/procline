@@ -67,6 +67,27 @@ pub struct Identity {
     pub asid: Option<u32>,
 }
 
+impl Identity {
+    /// The identifiers that make up the pin value of the `process` matcher item.
+    pub fn process_identity(&self) -> ProcessIdentity {
+        ProcessIdentity {
+            unique_id: self.unique_id,
+            pid: self.pid,
+            start_time: self.start_time,
+        }
+    }
+}
+
+/// The pin value of the `process` matcher item ("this individual process"): every identifier available when it was pinned.
+///
+/// Matching compares by the strongest identifier present on both sides, at worst the pair of pid and start time. The derived `==` compares the fields as written and is not that matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessIdentity {
+    pub unique_id: Option<u64>,
+    pub pid: i32,
+    pub start_time: Option<StartTime>,
+}
+
 /// Opaque audit token of a connected peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuditToken(pub [u32; 8]);

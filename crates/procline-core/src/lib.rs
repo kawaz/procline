@@ -8,7 +8,8 @@ mod strength;
 
 pub use env::{EnvPolicy, IsSecretFn, RedactFn, Redaction, default_is_secret, default_redact};
 pub use process::{
-    AuditToken, Credentials, Identity, NamedId, ProcessChain, ProcessInfo, StartTime,
+    AuditToken, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity, ProcessInfo,
+    StartTime,
 };
 pub use sanitize::sanitize_for_display;
 pub use signature::{
