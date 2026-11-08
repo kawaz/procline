@@ -35,7 +35,7 @@ Apps (cw, pam-passkey) use only what they need. pam-passkey uses only collection
 
 ## Collected Information
 
-The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the item's class, determined by "can a process with the same uid forge this value?". Items with depends inherit the class of their root (see "Strength: class and depth" below).
+The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the item's class, determined by "can a process with the same uid forge this value?".
 
 ### Identifiers
 
@@ -55,7 +55,8 @@ These identifiers are an internal classification of collection: in the rule voca
 | uid, gid, supplementary groups (matched numerically; names are also kept for display, as a list since one ID can have multiple names) | `LOCAL_PEERCRED`, audit token | Strong |
 | Code signature (identifier, Team ID, cdhash, signer certificate chain, whether ad-hoc / hardened runtime / platform binary, entitlements, notarization) | `SecCodeCopyGuestWithAttributes` (audit token for the peer, pid for ancestors), `SecCodeCheckValidity`, `SecCodeCopySigningInformation` | Strong (only when verification passes) |
 | Executable path | `proc_pidpath` | Medium (if in a location the user cannot rewrite) |
-| app bundle (bundle ID, version) | Walk up from the executable path to the `.app` and read Info.plist | Leaf of the Strong chain (depends on `team_id`, `signing_id`) |
+| Executable digest | sha256 of the contents of the file at the executable path | Medium (same as the path. If the file is replaced after exec, it diverges from the running image. On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively strong) |
+| app bundle (bundle ID, version) | Walk up from the executable path to the `.app` and read Info.plist | Strong (a field of `binary`. Paired with `team_id` and `signing_id`) |
 | Responsible process | `responsibility_get_pid_responsible_for_pid` (private API) | Medium |
 | Process name, argv, cwd, tty | `KERN_PROCARGS2`, `PROC_PIDVNODEPATHINFO`, `kinfo_proc` | Weak |
 | env | `KERN_PROCARGS2` (same uid or root only) | Weak (policy below) |
@@ -132,13 +133,11 @@ A subject is a condition on one process and does not distinguish between the pee
 ```json
 {
   "match": {
-    "signature_valid": true,
-    "team_id": "VWXYZ67890",
-    "signing_id": "com.anthropic.claude-code",
+    "binary": { "team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code" },
     "cwd": "/Users/alice/src/pj1/**"
   },
   "ancestors": [
-    { "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } }
+    { "any": { "match": { "binary": { "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } } }
   ]
 }
 ```
@@ -162,12 +161,10 @@ A tag is a named subject. On every collection, each process in the sequence is m
     "ancestors": [{
       "any": {
         "match": {
-          "signature_valid": true,
-          "team_id": "VWXYZ67890",
-          "signing_id": "com.anthropic.claude-code",
+          "binary": { "team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code" },
           "cwd": "/Users/alice/src/pj1/**"
         },
-        "ancestors": [{ "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345" } } }]
+        "ancestors": [{ "any": { "match": { "binary": { "team_id": "ABCDE12345" } } } }]
       },
       "include_self": true
     }]
@@ -178,7 +175,7 @@ A tag is a named subject. On every collection, each process in the sequence is m
 With this, a rule's subject only needs `{"tags": ["claude-pj1"]}`. The UI shows the tag on every process that has it. The processes that pass when that tag is authorized are exactly the processes shown with the tag on screen.
 
 - The strength of a tag used as a condition is the same as the strength of the tag definition's subject (the calculation rules are in "Rule Creation and Strength Constraints").
-- The `claude-pj1` above has only `ancestors` and no condition on the target itself, so it is Weak, and an `allow` rule using it as the subject needs an epoch scope (the rule example below has `os.boot` and `app.unlock`, so it satisfies this).
+- The `claude-pj1` above has only `ancestors` and no condition on the target itself, so it is Weak, and an `allow` rule using it as the subject needs an epoch scope (the rule example below has `os.session` and `app.unlock`, so it satisfies this).
 - Tag definitions go into the same signed list as rules. If a process with the same uid could rewrite a definition, every rule conditioned on that tag would widen.
 - A tag definition may refer to another tag; cycles are an error at load time.
 
@@ -192,7 +189,7 @@ A rule is a static definition. Its conditions are written symbolically and do no
   "effect": "allow",
   "subject": { "tags": ["claude-pj1"] },
   "targets": ["key:k1"],
-  "conditions": ["os.boot", "app.unlock", { "age": "1h" }, { "uses": 3 }, "os.not_remote"]
+  "conditions": [{ "os.session": "unlocked" }, "app.unlock", { "age": "1h" }, { "uses": 3 }, "os.not_remote"]
 }
 ```
 
@@ -208,7 +205,7 @@ There are two kinds of conditions, and which kind is decided when it is register
 
 | Kind | When it becomes false | Examples |
 | --- | --- | --- |
-| lifetime (scope) | It never comes back. The grant expires permanently | `os.boot`, `app.unlock`, `age`, `until`, `uses` |
+| lifetime (scope) | It never comes back. The grant expires permanently | `os.session`, `app.unlock`, `age`, `until`, `uses` |
 | state | It just does not match while false | `os.not_remote`, `os.console_active`, `time.window` |
 
 `uses` (consumable) is also a lifetime condition. Once it reaches 0, it never comes back. The kind is known by the vocabulary, not by the person writing the rule, so the approval UI and the trace show the kind next to each condition, letting readers see which meaning applies.
@@ -227,7 +224,7 @@ A grant is a rule applied to an actual process (the peer at the moment of approv
   "subject": { "tags": ["claude-pj1"] },
   "targets": ["key:k1"],
   "conditions": [
-    { "key": "os.boot", "pinned": "7B1E…" },
+    { "key": "os.session", "args": "unlocked", "pinned": { "boot": "7B1E…", "awake": 12, "unlocked": 3 } },
     { "key": "app.unlock", "pinned": 12 },
     { "key": "until", "pinned": "2026-11-08T13:00:00+09:00" },
     { "key": "uses", "pinned": 3 },
@@ -239,7 +236,7 @@ A grant is a rule applied to an actual process (the peer at the moment of approv
 ```
 
 - Each element of `conditions` has `key`, the original arguments `args` (if needed), and `pinned` (the pinned value; absent for state conditions). `age` is converted into the pinned value of `until` when the grant is created (`key` also becomes `until`).
-- The depends rules apply to grants as well (if there is a pin for `os.wake`, there is also a pin for `os.boot`).
+- The pinned value of `os.session` holds every epoch at or below its level (for `unlocked`, the three of `boot`, `awake`, and `unlocked`).
 - `id` is assigned uniquely by `Policy::grant` (the `g-…` above is illustrative).
 - A grant is self-contained. It holds its own effect, targets, pinned conditions, and subject contents, and holds the id of the original rule as `rule_id` (used for display and cleanup). Even if the rule changes later, existing grants do not change.
 - References to tag names and subject names inside the subject are kept as names. Tag definitions live in the signed list and updating them is an intended change, so it is fine for that to reach existing grants too.
@@ -269,52 +266,58 @@ The keys of `match` are names of items registered in the vocabulary (`Vocabulary
 | Form | Applicable items |
 | --- | --- |
 | Exact match | All |
-| glob | Paths, identifiers, bundle IDs, process names, cwd. Paths and cwd are written as absolute paths; `~` is not interpreted |
+| glob | Paths, process names, cwd. Paths and cwd are written as absolute paths; `~` is not interpreted |
 | Regular expression | Paths, argv |
 | Numeric range | uid |
 
-`cdhash`, `process`, and `team_id` allow exact match only. Signature conditions are considered a match only when signature verification passed (all signature-related items depend on `signature_valid`; see below). An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
+`process`, `binary`, and `os.session` are structured values and allow exact match only (every field of `binary` is exact match). Signature conditions are considered a match only when signature verification passed. An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
 
-**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). Its pinned value is a composite value holding every identifier the builder could obtain at that moment (e.g. `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares by the strongest identifier present on both sides, and at worst checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong, and it is an independent item without depends. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process".
+**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). Its pinned value is a composite value holding every identifier the builder could obtain at that moment (e.g. `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares by the strongest identifier present on both sides, and at worst checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process".
 
-### Item Registration and depends
+**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Every field value is a string: `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature or Info.plist as is. There are no boolean fields. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification passed. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
 
-The items usable in conditions (`match` keys, lifetime scope names, state condition names) are registered in the vocabulary in the same form, whether built-in or from an app (decision record: [DR-0002](decisions/DR-0002-matcher-depends-and-two-axis-strength.md)).
+The validity rules for values are closed within `binary`.
+
+- If there is `signing_id`, there is also `team_id`. The signing identifier is a value the developer chooses freely, and even an ad-hoc signature can claim it.
+- If there is `bundle_id`, there are also `team_id` and `signing_id`. Anyone can write Info.plist.
+- `cdhash` and `digest` may stand alone.
+- Empty (no fields at all) is invalid.
+- A value with an unknown field is invalid and is an error rather than being silently dropped (the same goes for values of `process`).
+
+The builder fills in values from the collection result so that they satisfy these rules (if the user picks `signing_id`, `team_id` goes in too), and loading treats values that do not satisfy them as errors.
+
+- `cdhash` is the strongest field, determining the values of all the fields below. This is because the CodeDirectory includes the identifier, the Team ID, and the hash of Info.plist (`CS_SUPPORTSTEAMID`, `teamOffset`, `CSSLOT_INFOSLOT` in the SDK's `cs_blobs.h`).
+- `digest` is the hash of the contents of the file at the executable path, placed as a floor for when the signature cannot be relied on. On macOS it reads the path from `proc_pidpath`, so if the file is replaced after exec, it diverges from the running image (its class is Medium, the same as the executable path). On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively a strong means. In environments and apps where signature-derived fields are available, `digest` is not used, and the UI shows signature-derived fields first.
+
+**`os.session`** is a lifetime condition that selects an OS epoch by level (epochs are defined in "scope: Grant Lifetime"). It is written in a rule's `conditions`, not in a subject's `match`. Its argument is a level, `boot` < `awake` < `unlocked`, and its pinned value is a composite of the epochs at or below the chosen level (e.g. `{"boot": "7B1E…", "awake": 12, "unlocked": 3}`). `check` is true only when all epochs at or below the level match. Its class is Strong (epochs cannot be forged).
+
+### Item Registration
+
+The items usable in conditions (`match` keys, lifetime scope names, state condition names) are registered in the vocabulary in the same form, whether built-in or from an app (decision record: [DR-0006](decisions/DR-0006-structured-values-instead-of-depends.md)).
 
 ```
-register(key, impl, depends: [key...])
+register(key, impl)
 ```
 
 | Argument | Contents |
 | --- | --- |
-| key | The item's name. Built-ins are unprefixed (`signing_id`, `cwd`) or `os.` / `time.`; apps use `app.` (the namespace rules are as in "Vocabulary Added by Apps") |
-| impl | The implementation for each kind of item. A matching function for matcher items; for lifetime and state items, the condition trait (observe / pin / check / advance, "Condition Implementation") |
-| depends | The list of items that must be pinned with their values in the same `match` (or the same `conditions` for lifetime items) for this item's value to be meaningful |
+| key | The item's name (namespaces below) |
+| impl | The implementation for each kind of item. For matcher items, the `Matcher` trait (`matches` for matching, and `class` for deciding the class from the value). For lifetime and state items, the condition trait (observe / pin / check / advance, "Condition Implementation") |
 
-Registration goes into procline-acl's `Vocabulary`, where matcher items, scopes, and conditions share the same container. If a key listed in `depends` is not registered, registration fails with an error. Cycles in depends are also an error.
+Registration goes into procline-acl's `Vocabulary`, where matcher items, scopes, and conditions share the same container. The only checks at registration time are duplicate keys and the namespace.
 
-The depends of the built-in items are as follows.
+Namespaces are aligned with the item's category.
 
-| Item | depends | Reason |
-| --- | --- | --- |
-| `signature_valid` | (none, root) | Signature verification passed. The value is a boolean. All signature-related items depend on this |
-| `cdhash` | `signature_valid` | A cdhash whose verification did not pass carries no guarantee about what it refers to |
-| `team_id` | `signature_valid` | Same as above |
-| `signing_id` | `team_id` | The signing identifier is a value the developer chooses freely, and even an ad-hoc signature can claim it. Weak on its own; meaningful only paired with the Team ID |
-| `bundle_id` | `team_id`, `signing_id` | Anyone can write Info.plist. Used only on top of the pair of signer and signing identifier |
-| `os.wake` | `os.boot` | The wake count is meaningful only within a boot session |
-| `os.screen_unlock` | `os.boot` | Same as above |
+- Unprefixed: attributes of the target process itself (`process`, `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `env`, `name`, `tty`, `responsible` …). A subject is "a condition on that process", so these are unprefixed.
+- `os.`: host state and epochs. `time.`: time. `app.`: app-specific (rules in "Vocabulary Added by Apps").
+- `until`, `age`, and `uses` are the lifetime of the grant itself, and are unprefixed as built-in basic words.
 
-The same rule applies to lifetime items. If a rule's `conditions` contains `os.wake`, it must also contain `os.boot`. Built-in items not in the table (`process`, `uid`, `path`, `cwd`, `argv`, `os.login_session`, etc.) are independent items without depends.
+An item holds the shape and validity of its own values. There are no dependencies across keys; where structure is needed, the value of a single key is given structure (`process`, `binary`, `os.session`).
 
-There is only one rule: **items listed in depends are pinned with their values in the same match**. For example, if `"signing_id": "com.anthropic.claude-code"` is a condition, the same match also contains `team_id` and `"signature_valid": true` (the subject example above has this shape). The responsibilities of each part are as follows.
-
-| Who | What it does |
-| --- | --- |
-| builder (`SubjectBuilder` / `RuleBuilder`, which create rules from the approval UI) | Lets the user pick a single item (usually a leaf). The builder fills in the ancestors from the picked item up to the root with values from the collection result. The user is never asked to pick ancestors by hand |
-| Loading (`Policy::load_verified`) | Missing (a depends item of some item is not in the same match) is an error. Conflicting (the same item written more than once as a duplicate key) is an error. Duplicated (multiple leaves share the same ancestor) is fine, since the ancestor only needs to appear once in the map |
-| Evaluation | Looks at the whole chain. Matches all items of the match with AND, and never looks only at the leaf while omitting ancestors |
-| UI (app side; procline-acl provides chain enumeration and ordering) | Items with depends are shown as one choice per chain (a set of items connected by depends), with candidates ordered by strength (e.g. for the signature chain, `signature_valid` < `team_id` < `signing_id` < `bundle_id`, with `cdhash` on a separate branch). Picking one pins everything from that item up to the root. Independent items without dependencies are listed as is |
+- The builder (`SubjectBuilder` / `RuleBuilder`, which create rules from the approval UI) fills in values from what the user picked (a combination of `binary` fields, a level of `os.session`). For `binary`, it fills in values from the collection result so that the validity rules are satisfied; the level of `os.session` is written as the argument of the rule's condition (the epochs are pinned when the grant is created).
+- Loading (`Policy::load_verified`, `Policy::load_grant`) has the item's implementation check values and treats invalid values (including unknown fields) as errors.
+- The UI (app side) shows one choice per key, and within it lets the user pick the level of the value or the combination of fields.
+- When an app's item is to be used together with a built-in item, they are placed side by side in the same `match` (AND).
 
 ### Strength: Class and Depth
 
@@ -322,13 +325,12 @@ An item's strength is expressed on two axes.
 
 | Axis | What it represents | Value |
 | --- | --- | --- |
-| class (between chains) | Whether a process with the same uid can forge the value (the strength in the "Collected Information" tables) | Strong / Medium / Weak |
-| depth (within a chain) | How narrowly it constrains. The closer to the leaf, the stricter, since all ancestor values are pinned | Distance from the root |
+| class | Whether a process with the same uid can forge the value (the strength in the "Collected Information" tables) | Strong / Medium / Weak |
+| depth | How narrowly the value constrains | The level of the value, or the number of pinned fields |
 
-- There is one class per chain. It is given to the root (the item with empty depends) at registration, and items with depends inherit the root's class. An item that reaches multiple roots gets the strongest root's class (since AND only narrows the condition).
-- An independent item is a chain of one item and is its own root. Its class is as in the "Collected Information" tables (`process`, uid, and signature-related items are Strong; executable path and responsible process are Medium; name, argv, cwd, tty, and env are Weak).
-- bundle\_id is a leaf of the Strong chain (depends on `team_id`, `signing_id`), and the executable path is a Medium independent item.
-- Which item has which class is held by the vocabulary. Items in the collection result do not carry a strength.
+- The class is decided by the item from the value (`Matcher::class`). For most items it is constant regardless of the value, as in the "Collected Information" tables (`process` and uid are Strong; executable path and responsible process are Medium; name, argv, cwd, tty, and env are Weak). `os.session` is Strong.
+- The class of `binary` is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
+- Which item has which class is held by the vocabulary (the implementations of the registered items). Items in the collection result do not carry a strength.
 - depth is material for UI ordering and for additional constraints an app may impose. It is not used for rule strength constraints ("Rule Creation and Strength Constraints").
 
 ### Evaluation
@@ -337,7 +339,7 @@ The target of evaluation is grants.
 
 1. Exclude expired grants (those whose lifetime `check` is false; they become candidates for cleanup).
 2. Exclude grants whose targets do not match the target.
-3. Match each grant's subject (all match items are matched, including ancestors in depends) and take the state `check`. If even one `deny` matches, reject.
+3. Match each grant's subject and take the state `check`. If even one `deny` matches, reject.
 4. If an `allow` matches, allow. Among the matching allows, exactly one is adopted. Grants that do not change under advance (permanent, or without `uses`) are preferred, and ties go to the oldest by creation. This avoids consuming limited `uses` when another grant would pass anyway.
 5. If an `ask` matches, or nothing matches, the default effect.
 6. Apply each condition's `advance` only to the adopted grant. If even one returns a new pinned value, create a new grant with the pinned values replaced (grants are immutable).
@@ -364,15 +366,18 @@ Multiple scopes can be listed, and the grant is in effect only while all of them
 | `until` | At the specified time | Clock (judged by time rather than epoch) |
 | `age` | Elapsed time since the grant's creation | Converted to the pinned value of `until` when the grant is created |
 | `uses` | After being adopted N times | The remaining count is pinned and decreases by 1 each time it is adopted (a counter rather than an epoch) |
-| `os.boot` | Reboot | `kern.bootsessionuuid` |
-| `os.wake` | Sleep, hibernation | Wake count counted via IOKit power notifications |
-| `os.screen_unlock` | Screen lock, screen saver | Count from screen unlock notifications |
+| `os.session` | The end of any of the periods at or below the chosen level. `boot` ends on reboot, `awake` on sleep or hibernation, `unlocked` on screen lock (manual, automatic lock when away, screen saver) | `boot` is `kern.bootsessionuuid`, `awake` is the wake count counted via IOKit power notifications, `unlocked` is the count from screen unlock notifications |
 | `os.login_session` | Logout, ssh disconnect | The asid in the audit token (of the peer when the grant is created) |
 | `os.console_user` | User switch | Count of console user changes |
 
-Notification-counted epochs (`os.wake`, `os.screen_unlock`, `os.console_user`) can only be counted while the daemon is running. When the daemon restarts, all grants that pinned them expire (since it is unknown what happened in between). For grants reloaded at startup, there is either no observed value for these epochs or pinned and observed do not match, so `check` becomes false; this too is guaranteed automatically ("Storage").
+The level names of `os.session` are names of periods.
 
-`os.wake` and `os.screen_unlock` depend on `os.boot`; when placed in a rule, `os.boot` must be placed too ("Item Registration and depends").
+- `boot` is the period from startup to reboot, `awake` from waking to sleep or hibernation, and `unlocked` from unlocking to screen lock.
+- The pinned value of level N holds every epoch at or below it. `awake` and `unlocked` are not strictly nested (the screen can be locked without sleeping), but choosing `unlocked` also expires on sleep. This is by design.
+- observe returns the epochs of the three levels as one composite value `{"boot": uuid, "awake": count, "unlocked": count}`, including only the levels whose period is currently in progress (levels outside their period, i.e. while locked or asleep, are omitted. `boot` is `kern.bootsessionuuid`; the others are the count of period starts). pin copies the fields at or below the argument's level, and `check` is true only when every field in pinned is present in observed and matches. Outside the period the field is missing, so it is false, and when the period starts again the count changes, so the grant expires permanently. This is because if only the unlock count were used as the epoch, the count would not change while locked, and the grant would pass.
+- User switching (`os.console_user`) and the login session (`os.login_session`) are not levels of `os.session`; they are independent items. No level covers the period until the display sleeps for power saving. It happens with neither lock nor sleep and also requires handling multiple monitors, so apps that want it add it under `app.`.
+
+Notification-counted epochs (`awake` and `unlocked` of `os.session`, `os.console_user`) can only be counted while the daemon is running. When the daemon restarts, all grants that pinned them expire (since it is unknown what happened in between). For grants reloaded at startup, there is either no observed value for these epochs or pinned and observed do not match, so `check` becomes false; this too is guaranteed automatically ("Storage").
 
 ### Vocabulary Added by Apps
 
@@ -426,7 +431,7 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 | Item | observe | pin | check | advance |
 | --- | --- | --- | --- | --- |
-| Epochs (`os.boot`, `os.wake`, `app.unlock` …) | The current epoch | The observed value (Err if absent) | pinned == observed | None |
+| Epochs (`os.session`, `app.unlock` …) | The current epoch | The observed value (Err if absent). For `os.session`, the composite of the epochs at or below the level | pinned == observed. For `os.session`, all epochs at or below the level match | None |
 | `until` | None | The time in args | obs.now < pinned | None |
 | `age` | None | obs.now + the duration in args (becomes the pinned value of `until`) | obs.now < pinned | None |
 | `uses` | None | N from args | pinned > 0 | pinned − 1 |
@@ -438,10 +443,10 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 ### Rule Creation and Strength Constraints
 
-Rules are created by picking items from the collected information (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the ancestor one level up" in the approval UI turns that value directly into a condition. Picking an item with depends also fills in the ancestors up to the root with values from the collection result ("Item Registration and depends"). `SubjectBuilder` creates the subject and `RuleBuilder` creates the static rule.
+Rules are created by picking items from the collected information (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the ancestor one level up" in the approval UI turns that value directly into a condition. For `binary`, the builder fills in a valid value from the picked fields, and for `os.session` the level is chosen via the condition's argument ("Item Registration"). `SubjectBuilder` creates the subject and `RuleBuilder` creates the static rule.
 
-- `RuleBuilder::build()` returns a static `Rule` and does not record epochs. It checks for missing depends and the strength (class) vs scope constraints (below). The constraints are judged by the presence of lifetime or consumable conditions (there are no pinned values yet).
-- Pinning is done by `Policy::grant(rule, ctx)`. It also puts the pinned grant into the in-memory Policy and returns it (signing and saving are up to the app). When `pin` fails (`PinError`: no observed value, invalid arguments) or depends are missing, it is a `GrantError`.
+- `RuleBuilder::build()` returns a static `Rule` and does not record epochs. It checks the validity of values and the strength (class) vs scope constraints (below). The constraints are judged by the presence of lifetime or consumable conditions (there are no pinned values yet).
+- Pinning is done by `Policy::grant(rule, ctx)`. It also puts the pinned grant into the in-memory Policy and returns it (signing and saving are up to the app). When `pin` fails (`PinError`: no observed value, invalid arguments) or a value is invalid, it is a `GrantError`.
 
 A rule's strength is determined by the subject's conditions on the target process itself (decision record: [DR-0003](decisions/DR-0003-rule-strength-from-own-match.md)).
 
@@ -470,12 +475,12 @@ There are two storage forms: "one list" and "one grant per file". Both are JSON,
 
 **Grants**: grants are held in memory, and to guard against unintended daemon termination, each one is signed and persisted individually on creation and on update, and all of them are reloaded at startup. The crate has the JSON shape of `Grant` and two entry points.
 
-- `Policy::load_grant(bytes, sig, &verifier)`: receives the bytes and signature of one grant, verifies, then returns a `Grant`. It performs the same checks as the list (unregistered items, missing / conflicting depends), and returns an error if they fail.
+- `Policy::load_grant(bytes, sig, &verifier)`: receives the bytes and signature of one grant, verifies, then returns a `Grant`. It performs the same checks as the list (unregistered items, validity of values), and returns an error if they fail.
 - `Policy::add_grant(grant)`: puts a reloaded grant into the in-memory Policy.
 
 
 - Since it is one per file, the write for a `uses` update stays light (to be measured with a benchmark at implementation time).
-- Among grants reloaded at startup, those that pinned epochs countable only while the daemon is running (`os.wake`, etc.) have no observed value or pinned and observed do not match, so `check` becomes false and they expire. "Expires on daemon restart" is guaranteed automatically.
+- Among grants reloaded at startup, those that pinned epochs countable only while the daemon is running (`awake` of `os.session`, etc.) have no observed value or pinned and observed do not match, so `check` becomes false and they expire. "Expires on daemon restart" is guaranteed automatically.
 - The persistence directory is placed where nothing other than the evaluating daemon (other processes with the same uid) can write. If it were writable, a grant file from before it was used up could be rolled back to restore `uses`. The location is decided by the app.
 
 ## API Skeleton
@@ -493,15 +498,21 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // p.signature_trust(): Platform / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
 
 // Strength (shared types in procline-core). Which item has which class is held by Vocabulary, not by ProcessInfo items
-enum Strength { Strong, Medium, Weak }               // class (one per chain)
-struct Depth(u8);                                    // depth (distance from the chain's root)
-// Chain: a set of items connected by depends. Vocabulary enumerates them and orders items by strength (UI choices)
+enum Strength { Strong, Medium, Weak }               // class (decided by the item from the value)
+struct Depth(u8);                                    // depth (level of the value / number of pinned fields)
+
+// Structured values (procline-core)
+struct BinaryPin { digest: Option<String>, team_id: Option<String>, signing_id: Option<String>, bundle_id: Option<String>, cdhash: Option<CdHash> }  // in JSON every field is a string (cdhash is hex)
+// BinaryPin::validate(&self) -> Result<(), BinaryPinError>: validity of the value (signing_id needs team_id, bundle_id needs team_id and signing_id, empty is invalid). Unknown fields are an error at load time
+enum SessionLevel { Boot, Awake, Unlocked }          // level of os.session (the value of args. In JSON "boot" / "awake" / "unlocked")
 
 // Vocabulary (procline-acl)
-let mut vocab = Vocabulary::builtin();               // matcher items (signature_valid / team_id / signing_id / process / cwd, etc.), os.* scopes and conditions, until / age / uses
-// matcher items, lifetime, and state items are added with the same register. Error if a depends key is unregistered or there is a cycle
-vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // matching function. A root (no depends) is given its class with Item::root_matcher(key, class, ...)
-vocab.register(Item::condition("app.unlock", depends: [], CwUnlock::new(&vault)))?;  // a value implementing Condition (lifetime)
+let mut vocab = Vocabulary::builtin();               // matcher items (process / binary / uid / cwd, etc.), os.* scopes and conditions (os.session, etc.), until / age / uses
+// matcher items, lifetime, and state items are added with the same register. Duplicate keys and namespace violations are errors
+vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // items whose class is constant regardless of the value are registered with a closure, stating the class explicitly
+// items whose class changes with the value implement the Matcher trait (matches and class(&self, value) -> Strength) and are registered with Item::matcher(key, impl)
+// vocab.class(key, &value) -> Option<Strength>: the class the item decided from the value (None for unregistered keys and condition items)
+vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // a value implementing Condition (lifetime)
 // state items are also passed to register with the same Item::condition(...). Whether lifetime or state is returned by Condition::kind
 
 trait Condition {
@@ -513,8 +524,8 @@ trait Condition {
 }
 
 // Loading the list (subjects, tags, rules) and reloading saved grants
-let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // unregistered items, tag cycles, missing / conflicting depends are errors
-let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // verifies one grant and checks it against the vocabulary (unregistered items, missing / conflicting depends are errors)
+let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // unregistered items, tag cycles, validity violations of values are errors
+let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // verifies one grant and checks it against the vocabulary (unregistered items, validity violations of values are errors)
 policy.add_grant(saved);                             // puts it into the in-memory Policy
 
 // Evaluation
@@ -534,18 +545,20 @@ pub struct Decision {
 
 // Creating a rule from the approval UI
 let subject = SubjectBuilder::from(&tagged, 0)       // pick from the target process's items (tagged holds a reference to the vocabulary)
-    .pin("signing_id")                               // the ancestors team_id / signature_valid are also filled from the collection result
+    .pin("binary", PinSpec::Binary(vec![BinaryField::SigningId]))  // the key, and how much of its value to pin. team_id is also filled from the collection result
     .tag("claude-pj1")
     .build()?;
+// PinSpec { All, Binary(Vec<BinaryField>) }: All is for process (every identifier obtained). The level of os.session is specified with RuleBuilder::condition below
+// BinaryField { Digest, TeamId, SigningId, BundleId, CdHash }
 let rule = RuleBuilder::new(subject, &vocab)
     .targets(["key:k1"])
     .condition(ConditionUse::with_args("age", json!("1h")))
-    .condition(ConditionUse::named("os.boot"))      // stays symbolic. The epoch is pinned when the grant is created
+    .condition(ConditionUse::with_args("os.session", json!("unlocked")))  // stays symbolic. The epoch is pinned when the grant is created
     .allow()
-    .build()?;                                       // a static Rule. Checks missing depends and the strength (class) vs scope constraints
+    .build()?;                                       // a static Rule. Checks the validity of values and the strength (class) vs scope constraints
 
 // Applying a rule to create a grant (pins each condition. Saved rules use the same entry point)
-let grant = policy.grant(&rule, &ctx)?;              // pins, assigns an id, also puts it into the in-memory Policy and returns it. GrantError: pin failure (Unobservable / InvalidArgs), missing depends
+let grant = policy.grant(&rule, &ctx)?;              // pins, assigns an id, also puts it into the in-memory Policy and returns it. GrantError: pin failure (Unobservable / InvalidArgs), validity violation of a value
 // the app signs and persists the grant
 ```
 
