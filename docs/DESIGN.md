@@ -115,40 +115,50 @@ Collection takes time, and processes may be replaced in the meantime.
 
 ## ACL Rule Shape and Evaluation
 
-The ACL is made of four parts. subject, tag, and rule are static definitions that can be named and reused; they go into the signed list and appear in the same form in configuration files and in the approval UI. A grant is a rule applied to an actual process with its conditions pinned to concrete values, and it is the only thing evaluation looks at.
+The ACL is made of four parts. subject, tag, and rule are static definitions that can be named and reused; they go into the signed list and appear in the same form in configuration files and in the approval UI. A grant is a rule applied to an actual process with the subject's placeholders and its conditions pinned to concrete values, and it is the only thing evaluation looks at.
 
 | Part | Contents | Used for |
 | --- | --- | --- |
-| subject | A condition on one process. Can contain nested conditions on ancestors | The target of a rule, tag definitions |
+| subject | A condition on one process. Can hold conditions on ancestors as an ordered list | The target of a rule, tag definitions |
 | tag | A named subject. Matching processes get the tag | Display in the approval UI, conditions in other subjects |
 | rule | Who (subject), on what (targets), until when and under what circumstances (conditions), with what outcome (effect). The conditions stay symbolic | The source of grants. Pick "the usual allow" in the approval UI and apply it with a single passkey |
-| grant | A rule applied to the peer at the moment of approval, with each condition pinned to a concrete value | Evaluation |
+| grant | A rule applied to the peer at the moment of approval, with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value | Evaluation |
 
 If no grant matches, the default effect applies (usually `ask`), and deny takes precedence over allow.
 
 ### subject
 
-A subject is a condition on one process and does not distinguish between the peer and ancestors. Conditions on ancestors are written by nesting subjects inside `ancestors`. A nested subject can itself have `ancestors`, so shapes of any depth, such as "C under B under A", can be built.
+A subject is a condition on one process and does not distinguish between the peer and ancestors. Conditions on ancestors are written in `ancestors` as an ordered list. A value of `true` is a placeholder, filled with that process's actual value when the grant is created ("rule").
 
 ```json
 {
-  "match": {
-    "binary": { "team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code" },
-    "cwd": "/Users/alice/src/pj1/**"
-  },
+  "match": { "binary": { "team_id": true, "signing_id": true } },
   "ancestors": [
-    { "any": { "match": { "binary": { "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } } }
+    { "match": { "binary": { "signing_id": "com.anthropic.claude-code", "team_id": true } } },
+    { "tags": ["terminal-app"] }
   ]
 }
 ```
+
+This example is a process that "has claude-code above it, and above that a process tagged `terminal-app`"; the target's own Team ID and signing identifier, and claude-code's Team ID, are fixed to the values at the time of approval.
 
 | Element | Contents |
 | --- | --- |
 | match | Conditions on the process's own items (shape described under matcher below) |
 | tags | Tags attached to the process |
-| ancestors | A list of conditions on ancestors. `any` (any of the ancestors), `at` (n levels up), `chain` (including the order). Each one's contents is a subject. `"include_self": true` also includes the process itself as a candidate ("itself or any of its ancestors") |
+| ancestors | An ordered list of conditions on ancestors. Each entry has `match` and `tags`. The entries match somewhere among the ancestors in this order (others may sit in between). Nearest first |
+| include\_self | If `true`, matching of the `ancestors` list may start from the process itself rather than its ancestors (used to define tags for "itself or its descendants"). One per subject, not per entry |
 
-`match` and `tags` are conditions on the process itself, and `ancestors` are conditions only on ancestors (the process itself is not included unless `include_self` is given). Writing only `ancestors` means no condition is placed on the process itself. All conditions within a subject are AND. OR is expressed by writing separate rules, so that readers of a rule do not have to follow nested logical expressions.
+`match` and `tags` are conditions on the process itself, and `ancestors` are conditions on ancestors (the process itself is not included unless `include_self` is given). Writing only `ancestors` means no condition is placed on the process itself.
+
+`ancestors` is matched as a subsequence.
+
+- The list is ordered nearest first relative to the target, the same direction as the collection result sequence `[target, parent, grandparent, …]`.
+- Each entry only needs to match somewhere among the ancestors above the one the previous entry matched, in this order, and other ancestors may sit in between. Depth is not stable because of the presence or absence of tmux, direnv, or wrappers, so there is no way of writing that distinguishes "nothing in between".
+- Matching is decided greedily from the near side. Entry 1 goes to the nearest matching ancestor, entry 2 to the nearest matching ancestor above that, and so on, so which ancestor's values fill an entry's placeholders is uniquely determined. An entry with no concrete values and no tags (only `{"match": {"binary": {"team_id": true}}}`) matches the nearest ancestor that has that value.
+- `ancestors` is not nested inside an entry, and entries are not referenced by name. Deep conditions are confined to tag definitions.
+
+All conditions within a subject are AND. OR is expressed by writing separate rules, so that readers of a rule do not have to follow nested logical expressions.
 
 ### tag
 
@@ -158,16 +168,16 @@ A tag is a named subject. On every collection, each process in the sequence is m
 {
   "tag": "claude-pj1",
   "subject": {
-    "ancestors": [{
-      "any": {
+    "ancestors": [
+      {
         "match": {
-          "binary": { "team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code" },
+          "binary": { "signing_id": "com.anthropic.claude-code", "team_id": "VWXYZ67890" },
           "cwd": "/Users/alice/src/pj1/**"
-        },
-        "ancestors": [{ "any": { "match": { "binary": { "team_id": "ABCDE12345" } } } }]
+        }
       },
-      "include_self": true
-    }]
+      { "match": { "binary": { "team_id": "ABCDE12345" } } }
+    ],
+    "include_self": true
   }
 }
 ```
@@ -201,6 +211,18 @@ A rule is a static definition. Its conditions are written symbolically and do no
 | targets | What the rule applies to (key globs, tags). The target vocabulary is decided by the app. Apps that do not need it omit it |
 | conditions | A list of condition names (all AND). There are lifetime and state conditions; which one is decided by the vocabulary (below) |
 
+A subject value is either a concrete value or a placeholder (`true`) (decision record: [DR-0007](decisions/DR-0007-pin-placeholders-and-ordered-ancestors.md)).
+
+| Value written in a rule | Meaning | Example |
+| --- | --- | --- |
+| A string (glob / regular expression / numeric range depending on the item) | A hand-written concrete value. Matched as is | `{"binary": {"team_id": "MYTEAM", "signing_id": "myapp"}}` = always allow from my own app |
+| `true` | A placeholder. When the grant is created, the actual value of the process the subject matched is pinned | `{"binary": {"team_id": true, "signing_id": true}}` = fixed to the app that was approved |
+
+- In structured values they can be mixed per field (`{"binary": {"signing_id": "com.googlecode.iterm2", "team_id": true}}` = find it by signing identifier and pin its Team ID).
+- `process` is either `true` (pin the individual process) or a concrete composite value.
+- Simple items (`cwd`, `uid`, `path` …) also take `true`, and pin the actual value as an exact match.
+- This way "the usual allow" needs only one rule, and there is no need to save a separate rule per app.
+
 There are two kinds of conditions, and which kind is decided when it is registered in the vocabulary. A rule just lists names in `conditions`, with no separate place per kind (all AND).
 
 | Kind | When it becomes false | Examples |
@@ -214,7 +236,7 @@ A static rule is never used directly in evaluation. Evaluation looks only at gra
 
 ### grant
 
-A grant is a rule applied to an actual process (the peer at the moment of approval), with each condition pinned to a concrete value. When the grant is created, the epoch at that moment is recorded for lifetime conditions, and `age` is converted to a time.
+A grant is a rule applied to an actual process (the peer at the moment of approval), with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value. When the grant is created, placeholders in the subject's `match` are filled with the values of the target process (the head of the sequence), placeholders in an `ancestors` entry are filled with the values of the ancestor that entry matched, the epoch at that moment is recorded for lifetime conditions, and `age` is converted to a time.
 
 ```json
 {
@@ -238,11 +260,12 @@ A grant is a rule applied to an actual process (the peer at the moment of approv
 - Each element of `conditions` has `key`, the original arguments `args` (if needed), and `pinned` (the pinned value; absent for state conditions). `age` is converted into the pinned value of `until` when the grant is created (`key` also becomes `until`).
 - The pinned value of `os.session` holds every epoch at or below its level (for `unlocked`, the three of `boot`, `awake`, and `unlocked`).
 - `id` is assigned uniquely by `Policy::grant` (the `g-…` above is illustrative).
-- A grant is self-contained. It holds its own effect, targets, pinned conditions, and subject contents, and holds the id of the original rule as `rule_id` (used for display and cleanup). Even if the rule changes later, existing grants do not change.
+- No placeholder remains in the subject (if one does, it is a load error). If there is no value to fill one with (such as `team_id: true` without a signature), the grant cannot be created (`GrantError::ValueUnavailable`).
+- A grant is self-contained. It holds its own effect, targets, pinned conditions, and the subject with its placeholders resolved, and holds the id of the original rule as `rule_id` (used for display and cleanup). Even if the rule changes later, existing grants do not change.
 - References to tag names and subject names inside the subject are kept as names. Tag definitions live in the signed list and updating them is an intended change, so it is fine for that to reach existing grants too.
 - A grant created from a rule without lifetime or consumable conditions has no pinned values and never expires (a permanent grant). A deny is usually of this kind.
 
-A saved rule is itself what gets reapplied. The approval UI shows the list of rules; picking one and passing a single passkey creates a grant. The flow of choosing conditions on the spot in the approval UI and allowing is two steps: "assemble a rule, then immediately turn it into a grant". Whether to save the rule to the list is the user's choice; if not saved, it becomes a throwaway rule.
+A saved rule is itself what gets reapplied. Thanks to placeholders, the same rule can also be used to approve a different app. The approval UI shows the list of rules; picking one and passing a single passkey creates a grant. The flow of choosing conditions on the spot in the approval UI and allowing is two steps: "assemble a rule, then immediately turn it into a grant". Whether to save the rule to the list is the user's choice; if not saved, it becomes a throwaway rule.
 
 ### Names and References
 
@@ -253,7 +276,7 @@ References are written as strings (no wrapper such as `{"ref": "…"}`).
 **Reason for the decision**: at every place a reference can appear, what it refers to is fixed to one kind, and there is no place where kinds are mixed.
 
 - Inside `tags`, only tag names.
-- In a subject position (a rule's `subject`, the contents of `any` in `ancestors`, etc.), a string is a subject name and an object is an inline definition. The type distinguishes them.
+- In a subject position (a rule's `subject`), a string is a subject name and an object is an inline definition. The type distinguishes them. Entries of `ancestors` are not referenced by name; only an inline `match` and `tags` are written.
 - A rule is only referred to by name when applied, and is never referenced from within the list.
 - Elements of `conditions`, both plain strings and ones with arguments such as `{"age": "1h"}`, are vocabulary names.
 
@@ -270,11 +293,13 @@ The keys of `match` are names of items registered in the vocabulary (`Vocabulary
 | Regular expression | Paths, argv |
 | Numeric range | uid |
 
+An item or field whose rule value is a placeholder (`true`) becomes an exact match on the actual value in the grant ("rule"). There is no exact match on booleans. JSON `true` is reserved for placeholders; there are currently no boolean items, and when one is needed it is represented as a string.
+
 `process`, `binary`, and `os.session` are structured values and allow exact match only (every field of `binary` is exact match). Signature conditions are considered a match only when signature verification passed. An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
 
-**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). Its pinned value is a composite value holding every identifier the builder could obtain at that moment (e.g. `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares by the strongest identifier present on both sides, and at worst checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process".
+**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). In a rule it is written as `true` (pin the approved individual process) or a concrete composite value, and in a grant it becomes a composite value that `Policy::grant` gives every identifier obtainable at that moment (e.g. `{"process": {"unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares by the strongest identifier present on both sides, and at worst checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process".
 
-**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Every field value is a string: `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature or Info.plist as is. There are no boolean fields. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification passed. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
+**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Each field value is a string or the placeholder `true`, and in a grant every one is a string. `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature or Info.plist as is. No field takes a boolean value, so `true` only has the meaning of a placeholder. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification passed. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
 
 The validity rules for values are closed within `binary`.
 
@@ -283,8 +308,9 @@ The validity rules for values are closed within `binary`.
 - `cdhash` and `digest` may stand alone.
 - Empty (no fields at all) is invalid.
 - A value with an unknown field is invalid and is an error rather than being silently dropped (the same goes for values of `process`).
+- Placeholder fields also count as "present" (`{"signing_id": "com.googlecode.iterm2", "team_id": true}` is valid).
 
-The builder fills in values from the collection result so that they satisfy these rules (if the user picks `signing_id`, `team_id` goes in too), and loading treats values that do not satisfy them as errors.
+The builder aligns the fields and puts `true` so that they satisfy these rules (if the user picks `signing_id`, `team_id` goes in too), and loading treats values that do not satisfy them as errors.
 
 - `cdhash` is the strongest field, determining the values of all the fields below. This is because the CodeDirectory includes the identifier, the Team ID, and the hash of Info.plist (`CS_SUPPORTSTEAMID`, `teamOffset`, `CSSLOT_INFOSLOT` in the SDK's `cs_blobs.h`).
 - `digest` is the hash of the contents of the file at the executable path, placed as a floor for when the signature cannot be relied on. On macOS it reads the path from `proc_pidpath`, so if the file is replaced after exec, it diverges from the running image (its class is Medium, the same as the executable path). On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively a strong means. In environments and apps where signature-derived fields are available, `digest` is not used, and the UI shows signature-derived fields first.
@@ -314,8 +340,8 @@ Namespaces are aligned with the item's category.
 
 An item holds the shape and validity of its own values. There are no dependencies across keys; where structure is needed, the value of a single key is given structure (`process`, `binary`, `os.session`).
 
-- The builder (`SubjectBuilder` / `RuleBuilder`, which create rules from the approval UI) fills in values from what the user picked (a combination of `binary` fields, a level of `os.session`). For `binary`, it fills in values from the collection result so that the validity rules are satisfied; the level of `os.session` is written as the argument of the rule's condition (the epochs are pinned when the grant is created).
-- Loading (`Policy::load_verified`, `Policy::load_grant`) has the item's implementation check values and treats invalid values (including unknown fields) as errors.
+- The builder (`SubjectBuilder` / `RuleBuilder`, which create rules from the approval UI) does not hold the collection result; from what the user picked (`process`, a combination of `binary` fields, a level of `os.session`), it assembles a subject with the picked fields set to `true`. The actual values are filled in by `Policy::grant`. For `binary`, it aligns the fields so that the validity rules are satisfied; the level of `os.session` is written as the argument of the rule's condition (the epochs are pinned when the grant is created).
+- Loading (`Policy::load_verified`, `Policy::load_grant`) has the item's implementation check values and treats invalid values (including unknown fields) as errors. If a placeholder remains in a grant, that too is treated as an invalid value and is an error (`LoadError::InvalidValue`).
 - The UI (app side) shows one choice per key, and within it lets the user pick the level of the value or the combination of fields.
 - When an app's item is to be used together with a built-in item, they are placed side by side in the same `match` (AND).
 
@@ -328,7 +354,7 @@ An item's strength is expressed on two axes.
 | class | Whether a process with the same uid can forge the value (the strength in the "Collected Information" tables) | Strong / Medium / Weak |
 | depth | How narrowly the value constrains | The level of the value, or the number of pinned fields |
 
-- The class is decided by the item from the value (`Matcher::class`). For most items it is constant regardless of the value, as in the "Collected Information" tables (`process` and uid are Strong; executable path and responsible process are Medium; name, argv, cwd, tty, and env are Weak). `os.session` is Strong.
+- The class is decided by the item from the value (`Matcher::class`). It also accepts rule values containing placeholders, and decides by which fields they are placed in (`{"binary": {"team_id": true}}` is Strong). For most items it is constant regardless of the value, as in the "Collected Information" tables (`process` and uid are Strong; executable path and responsible process are Medium; name, argv, cwd, tty, and env are Weak). `os.session` is Strong.
 - The class of `binary` is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
 - Which item has which class is held by the vocabulary (the implementations of the registered items). Items in the collection result do not carry a strength.
 - depth is material for UI ordering and for additional constraints an app may impose. It is not used for rule strength constraints ("Rule Creation and Strength Constraints").
@@ -339,7 +365,7 @@ The target of evaluation is grants.
 
 1. Exclude expired grants (those whose lifetime `check` is false; they become candidates for cleanup).
 2. Exclude grants whose targets do not match the target.
-3. Match each grant's subject and take the state `check`. If even one `deny` matches, reject.
+3. Match each grant's subject and take the state `check`. The subject's `match` and `tags` are matched against the target itself, and `ancestors` is matched against the sequence as a subsequence, greedily from the near side. If even one `deny` matches, reject.
 4. If an `allow` matches, allow. Among the matching allows, exactly one is adopted. Grants that do not change under advance (permanent, or without `uses`) are preferred, and ties go to the oldest by creation. This avoids consuming limited `uses` when another grant would pass anyway.
 5. If an `ask` matches, or nothing matches, the default effect.
 6. Apply each condition's `advance` only to the adopted grant. If even one returns a new pinned value, create a new grant with the pinned values replaced (grants are immutable).
@@ -443,15 +469,18 @@ enum PinError { Unobservable, InvalidArgs { reason: String } }
 
 ### Rule Creation and Strength Constraints
 
-Rules are created by picking items from the collected information (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the ancestor one level up" in the approval UI turns that value directly into a condition. For `binary`, the builder fills in a valid value from the picked fields, and for `os.session` the level is chosen via the condition's argument ("Item Registration"). `SubjectBuilder` creates the subject and `RuleBuilder` creates the static rule.
+Rules are created by picking items in the approval UI (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the claude-code above" produces a subject with the picked fields set to placeholders (`true`), and the actual values are filled in when the grant is created. For `binary`, the builder aligns the picked fields into a valid combination, and for `os.session` the level is chosen via the condition's argument ("Item Registration"). `SubjectBuilder` creates the subject and `RuleBuilder` creates the static rule.
 
-- `RuleBuilder::build()` returns a static `Rule` and does not record epochs. It checks the validity of values and the strength (class) vs scope constraints (below). The constraints are judged by the presence of lifetime or consumable conditions (there are no pinned values yet).
-- Pinning is done by `Policy::grant(rule, ctx)`. It also puts the pinned grant into the in-memory Policy and returns it (signing and saving are up to the app). When `pin` fails (`PinError`: no observed value, invalid arguments) or a value is invalid, it is a `GrantError`.
+- `SubjectBuilder` does not receive the collection result. It assembles a subject containing `true` from a `PinSpec`, and concrete values are written with `exact`. Ancestor entries are assembled with `AncestorBuilder` and added in order with `ancestor`.
+- `pin` and `exact` on the same key are merged per field into one value for `binary` (an error if the same field is in both), and for simple items and `process` the second one is an error (`BuildError::Conflict`). `SubjectBuilder::build` / `AncestorBuilder::build` check only the validity of values (the `binary` rules, empty); checking against the vocabulary (unregistered items) is done by `RuleBuilder::build`.
+- `RuleBuilder::build()` returns a static `Rule` and does not record epochs. It checks the validity of values and the strength (class) vs scope constraints (below). The constraints are judged by the presence of lifetime or consumable conditions (there are no pinned values yet). The strength class can be judged even with placeholders in place.
+- Pinning is done by `Policy::grant(rule, tagged, ctx)`. It fills the subject's placeholders with the actual values from `tagged`, pins each condition, and also puts the grant into the in-memory Policy and returns it (signing and saving are up to the app). A `GrantError` is one of: no value to fill a placeholder (`ValueUnavailable`), `pin` failed (`PinError`: no observed value, invalid arguments), or a value is invalid.
+- So that the approval UI can show "what will be pinned" before the passkey, `Policy::resolve_subject(subject, tagged)` gives the subject with its placeholders filled (name references are resolved to the subject in the list before filling. An entry that matched the target itself via `include_self` is filled with the target's own values). `Policy::grant` also uses this internally.
 
 A rule's strength is determined by the subject's conditions on the target process itself (decision record: [DR-0003](decisions/DR-0003-rule-strength-from-own-match.md)).
 
 - The conditions on the target process itself are the `match` and, from the definitions of the tags referenced by `tags`, the conditions on the process itself. The rule's strength is the strongest class among those items.
-- `ancestors` conditions are not counted. Even if the ancestors are strongly identified, the target is "any descendant of them", and the target itself is not constrained. The same holds with `include_self` (it means "itself or any of its ancestors", and does not pin the process itself).
+- `ancestors` conditions are not counted. Even if the ancestors are strongly identified, the target is "any descendant of them", and the target itself is not constrained. The same holds with `include_self` (it only lets matching of the list start from the process itself, and does not constrain the process itself).
 - A subject with no condition on the process itself (only `ancestors`) is the weakest and is subject to the same constraints as Weak.
 - The strength of a tag used as a condition is that of the tag definition's subject, calculated by the same rules.
 
@@ -501,9 +530,12 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 enum Strength { Strong, Medium, Weak }               // class (decided by the item from the value)
 struct Depth(u8);                                    // depth (level of the value / number of pinned fields)
 
+// A value written in a rule (procline-core). In JSON, true is Pin, anything else is a value of T
+enum Pinnable<T> { Pin, Value(T) }
+
 // Structured values (procline-core)
-struct BinaryPin { digest: Option<String>, team_id: Option<String>, signing_id: Option<String>, bundle_id: Option<String>, cdhash: Option<CdHash> }  // in JSON every field is a string (cdhash is hex)
-// BinaryPin::validate(&self) -> Result<(), BinaryPinError>: validity of the value (signing_id needs team_id, bundle_id needs team_id and signing_id, empty is invalid). Unknown fields are an error at load time
+struct BinaryPin { digest: Option<Pinnable<String>>, team_id: Option<Pinnable<String>>, signing_id: Option<Pinnable<String>>, bundle_id: Option<Pinnable<String>>, cdhash: Option<Pinnable<CdHash>> }  // in JSON each field is true (placeholder) or a string (cdhash is hex)
+// BinaryPin::validate(&self) -> Result<(), BinaryPinError>: validity of the value (signing_id needs team_id, bundle_id needs team_id and signing_id, empty is invalid. Placeholder fields also count as present). Unknown fields are an error at load time
 enum SessionLevel { Boot, Awake, Unlocked }          // level of os.session (the value of args. In JSON "boot" / "awake" / "unlocked")
 
 // Vocabulary (procline-acl)
@@ -543,13 +575,35 @@ pub struct Decision {
     pub updated_grant: Option<Grant>,    // the new version of a grant changed by advance. Always None for explain
 }
 
-// Creating a rule from the approval UI
-let subject = SubjectBuilder::from(&tagged, 0)       // pick from the target process's items (tagged holds a reference to the vocabulary)
-    .pin("binary", PinSpec::Binary(vec![BinaryField::SigningId]))  // the key, and how much of its value to pin. team_id is also filled from the collection result
-    .tag("claude-pj1")
+// The shape of a subject (procline-acl)
+struct Subject { r#match: BTreeMap<String, MatchValue>, tags: Vec<String>, ancestors: Vec<AncestorMatch>, include_self: bool }
+struct AncestorMatch { r#match: BTreeMap<String, MatchValue>, tags: Vec<String> }  // an entry of ancestors. Holds no nested ancestors
+// MatchValue { Pin, Exact(..), Glob(..), Regex(..), Range { .. }, Process(Pinnable<ProcessIdentity>), Binary(BinaryPin) }: Pin is the placeholder for simple items
+
+// Creating a rule from the approval UI (does not receive the collection result; assembles a subject containing true)
+let subject = SubjectBuilder::new()
+    .pin("binary", PinSpec::Binary(vec![BinaryField::TeamId, BinaryField::SigningId]))  // the key, and which fields of its value to make placeholders
+    .ancestor(
+        AncestorBuilder::new()
+            .exact("binary", MatchValue::Binary(BinaryPin {
+                signing_id: Some(Pinnable::Value("com.anthropic.claude-code".into())),
+                team_id: None, digest: None, bundle_id: None, cdhash: None,
+            }))                                      // find it by signing_id,
+            .pin("binary", PinSpec::Binary(vec![BinaryField::TeamId]))  // and pin its Team ID (merged per field with the exact on the same key into one value)
+            .build()?,
+    )
+    .ancestor(AncestorBuilder::new().tag("terminal-app").build()?)  // added in order, nearest first
     .build()?;
-// PinSpec { All, Binary(Vec<BinaryField>) }: All is for process (every identifier obtained). The level of os.session is specified with RuleBuilder::condition below
+// SubjectBuilder: new / pin(key, PinSpec) / exact(key, MatchValue) / tag(name) / ancestor(AncestorMatch) / include_self() / build() -> Result<Subject, BuildError>
+// AncestorBuilder: new / pin / exact / tag / build() -> Result<AncestorMatch, BuildError>
+// build checks only the validity of values (the binary rules, empty). Unregistered items are checked by RuleBuilder::build
+// pin and exact on the same key: binary is merged per field (BuildError::Conflict if the same field is in both), simple items and process give BuildError::Conflict on the second one
+// PinSpec { All, Binary(Vec<BinaryField>) }: All is for process and simple items (sets the whole value to true). The level of os.session is specified with RuleBuilder::condition below
 // BinaryField { Digest, TeamId, SigningId, BundleId, CdHash }
+
+// Approval UI preview: show "what will be pinned" before the passkey
+let preview = policy.resolve_subject(&rule.subject, &tagged)?;  // the Subject with the placeholders of a SubjectRef (a name is fine too) filled with the actual values from tagged. GrantError::ValueUnavailable if a value is missing
+
 let rule = RuleBuilder::new(subject, &vocab)
     .targets(["key:k1"])
     .condition(ConditionUse::with_args("age", json!("1h")))
@@ -557,8 +611,9 @@ let rule = RuleBuilder::new(subject, &vocab)
     .allow()
     .build()?;                                       // a static Rule. Checks the validity of values and the strength (class) vs scope constraints
 
-// Applying a rule to create a grant (pins each condition. Saved rules use the same entry point)
-let grant = policy.grant(&rule, &ctx)?;              // pins, assigns an id, also puts it into the in-memory Policy and returns it. GrantError: pin failure (Unobservable / InvalidArgs), validity violation of a value
+// Applying a rule to create a grant (pins the subject's placeholders and each condition. Saved rules use the same entry point)
+let grant = policy.grant(&rule, &tagged, &ctx)?;     // pins, assigns an id, also puts it into the in-memory Policy and returns it
+// GrantError: ValueUnavailable { key, field: Option<String> } (no value to fill a placeholder), pin failure (Unobservable / InvalidArgs), validity violation of a value
 // the app signs and persists the grant
 ```
 
