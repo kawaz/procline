@@ -7,7 +7,7 @@ mod rule;
 mod subject;
 mod vocabulary;
 
-pub use builder::{BuildError, RuleBuilder, SubjectBuilder};
+pub use builder::{BuildError, PinSpec, RuleBuilder, SubjectBuilder};
 pub use context::{EvalContext, Observed};
 pub use policy::{
     Decision, GrantError, LoadError, Policy, PolicyVerifier, TaggedChain, Trace, TraceEntry,
@@ -17,6 +17,5 @@ pub use subject::{
     AncestorCondition, AncestorSelector, Literal, MatchValue, Subject, SubjectRef, Tag,
 };
 pub use vocabulary::{
-    Chain, Condition, ConditionKind, Depth, Item, ItemKind, Matcher, PinError, RegisterError,
-    Vocabulary,
+    Condition, ConditionKind, Depth, Item, ItemKind, Matcher, PinError, RegisterError, Vocabulary,
 };

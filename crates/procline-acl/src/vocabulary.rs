@@ -13,12 +13,12 @@ pub struct Vocabulary {
 }
 
 impl Vocabulary {
-    /// The built-in items (signature chain, `process` (identifies the individual process) and the other matcher items, `os.*`, `time.*`, `until` / `age` / `uses`).
+    /// The built-in items (`process` (identifies the individual process), `binary` and the other matcher items, `os.session` and the other `os.*` items, `time.*`, `until` / `age` / `uses`).
     pub fn builtin() -> Self {
         todo!()
     }
 
-    /// Adds an item. Fails on a duplicate key, an unregistered or cyclic dependency, or a key outside the allowed namespace.
+    /// Adds an item. Fails on a duplicate key or a key outside the allowed namespace.
     pub fn register(&mut self, _item: Item) -> Result<(), RegisterError> {
         todo!()
     }
@@ -28,85 +28,45 @@ impl Vocabulary {
         self.items.get(key)
     }
 
-    /// The chains (items connected by `depends`), each with its items ordered by depth.
-    pub fn chains(&self) -> Vec<Chain> {
-        todo!()
-    }
-
-    /// The class of the chain the matcher item belongs to.
-    pub fn class(&self, _key: &str) -> Option<Strength> {
-        todo!()
-    }
-
-    /// The item and every item it transitively depends on.
-    pub fn closure(&self, _key: &str) -> Option<Vec<&str>> {
+    /// The class the matcher item decides from the value; `None` for an unregistered key or a condition item.
+    pub fn class(&self, _key: &str, _value: &MatchValue) -> Option<Strength> {
         todo!()
     }
 }
 
-/// One registrable item: key, depends and its implementation.
+/// One registrable item: key and its implementation. The item itself owns the shape and validity of its values.
 pub struct Item {
     key: String,
-    depends: Vec<String>,
-    /// Class given to a root matcher item; dependent items inherit from their roots.
-    class: Option<Strength>,
     kind: ItemKind,
 }
 
 impl Item {
-    /// A root matcher item (no depends) with its class.
-    pub fn root_matcher(
-        key: impl Into<String>,
-        class: Strength,
-        matcher: impl Matcher + 'static,
-    ) -> Self {
+    /// A matcher item; its implementation decides the class from the value.
+    pub fn matcher(key: impl Into<String>, matcher: impl Matcher + 'static) -> Self {
         Self {
             key: key.into(),
-            depends: Vec::new(),
-            class: Some(class),
             kind: ItemKind::Matcher(Box::new(matcher)),
         }
     }
 
-    /// A matcher item that depends on other items and inherits their class.
-    pub fn matcher<D: Into<String>>(
-        key: impl Into<String>,
-        depends: impl IntoIterator<Item = D>,
-        matcher: impl Matcher + 'static,
-    ) -> Self {
-        Self {
-            key: key.into(),
-            depends: depends.into_iter().map(Into::into).collect(),
-            class: None,
-            kind: ItemKind::Matcher(Box::new(matcher)),
-        }
+    /// A matcher item with a constant class and a closure. An item whose class varies with the value implements `Matcher` and registers with `Item::matcher`.
+    pub fn matcher_fn<F>(key: impl Into<String>, class: Strength, matches: F) -> Self
+    where
+        F: Fn(&ProcessInfo, &MatchValue) -> bool + Send + Sync + 'static,
+    {
+        Self::matcher(key, ConstClassMatcher { class, matches })
     }
 
     /// A condition item, lifetime or state as its implementation tells.
-    pub fn condition<D: Into<String>>(
-        key: impl Into<String>,
-        depends: impl IntoIterator<Item = D>,
-        condition: impl Condition + 'static,
-    ) -> Self {
+    pub fn condition(key: impl Into<String>, condition: impl Condition + 'static) -> Self {
         Self {
             key: key.into(),
-            depends: depends.into_iter().map(Into::into).collect(),
-            class: None,
             kind: ItemKind::Condition(Box::new(condition)),
         }
     }
 
     pub fn key(&self) -> &str {
         &self.key
-    }
-
-    pub fn depends(&self) -> &[String] {
-        &self.depends
-    }
-
-    /// The class given at registration; only root matcher items have one.
-    pub fn root_class(&self) -> Option<Strength> {
-        self.class
     }
 
     pub fn kind(&self) -> &ItemKind {
@@ -128,17 +88,30 @@ pub enum ItemKind {
     Condition(Box<dyn Condition>),
 }
 
-/// Matches one process against the value written in `match`.
+/// Matches one process against the value written in `match`, and decides the class of that value.
 pub trait Matcher: Send + Sync {
     fn matches(&self, process: &ProcessInfo, value: &MatchValue) -> bool;
+
+    /// The class of the value. Most items return a constant; `binary` returns the strongest field present (`Strong` with a signature field, `Medium` with `digest` alone).
+    fn class(&self, value: &MatchValue) -> Strength;
 }
 
-impl<F> Matcher for F
+/// A closure matcher whose class is the same for every value.
+struct ConstClassMatcher<F> {
+    class: Strength,
+    matches: F,
+}
+
+impl<F> Matcher for ConstClassMatcher<F>
 where
     F: Fn(&ProcessInfo, &MatchValue) -> bool + Send + Sync,
 {
     fn matches(&self, process: &ProcessInfo, value: &MatchValue) -> bool {
-        self(process, value)
+        (self.matches)(process, value)
+    }
+
+    fn class(&self, _value: &MatchValue) -> Strength {
+        self.class
     }
 }
 
@@ -200,59 +173,27 @@ impl fmt::Display for PinError {
 
 impl std::error::Error for PinError {}
 
-/// Items connected by `depends`, with the class taken from its roots.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Chain {
-    pub class: Strength,
-    /// Ordered from the root to the leaves.
-    pub items: Vec<(String, Depth)>,
-}
-
-/// Distance from the root within a chain.
+/// How far a value narrows: its level, or the number of pinned fields. Orders the choices in the UI and feeds the application's extra constraints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Depth(pub u8);
 
 /// Registering an item failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegisterError {
-    Duplicate {
-        key: String,
-    },
-    UnknownDependency {
-        key: String,
-        missing: String,
-    },
-    Cycle {
-        key: String,
-    },
-    Namespace {
-        key: String,
-    },
-    /// A matcher item without depends was registered without a class.
-    MissingClass {
-        key: String,
-    },
+    Duplicate { key: String },
+    Namespace { key: String },
 }
 
 impl fmt::Display for RegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Duplicate { key } => write!(f, "item {key:?} is already registered"),
-            Self::UnknownDependency { key, missing } => write!(
-                f,
-                "item {key:?} depends on {missing:?}, which is not registered; register it first"
-            ),
-            Self::Cycle { key } => write!(f, "the depends of item {key:?} form a cycle"),
             Self::Namespace { key } => {
                 write!(
                     f,
                     "item {key:?} is outside the allowed namespace; use the \"app.\" prefix"
                 )
             }
-            Self::MissingClass { key } => write!(
-                f,
-                "matcher item {key:?} has no depends and no class; register it as a root matcher with a class"
-            ),
         }
     }
 }

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use procline_core::Strength;
+use procline_core::{BinaryField, Strength};
 
 use crate::policy::TaggedChain;
 use crate::rule::{ConditionUse, Effect, Rule};
@@ -12,7 +12,7 @@ use crate::vocabulary::Vocabulary;
 pub struct SubjectBuilder<'a> {
     tagged: &'a TaggedChain<'a>,
     index: usize,
-    pins: Vec<String>,
+    pins: Vec<(String, PinSpec)>,
     tags: Vec<String>,
 }
 
@@ -27,9 +27,9 @@ impl<'a> SubjectBuilder<'a> {
         }
     }
 
-    /// Pins the item and every item it depends on, with the collected values.
-    pub fn pin(mut self, key: impl Into<String>) -> Self {
-        self.pins.push(key.into());
+    /// Pins the item with the collected values, as far as `spec` chooses; the item fills in a valid value.
+    pub fn pin(mut self, key: impl Into<String>, spec: PinSpec) -> Self {
+        self.pins.push((key.into(), spec));
         self
     }
 
@@ -45,7 +45,16 @@ impl<'a> SubjectBuilder<'a> {
     }
 }
 
-/// Builds a static rule and checks its depends and its strength against its scopes.
+/// How much of an item's value to pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinSpec {
+    /// The whole collected value (`process`, and items with an unstructured value).
+    All,
+    /// The chosen fields of `binary`; the fields the validity rules require are added.
+    Binary(Vec<BinaryField>),
+}
+
+/// Builds a static rule and checks its values and its strength against its scopes.
 #[expect(dead_code, reason = "read once build is implemented")]
 pub struct RuleBuilder<'v> {
     vocab: &'v Vocabulary,
@@ -94,7 +103,7 @@ impl<'v> RuleBuilder<'v> {
         self
     }
 
-    /// Checks depends and the strength / scope constraint (by the presence of lifetime conditions) and returns the static rule.
+    /// Checks the validity of the values and the strength / scope constraint (by the presence of lifetime conditions) and returns the static rule.
     pub fn build(self) -> Result<Rule, BuildError> {
         todo!()
     }
@@ -110,10 +119,10 @@ pub enum BuildError {
     ValueUnavailable {
         key: String,
     },
-    /// An item is used without an item it depends on.
-    MissingDependency {
+    /// The value of an item breaks the item's validity rules.
+    InvalidValue {
         key: String,
-        missing: String,
+        reason: String,
     },
     /// The scopes are too long-lived for the strength of the subject.
     ScopeTooWeak {
@@ -133,11 +142,8 @@ impl fmt::Display for BuildError {
                     "the process has no collected value for {key:?}; choose another item"
                 )
             }
-            Self::MissingDependency { key, missing } => {
-                write!(
-                    f,
-                    "{key:?} is used without {missing:?}, which it depends on; pin {missing:?} too"
-                )
+            Self::InvalidValue { key, reason } => {
+                write!(f, "the value of {key:?} is not valid: {reason}")
             }
             Self::ScopeTooWeak { class } => write!(
                 f,

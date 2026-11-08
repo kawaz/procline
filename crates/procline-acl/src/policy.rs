@@ -24,7 +24,7 @@ pub trait PolicyVerifier {
 }
 
 impl<'v> Policy<'v> {
-    /// Verifies the signature, then parses and checks the list against the vocabulary. Rules without lifetime conditions become permanent grants.
+    /// Verifies the signature, then parses and checks the list against the vocabulary (unknown items, validity of the values). Rules without lifetime conditions become permanent grants.
     pub fn load_verified(
         _bytes: &[u8],
         _signature: &[u8],
@@ -34,7 +34,7 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Verifies the signature of one stored grant, then parses and checks it against the vocabulary.
+    /// Verifies the signature of one stored grant, then parses and checks it against the vocabulary (unknown items, validity of the values).
     pub fn load_grant(
         &self,
         _bytes: &[u8],
@@ -126,14 +126,10 @@ pub enum LoadError {
     TagCycle {
         tags: Vec<String>,
     },
-    /// An item is pinned without an item it depends on.
-    MissingDependency {
+    /// The value of an item breaks the item's validity rules.
+    InvalidValue {
         key: String,
-        missing: String,
-    },
-    /// The same item is given different values.
-    ConflictingValue {
-        key: String,
+        reason: String,
     },
 }
 
@@ -151,13 +147,9 @@ impl fmt::Display for LoadError {
             Self::TagCycle { tags } => {
                 write!(f, "tag definitions form a cycle: {}", tags.join(" -> "))
             }
-            Self::MissingDependency { key, missing } => {
-                write!(
-                    f,
-                    "{key:?} is pinned without {missing:?}, which it depends on; pin {missing:?} too"
-                )
+            Self::InvalidValue { key, reason } => {
+                write!(f, "the value of {key:?} is not valid: {reason}")
             }
-            Self::ConflictingValue { key } => write!(f, "{key:?} is given conflicting values"),
         }
     }
 }
@@ -177,10 +169,10 @@ pub enum GrantError {
     UnknownItem {
         key: String,
     },
-    /// A condition is used without an item it depends on.
-    MissingDependency {
+    /// The arguments or value of a condition break the item's validity rules.
+    InvalidValue {
         key: String,
-        missing: String,
+        reason: String,
     },
     /// A condition could not be pinned.
     Pin {
@@ -193,11 +185,8 @@ impl fmt::Display for GrantError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownItem { key } => write!(f, "{key:?} is not registered in the vocabulary"),
-            Self::MissingDependency { key, missing } => {
-                write!(
-                    f,
-                    "{key:?} is used without {missing:?}, which it depends on; add {missing:?} to the rule"
-                )
+            Self::InvalidValue { key, reason } => {
+                write!(f, "the value of {key:?} is not valid: {reason}")
             }
             Self::Pin { key, error } => write!(f, "cannot pin {key:?}: {error}"),
         }

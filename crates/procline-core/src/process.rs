@@ -82,6 +82,7 @@ impl Identity {
 ///
 /// Matching compares by the strongest identifier present on both sides, at worst the pair of pid and start time. The derived `==` compares the fields as written and is not that matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessIdentity {
     pub unique_id: Option<u64>,
     pub pid: i32,
