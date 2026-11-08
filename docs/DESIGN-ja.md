@@ -406,7 +406,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     max_ancestors: 32,
 })?;
 // chain.processes()[0] が対象、以降が祖先。chain.truncated
-// p.signature.trust(): Platform / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
+// p.signature_trust(): Platform / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
 
 // 強さ(procline-core の共有型)。どの項目がどのクラスかは Vocabulary が持ち、ProcessInfo の項目は持たない
 enum Strength { Strong, Medium, Weak }               // クラス(連鎖ごとに 1 つ)
@@ -416,7 +416,7 @@ struct Depth(u8);                                    // 深さ(連鎖の根か�
 // 語彙(procline-acl)
 let mut vocab = Vocabulary::builtin();               // matcher の項目(signature_valid / team_id / signing_id / cwd など)、os.* の scope と条件、until / age / uses / process
 // matcher の項目、寿命型、状態型を同じ register で足す。depends の key が未登録、または循環ならエラー
-vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // 照合する関数
+vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // 照合する関数。根(depends なし)は Item::root_matcher(key, class, ...) でクラスを与える
 vocab.register(Item::epoch("app.unlock", depends: [], CwUnlockEpoch::new(&vault)))?;  // 世代を返す
 // 状態型も Item::condition(...) で同じ register に渡す(真偽を返す)
 
@@ -434,14 +434,14 @@ let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);
 // decision.effect / decision.matched_rule / decision.trace
 
 // 承認画面からルールを作る
-let subject = SubjectBuilder::from(&tagged, 0, &vocab)  // 対象プロセスの項目から選ぶ
+let subject = SubjectBuilder::from(&tagged, 0)       // 対象プロセスの項目から選ぶ(tagged が語彙への参照を持つ)
     .pin("signing_id")                               // 祖先の team_id / signature_valid も収集結果の値で入る
     .tag("claude-pj1")
     .build()?;
 let rule = RuleBuilder::new(subject, &vocab)
     .targets(["key:k1"])
-    .condition(Cond::age(Duration::from_secs(3600)))
-    .condition(Cond::named("os.boot"))              // 寿命型なので今の世代をここで記録
+    .condition(ConditionUse::with_args("age", json!("1h")))
+    .condition(ConditionUse::named("os.boot"))      // 寿命型なので今の世代をここで記録
     .allow()
     .build()?;                                       // depends の欠けと、強さ(クラス)と scope の制約を検査
 
