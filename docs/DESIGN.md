@@ -14,7 +14,7 @@ A set of crates for collecting information about a process and its ancestors, an
 1. **Identify by something stronger than pid**: the peer is identified by its audit token and ancestors by a per-process unique ID, so pid reuse cannot cause a mix-up.
 2. **Display and matching share the same types**: a rule can be built directly from the information shown on screen.
 3. **Every item has a strength**: items that a process with the same uid can forge (name, cwd, argv) and items it cannot (code signature) are distinguished by strength when the item is registered, and allows based only on weak conditions are restricted.
-4. **Apps can extend the vocabulary**: matcher items, scopes (rule lifetimes), and conditions can be registered by an app in the same form as the built-in vocabulary.
+4. **Apps can extend the vocabulary**: matcher items, scopes (grant lifetimes), and conditions can be registered by an app in the same form as the built-in vocabulary.
 
 **Scope**
 
@@ -29,7 +29,7 @@ Collection is implemented in per-OS crates, while the types and matching live in
 | procline | Entry point. Re-exports the core types and the collect of the build target's OS | core, a per-OS crate (only one, per target) |
 | procline-core | Types for collection results, the strength class type (`Strength`), signature trust evaluation, sanitization for display, env policy and redaction, the JSON shape | none (OS-independent) |
 | procline-macos | Collection of the peer and ancestors, code signature verification, icons, OS epochs (boot, sleep, screen lock, etc.) | core, Security framework, AppKit |
-| procline-acl | Rule types, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, rule creation | core |
+| procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, rule creation and grant issuance | core |
 
 Apps (cw, pam-passkey) use only what they need. pam-passkey uses only collection; cw uses everything. cw-specific vocabulary (`app.unlock` and so on) is defined on the cw side and registered into procline-acl under `app.` names.
 
@@ -112,16 +112,16 @@ Collection takes time, and processes may be replaced in the meantime.
 
 ## ACL Rule Shape and Evaluation
 
-The ACL is made of four parts that can be named and reused. Each has meaning on its own and appears in the same form in configuration files and in the approval UI.
+The ACL is made of four parts. subject, tag, and rule are static definitions that can be named and reused; they go into the signed list and appear in the same form in configuration files and in the approval UI. A grant is a rule applied to an actual process with its conditions pinned to concrete values, and it is the only thing evaluation looks at.
 
 | Part | Contents | Used for |
 | --- | --- | --- |
 | subject | A condition on one process. Can contain nested conditions on ancestors | The target of a rule, tag definitions |
 | tag | A named subject. Matching processes get the tag | Display in the approval UI, conditions in other subjects |
-| rule | Who (subject), on what (targets), until when and under what circumstances (conditions), with what outcome (effect) | Evaluation |
-| preset | A rule before the scope epochs are recorded | Apply "the usual allow" with a single passkey |
+| rule | Who (subject), on what (targets), until when and under what circumstances (conditions), with what outcome (effect). The conditions stay symbolic | The source of grants. Pick "the usual allow" in the approval UI and apply it with a single passkey |
+| grant | A rule applied to the peer at the moment of approval, with each condition pinned to a concrete value | Evaluation |
 
-If no rule matches, the default effect applies (usually `ask`), and deny takes precedence over allow.
+If no grant matches, the default effect applies (usually `ask`), and deny takes precedence over allow.
 
 ### subject
 
@@ -182,19 +182,21 @@ With this, a rule's subject only needs `{"tags": ["claude-pj1"]}`. The UI shows 
 
 ### rule
 
+A rule is a static definition. Its conditions are written symbolically and do not yet hold epochs or times. It goes into the same signed list as subjects and tags.
+
 ```json
 {
-  "id": "r-01",
+  "id": "pj1-claude-usual",
   "effect": "allow",
   "subject": { "tags": ["claude-pj1"] },
   "targets": ["key:k1"],
-  "conditions": ["os.boot", "app.unlock", { "age": "1h" }, "os.not_remote"],
-  "created_from": "approval-ui"
+  "conditions": ["os.boot", "app.unlock", { "age": "1h" }, { "uses": 3 }, "os.not_remote"]
 }
 ```
 
 | Element | Contents |
 | --- | --- |
+| id | The rule's name. A grant points to it via `rule_id` |
 | effect | `allow` (pass without authentication), `deny` (reject), `ask` (require the app's re-authentication) |
 | subject | The subject above. May be referenced by name |
 | targets | What the rule applies to (key globs, tags). The target vocabulary is decided by the app. Apps that do not need it omit it |
@@ -204,32 +206,48 @@ There are two kinds of conditions, and which kind is decided when it is register
 
 | Kind | When it becomes false | Examples |
 | --- | --- | --- |
-| lifetime (scope) | It never comes back. The rule expires permanently | `os.boot`, `app.unlock`, `age`, `until` |
+| lifetime (scope) | It never comes back. The grant expires permanently | `os.boot`, `app.unlock`, `age`, `until`, `uses` |
 | state | It just does not match while false | `os.not_remote`, `os.console_active`, `time.window` |
 
-The kind is known by the vocabulary, not by the person writing the rule, so the approval UI and the trace show the kind next to each condition, letting readers see which meaning applies. When saved, lifetime conditions are expanded into a form that records the epoch at that moment (`age` is converted to a time).
+`uses` (consumable) is also a lifetime condition. Once it reaches 0, it never comes back. The kind is known by the vocabulary, not by the person writing the rule, so the approval UI and the trace show the kind next to each condition, letting readers see which meaning applies.
 
-### preset
+A static rule is never used directly in evaluation. Evaluation looks only at grants. Rules in the list that have no lifetime or consumable conditions automatically become permanent grants at load time. This lets a hand-written deny take effect without an "allow" operation. Rules containing lifetime or consumable conditions become grants only through approval.
 
-A preset is a named rule before the scope epochs are recorded. Applying it records the epochs at that moment, converts `age` to a time, and adds the result as a normal rule.
+### grant
+
+A grant is a rule applied to an actual process (the peer at the moment of approval), with each condition pinned to a concrete value. When the grant is created, the epoch at that moment is recorded for lifetime conditions, and `age` is converted to a time.
 
 ```json
 {
-  "preset": "pj1-claude-usual",
-  "rule": {
-    "effect": "allow",
-    "subject": { "tags": ["claude-pj1"] },
-    "targets": ["key:k1"],
-    "conditions": ["os.boot", "app.unlock", { "age": "1h" }]
-  }
+  "id": "g-2026-11-08-0001",
+  "rule_id": "pj1-claude-usual",
+  "effect": "allow",
+  "subject": { "tags": ["claude-pj1"] },
+  "targets": ["key:k1"],
+  "conditions": [
+    { "key": "os.boot", "pinned": "7B1E…" },
+    { "key": "app.unlock", "pinned": 12 },
+    { "key": "until", "pinned": "2026-11-08T13:00:00+09:00" },
+    { "key": "uses", "pinned": 3 },
+    { "key": "os.not_remote" }
+  ],
+  "created_at": "2026-11-08T12:00:00+09:00",
+  "created_from": "approval-ui"
 }
 ```
 
-The approval UI shows the list of presets; picking one and passing a single passkey creates the usual allow on the spot. Adding and changing presets also goes into the same signed list as rules.
+- Each element of `conditions` has `key`, the original arguments `args` (if needed), and `pinned` (the pinned value; absent for state conditions). `age` is converted into the pinned value of `until` when the grant is created (`key` also becomes `until`).
+- The depends rules apply to grants as well (if there is a pin for `os.wake`, there is also a pin for `os.boot`).
+- `id` is assigned uniquely by `Policy::grant` (the `g-…` above is illustrative).
+- A grant is self-contained. It holds its own effect, targets, pinned conditions, and subject contents, and holds the id of the original rule as `rule_id` (used for display and cleanup). Even if the rule changes later, existing grants do not change.
+- References to tag names and subject names inside the subject are kept as names. Tag definitions live in the signed list and updating them is an intended change, so it is fine for that to reach existing grants too.
+- A grant created from a rule without lifetime or consumable conditions has no pinned values and never expires (a permanent grant). A deny is usually of this kind.
+
+A saved rule is itself what gets reapplied. The approval UI shows the list of rules; picking one and passing a single passkey creates a grant. The flow of choosing conditions on the spot in the approval UI and allowing is two steps: "assemble a rule, then immediately turn it into a grant". Whether to save the rule to the list is the user's choice; if not saved, it becomes a throwaway rule.
 
 ### Names and References
 
-subjects, tags, presets, and sets of conditions can all be named, placed in the list, and referenced by name from elsewhere. If a subject created in the approval UI is saved with a name, it can be reused from then on in tag definitions and other rules.
+subjects, tags, rules, and sets of conditions can all be named, placed in the list, and referenced by name from elsewhere. If a subject created in the approval UI is saved with a name, it can be reused from then on in tag definitions and other rules.
 
 References are written as strings (no wrapper such as `{"ref": "…"}`).
 
@@ -237,7 +255,7 @@ References are written as strings (no wrapper such as `{"ref": "…"}`).
 
 - Inside `tags`, only tag names.
 - In a subject position (a rule's `subject`, the contents of `any` in `ancestors`, etc.), a string is a subject name and an object is an inline definition. The type distinguishes them.
-- A preset is only referred to by name when applied, and is never referenced from within the list.
+- A rule is only referred to by name when applied, and is never referenced from within the list.
 - Elements of `conditions`, both plain strings and ones with arguments such as `{"age": "1h"}`, are vocabulary names.
 
 A wrapper would only add writing and reading effort without reducing ambiguity. This is revisited only if the premise breaks (a form is added where names of different kinds can appear in the same place).
@@ -266,7 +284,7 @@ register(key, impl, depends: [key...])
 | Argument | Contents |
 | --- | --- |
 | key | The item's name. Built-ins are unprefixed (`signing_id`, `cwd`) or `os.` / `time.`; apps use `app.` (the namespace rules are as in "Vocabulary Added by Apps") |
-| impl | The implementation for each kind of item. A matching function for matcher items, a function returning the epoch for lifetime items, a function returning a boolean for state items |
+| impl | The implementation for each kind of item. A matching function for matcher items; for lifetime and state items, the condition trait (observe / pin / check / advance, "Condition Implementation") |
 | depends | The list of items that must be pinned with their values in the same `match` (or the same `conditions` for lifetime items) for this item's value to be meaningful |
 
 Registration goes into procline-acl's `Vocabulary`, where matcher items, scopes, and conditions share the same container. If a key listed in `depends` is not registered, registration fails with an error. Cycles in depends are also an error.
@@ -311,37 +329,45 @@ An item's strength is expressed on two axes.
 
 ### Evaluation
 
-1. Exclude rules whose scope has expired (expired rules become candidates for cleanup).
-2. Exclude rules whose targets do not match the target.
-3. Match the subject (all match items are matched, including ancestors in depends). If even one `deny` matches, reject.
-4. If an `allow` matches, allow.
+The target of evaluation is grants.
+
+1. Exclude expired grants (those whose lifetime `check` is false; they become candidates for cleanup).
+2. Exclude grants whose targets do not match the target.
+3. Match each grant's subject (all match items are matched, including ancestors in depends) and take the state `check`. If even one `deny` matches, reject.
+4. If an `allow` matches, allow. Among the matching allows, exactly one is adopted. Grants that do not change under advance (permanent, or without `uses`) are preferred, and ties go to the oldest by creation. This avoids consuming limited `uses` when another grant would pass anyway.
 5. If an `ask` matches, or nothing matches, the default effect.
+6. Apply each condition's `advance` only to the adopted grant. If even one returns a new pinned value, create a new grant with the pinned values replaced (grants are immutable).
 
-The evaluation result returns not only the effect but also which rule took effect and which item each condition matched (the trace). This is used for the UI's "why did this pass, why was I asked".
+The evaluation result (`Decision`) returns not only the effect but also the id of the adopted grant and which item each condition matched (the trace). This is used for the UI's "why did this pass, why was I asked". When step 6 changed the grant, the new version is also returned (`updated_grant`).
 
-## scope: Rule Lifetime
+There are two entry points for evaluation. `evaluate` runs through step 6 and also replaces the in-memory grant with the new version. `explain` is for displaying the trace; it does not apply `advance`, and `updated_grant` is always empty.
 
-Lifetime conditions (hereafter scopes) are defined as "a function that returns the current epoch". When a rule is created, the epoch at that moment is recorded; on every evaluation it is compared with the current epoch, and if they differ the rule expires permanently. This means "during this particular unlock" rather than "while unlocked", so locking once and unlocking again does not revive the rule.
+- The app signs and persists `updated_grant`, and hands over the value only after the write succeeds. Even if the write fails, memory holds the decremented side, which fails safe.
+- A grant whose `uses` reached 0 is treated as expired by step 1 on the next evaluation. Deleting it is the responsibility of cleanup (the app).
 
-With this shape, every scope is automatically guaranteed to "never come back once ended", and all an app has to add is a single "function that returns the epoch". When the epoch cannot be determined (the function cannot return a value), the rule is treated as expired, because that fails safe.
+## scope: Grant Lifetime
 
-Multiple scopes can be listed, and the rule is in effect only while all of them are alive (AND). They are combined like "24 hours, but only until reboot".
+Lifetime conditions (hereafter scopes) pin the epoch at that moment when a grant is created; on every evaluation the current epoch is compared with the pinned value, and if they differ the grant expires permanently. This means "during this particular unlock" rather than "while unlocked", so locking once and unlocking again does not revive the grant.
+
+With this shape, every scope is automatically guaranteed to "never come back once ended", and all an app has to add is a single implementation of the condition trait ("Condition Implementation"). If the current epoch cannot be observed when creating a grant, the grant cannot be created (`PinError::Unobservable`), and if it cannot be observed at evaluation, `check` becomes false and the grant expires. Both fail safe.
+
+Multiple scopes can be listed, and the grant is in effect only while all of them are alive (AND). They are combined like "24 hours, but only until reboot".
 
 ### Built-in Vocabulary
 
 | Name | When it ends | How the epoch is obtained (macOS) |
 | --- | --- | --- |
 | `until` | At the specified time | Clock (judged by time rather than epoch) |
-| `age` | Elapsed time since creation | Converted to `until` at creation and stored |
-| `uses` | After N uses | Per-rule count (a counter rather than an epoch) |
+| `age` | Elapsed time since the grant's creation | Converted to the pinned value of `until` when the grant is created |
+| `uses` | After being adopted N times | The remaining count is pinned and decreases by 1 each time it is adopted (a counter rather than an epoch) |
 | `os.boot` | Reboot | `kern.bootsessionuuid` |
 | `os.wake` | Sleep, hibernation | Wake count counted via IOKit power notifications |
 | `os.screen_unlock` | Screen lock, screen saver | Count from screen unlock notifications |
-| `os.login_session` | Logout, ssh disconnect | The asid in the audit token (of the peer at creation time) |
+| `os.login_session` | Logout, ssh disconnect | The asid in the audit token (of the peer when the grant is created) |
 | `os.console_user` | User switch | Count of console user changes |
 | `process` | Exit of the specified process | unique\_id of the peer or an ancestor. Can express "while the shell in this terminal tab is alive" |
 
-Notification-counted epochs (`os.wake`, `os.screen_unlock`, `os.console_user`) can only be counted while the daemon is running. When the daemon restarts, all rules tied to them expire (since it is unknown what happened in between). Including the daemon's launch ID in the epoch value guarantees this automatically.
+Notification-counted epochs (`os.wake`, `os.screen_unlock`, `os.console_user`) can only be counted while the daemon is running. When the daemon restarts, all grants that pinned them expire (since it is unknown what happened in between). For grants reloaded at startup, there is either no observed value for these epochs or pinned and observed do not match, so `check` becomes false; this too is guaranteed automatically ("Storage").
 
 `os.wake` and `os.screen_unlock` depend on `os.boot`; when placed in a rule, `os.boot` must be placed too ("Item Registration and depends").
 
@@ -352,13 +378,13 @@ App-specific vocabulary goes in the `app.` namespace. The only namespaces are th
 - `app.unlock`: one opening of the vault. Ends on manual lock or vkey\_ttl expiry.
 - `app.passphrase`: one issuance of P. Ends when it becomes Sealed.
 
-Rules with unregistered names are an error at load time (silently ignoring them would produce rules that stay in effect longer than intended).
+Rules with unregistered names are an error at load time (silently ignoring them would produce grants that stay in effect longer than intended).
 
 ## Conditions, Rule Creation, and Storage
 
 ### Conditions
 
-State conditions are ones whose truth value can change on every evaluation. Unlike scopes, when one becomes false the rule does not expire; it just does not match at that time. As with scopes, apps can add their own under `app.` names in addition to the built-ins.
+State conditions are ones whose truth value can change on every evaluation. Unlike scopes, when one becomes false the grant does not expire; it just does not match at that time. As with scopes, apps can add their own under `app.` names in addition to the built-ins.
 
 | Name | True when |
 | --- | --- |
@@ -369,9 +395,50 @@ State conditions are ones whose truth value can change on every evaluation. Unli
 
 Location conditions such as "while on the home Wi-Fi" are added by apps as needed.
 
+### Condition Implementation: observe / pin / check / advance
+
+Lifetime (scope), consumable (`uses`), and state conditions are expressed with the functions of the same trait. Only `observe` reads outside state (epochs, screen lock state, etc.); `pin` / `check` / `advance` decide their results from the values passed in. A condition touches only its own pinned value and never receives the whole grant.
+
+```rust
+/// The observed value of this condition. EvalContext::capture observes it only once at the start of evaluation, and it does not change during evaluation
+pub struct Observed<'a> {
+    pub now: SystemTime,
+    pub value: Option<&'a Value>,   // the result of observe(). None if absent
+}
+
+trait Condition {
+    fn kind(&self) -> ConditionKind;                                   // Lifetime / State
+    /// Observe the current value (an epoch uuid, screen lock state, etc.). EvalContext::capture calls it once for every condition at the start of evaluation. None for conditions with nothing to observe
+    fn observe(&self) -> Option<Value>;
+    /// Called once when creating a grant. Returns the pinned value. Ok(None) for state conditions. Err(PinError::Unobservable) for a lifetime condition with no observed value. Err(PinError::InvalidArgs) if args are invalid
+    fn pin(&self, args: Option<&Value>, obs: &Observed) -> Result<Option<Value>, PinError>;
+    /// The check. No side effects
+    fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
+    /// Called only on the adopted grant. The new version of the pinned value. None means no change
+    fn advance(&self, pinned: Option<&Value>) -> Option<Value>;
+}
+
+enum PinError { Unobservable, InvalidArgs { reason: String } }
+```
+
+| Item | observe | pin | check | advance |
+| --- | --- | --- | --- | --- |
+| Epochs (`os.boot`, `os.wake`, `app.unlock` …) | The current epoch | The observed value (Err if absent) | pinned == observed | None |
+| `until` | None | The time in args | obs.now < pinned | None |
+| `age` | None | obs.now + the duration in args (becomes the pinned value of `until`) | obs.now < pinned | None |
+| `uses` | None | N from args | pinned > 0 | pinned − 1 |
+| State (`os.console_active`, etc.) | The current state (if there is something to observe) | None | Looks at observed / args / chain | None |
+
+- `ConditionKind` has two values, Lifetime / State. Epochs, `until`, `age`, and `uses` are Lifetime; `uses` too never comes back once it reaches 0.
+- `EvalContext` holds `now` and "key → the result of `observe()`". The Policy builds `Observed { now, value: ctx.observed(key) }` per condition and passes it (a condition does not know its own key).
+- `args` reaches the state `check`, so arguments such as the time range of `time.window` can be used in the check.
+
 ### Rule Creation and Strength Constraints
 
-Rules are created by picking items from the collected information (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the ancestor one level up" in the approval UI turns that value directly into a condition. Picking an item with depends also fills in the ancestors up to the root with values from the collection result ("Item Registration and depends").
+Rules are created by picking items from the collected information (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the ancestor one level up" in the approval UI turns that value directly into a condition. Picking an item with depends also fills in the ancestors up to the root with values from the collection result ("Item Registration and depends"). `SubjectBuilder` creates the subject and `RuleBuilder` creates the static rule.
+
+- `RuleBuilder::build()` returns a static `Rule` and does not record epochs. It checks for missing depends and the strength (class) vs scope constraints (below). The constraints are judged by the presence of lifetime or consumable conditions (there are no pinned values yet).
+- Pinning is done by `Policy::grant(rule, ctx)`. It also puts the pinned grant into the in-memory Policy and returns it (signing and saving are up to the app). When `pin` fails (`PinError`: no observed value, invalid arguments) or depends are missing, it is a `GrantError`.
 
 A rule's strength is determined by the subject's conditions on the target process itself (decision record: [DR-0003](decisions/DR-0003-rule-strength-from-own-match.md)).
 
@@ -388,15 +455,29 @@ The following constraints are checked at build time, and an error is returned if
 | Medium (executable path, responsible process) | `until` within 7 days, or includes an epoch scope |
 | Weak (name, cwd, argv, env) | Includes an epoch scope (`process`, `os.login_session`, `app.unlock`, etc.) |
 
+For the constraint check, `uses` is treated the same as an epoch scope (it is a lifetime condition and never comes back once exhausted).
+
 No constraint is placed on `deny`. Even a deny on weak conditions at least works in the safe direction. The UI shows "This condition can also be claimed by other processes of the same user" as soon as a weak condition is picked.
 
 ### Storage
 
-The list of rules is JSON, and saving and protecting it is the app's responsibility. The crate provides an entry point to "receive the bytes of the list and a signature, verify, then load". cw signs the list with the D-side key so that a process with the same uid cannot add allow rules on its own (treated the same as the PasskeyRegistry).
+There are two storage forms: "one list" and "one grant per file". Both are JSON, and saving and signing are the app's responsibility.
+
+**The list** (subjects, tags, rules): the crate provides an entry point (`Policy::load_verified`) to "receive the bytes of the list and a signature, verify, then load". cw signs the list with the D-side key so that a process with the same uid cannot add allow rules on its own (treated the same as the PasskeyRegistry).
+
+**Grants**: grants are held in memory, and to guard against unintended daemon termination, each one is signed and persisted individually on creation and on update, and all of them are reloaded at startup. The crate has the JSON shape of `Grant` and two entry points.
+
+- `Policy::load_grant(bytes, sig, &verifier)`: receives the bytes and signature of one grant, verifies, then returns a `Grant`. It performs the same checks as the list (unregistered items, missing / conflicting depends), and returns an error if they fail.
+- `Policy::add_grant(grant)`: puts a reloaded grant into the in-memory Policy.
+
+
+- Since it is one per file, the write for a `uses` update stays light (to be measured with a benchmark at implementation time).
+- Among grants reloaded at startup, those that pinned epochs countable only while the daemon is running (`os.wake`, etc.) have no observed value or pinned and observed do not match, so `check` becomes false and they expire. "Expires on daemon restart" is guaranteed automatically.
+- The persistence directory is placed where nothing other than the evaluating daemon (other processes with the same uid) can write. If it were writable, a grant file from before it was used up could be rolled back to restore `uses`. The location is decided by the app.
 
 ## API Skeleton
 
-There are three entry points: collection, evaluation, and rule creation. Vocabulary extension registers matcher items, scopes, and conditions with the same `register`.
+The entry points are collection, evaluation, rule creation, and grant issuance. Vocabulary extension registers matcher items, scopes, and conditions with the same `register`.
 
 ```rust
 // Collection (procline-macos)
@@ -417,21 +498,36 @@ struct Depth(u8);                                    // depth (distance from the
 let mut vocab = Vocabulary::builtin();               // matcher items (signature_valid / team_id / signing_id / cwd, etc.), os.* scopes and conditions, until / age / uses / process
 // matcher items, lifetime, and state items are added with the same register. Error if a depends key is unregistered or there is a cycle
 vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // matching function. A root (no depends) is given its class with Item::root_matcher(key, class, ...)
-vocab.register(Item::epoch("app.unlock", depends: [], CwUnlockEpoch::new(&vault)))?;  // returns the epoch
-// state items are also passed to the same register via Item::condition(...) (returns a boolean)
+vocab.register(Item::condition("app.unlock", depends: [], CwUnlock::new(&vault)))?;  // a value implementing Condition (lifetime)
+// state items are also passed to register with the same Item::condition(...). Whether lifetime or state is returned by Condition::kind
 
-trait EpochProvider {
-    fn current(&self, ctx: &EvalContext) -> Option<Epoch>;
-}
 trait Condition {
-    fn eval(&self, chain: &ProcessChain, args: &Value, ctx: &EvalContext) -> bool;
+    fn kind(&self) -> ConditionKind;                 // Lifetime / State
+    fn observe(&self) -> Option<Value>;              // EvalContext::capture calls it once at the start of evaluation
+    fn pin(&self, args: Option<&Value>, obs: &Observed) -> Result<Option<Value>, PinError>;
+    fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
+    fn advance(&self, pinned: Option<&Value>) -> Option<Value>;
 }
 
-// Loading and evaluating the list (subjects, tags, rules, presets)
-let policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // unregistered items, tag cycles, missing / conflicting depends are errors
+// Loading the list (subjects, tags, rules) and reloading saved grants
+let mut policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // unregistered items, tag cycles, missing / conflicting depends are errors
+let saved = policy.load_grant(grant_bytes, grant_sig, &verifier)?;  // verifies one grant and checks it against the vocabulary (unregistered items, missing / conflicting depends are errors)
+policy.add_grant(saved);                             // puts it into the in-memory Policy
+
+// Evaluation
 let tagged = policy.tag(&chain);                     // tags attached to each process (also used for display)
-let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);
-// decision.effect / decision.matched_rule / decision.trace
+let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // applies advance to the adopted grant
+if let Some(grant) = &decision.updated_grant {
+    // sign and persist, then hand over the value after the write succeeds
+}
+let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // no advance (for displaying the trace)
+
+pub struct Decision {
+    pub effect: Effect,
+    pub grant_id: Option<String>,        // the adopted grant. None for the default effect
+    pub trace: Trace,
+    pub updated_grant: Option<Grant>,    // the new version of a grant changed by advance. Always None for explain
+}
 
 // Creating a rule from the approval UI
 let subject = SubjectBuilder::from(&tagged, 0)       // pick from the target process's items (tagged holds a reference to the vocabulary)
@@ -441,16 +537,17 @@ let subject = SubjectBuilder::from(&tagged, 0)       // pick from the target pro
 let rule = RuleBuilder::new(subject, &vocab)
     .targets(["key:k1"])
     .condition(ConditionUse::with_args("age", json!("1h")))
-    .condition(ConditionUse::named("os.boot"))      // lifetime, so the current epoch is recorded here
+    .condition(ConditionUse::named("os.boot"))      // stays symbolic. The epoch is pinned when the grant is created
     .allow()
-    .build()?;                                       // checks missing depends and the strength (class) vs scope constraints
+    .build()?;                                       // a static Rule. Checks missing depends and the strength (class) vs scope constraints
 
-// Applying a preset (records the epochs and converts age to a time, producing a normal rule)
-let rule = policy.instantiate_preset("pj1-claude-usual", &ctx)?;
+// Applying a rule to create a grant (pins each condition. Saved rules use the same entry point)
+let grant = policy.grant(&rule, &ctx)?;              // pins, assigns an id, also puts it into the in-memory Policy and returns it. GrantError: pin failure (Unobservable / InvalidArgs), missing depends
+// the app signs and persists the grant
 ```
 
-- `EvalContext` takes the current time and epoch values once at the start of evaluation, so the values do not change during evaluation. In tests, all of them can be replaced.
-- The `uses` count is not incremented by evaluation; the app increments it with `policy.record_use(rule_id)` when it "actually handed over the value".
+- `EvalContext::capture` takes the current time and the result of each condition's `observe()` only once at the start of evaluation, so the values do not change during evaluation. From it, the Policy builds an `Observed` per condition and passes it to `pin` and `check`. In tests, all of them can be replaced.
+- `uses` decreases inside `evaluate` via the `advance` of the adopted grant. The app signs and persists `decision.updated_grant`, and hands over the value only after the write succeeds.
 
 ---
 
