@@ -1,6 +1,6 @@
 ---
 title: p_puniqueid の reparent 時の挙動を実機確認する
-status: open
+status: resolved
 category: tech-memo
 created: 2026-11-08T19:16:35+09:00
 last_read: 2026-11-09T03:37:43+09:00
@@ -9,10 +9,10 @@ wip_entered:
 blocked_entered:
 pending_entered:
 discarded_entered:
-resolved_entered:
+resolved_entered: 2026-11-09T03:43:56+09:00
 discard_reason:
 pending_reason:
-close_reason:
+close_reason: ["finding/2026-11-09-collect-pid-observations"]
 blocked_by:
 origin: 自リポ TODO
 ---
