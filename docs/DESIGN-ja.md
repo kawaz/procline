@@ -1,7 +1,5 @@
 # 接続元プロセスの情報収集と ACL 設計
 
-
-
 ## 概要
 
 プロセスとその祖先の情報を集め、その情報に対するアクセス制御(ACL)を定義・評価するための crate 群です。pam-passkey の承認画面と、cw の ACL 照合・後付けの許可ルールが同じものを必要とするので、両者から切り出して共通の部品にします。収集の入口は UNIX ドメインソケットの接続相手(audit token)が主ですが、中心はあくまでプロセスで、接続相手であることには依存しません。
@@ -15,29 +13,29 @@
 
 1. **識別は pid より強いもので**: 接続相手は audit token、祖先はプロセスごとに一意な ID で特定し、pid の再利用で取り違えない。
 2. **表示と照合を同じ型の上に置く**: 画面で見ている情報から、そのままルールを作れるようにする。
-3. **項目ごとに強さを持つ**: 同じ uid のプロセスが偽れる項目(名前、cwd、argv)と、偽れない項目(コード署名)を型で区別し、弱い条件だけの許可を制限する。
-4. **語彙をアプリが足せる**: scope(ルールの寿命)と条件は、組み込みの語彙に加えて、アプリ固有のものを登録できるようにする。
+3. **項目ごとに強さを持つ**: 同じ uid のプロセスが偽れる項目(名前、cwd、argv)と、偽れない項目(コード署名)を、項目を登録するときに強さで区別し、弱い条件だけの許可を制限する。
+4. **語彙をアプリが足せる**: matcher の項目、scope(ルールの寿命)、条件は、組み込みの語彙に加えて、アプリ固有のものを同じ形で登録できるようにする。
 
 **範囲**
 
-macOS を先に実装し、Linux は後から足せる形にします。crate の名前は未定で、本書では仮称を使います。
+macOS を先に実装し、Linux は後から足せる形にします。Linux の収集(`SO_PEERCRED`、pidfd、`/proc`)も同じ型の上に同じやり方で足します。
 
 ## 構成
 
-収集は OS ごとの crate に実装し、型と照合は OS に依存しない core に置きます。アプリが使うのは入口の procinfo だけで、これがビルドターゲットに応じて OS ごとの crate を読み込みます(`[target.'cfg(target_os = "macos")'.dependencies]`)。core 自体を入口にしないのは、OS ごとの crate が core の型に依存するので、core から読むと循環するためです。ACL は型だけに依存するので、Linux の収集を足してもそのまま使えます。
+収集は OS ごとの crate に実装し、型と照合は OS に依存しない core に置きます。アプリが使うのは入口の procline だけで、これがビルドターゲットに応じて OS ごとの crate を読み込みます(`[target.'cfg(target_os = "macos")'.dependencies]`)。core 自体を入口にしないのは、OS ごとの crate が core の型に依存するので、core から読むと循環するためです。ACL は型だけに依存するので、Linux の収集を足してもそのまま使えます。名前は process lineage(プロセスとその祖先の列)から取っています(決定の記録: [DR-0001](decisions/DR-0001-crate-naming.md))。
 
-| crate(仮称) | 中身 | 依存 |
+| crate | 中身 | 依存 |
 | --- | --- | --- |
-| procinfo | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
-| procinfo-core | 収集結果の型、署名の信頼度の判定、表示用の無害化、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
-| procinfo-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、OS の世代(起動、スリープ、画面ロックなど)の提供 | core、Security framework、AppKit |
-| proc-acl | ルールの型、評価、scope と条件の語彙、拡張の登録、ルールの作成 | core |
+| procline | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
+| procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の信頼度の判定、表示用の無害化、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
+| procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、OS の世代(起動、スリープ、画面ロックなど)の提供 | core、Security framework、AppKit |
+| procline-acl | ルールの型、評価、語彙(matcher の項目、scope、条件)とその登録、ルールの作成 | core |
 
-アプリ(cw、pam-passkey)は、必要なものだけを使います。pam-passkey は収集だけ、cw はすべてです。cw 固有の語彙(`app.unlock` など)は cw 側で定義して、`app.` の名前で proc-acl に登録します。
+アプリ(cw、pam-passkey)は、必要なものだけを使います。pam-passkey は収集だけ、cw はすべてです。cw 固有の語彙(`app.unlock` など)は cw 側で定義して、`app.` の名前で procline-acl に登録します。
 
 ## 収集する情報
 
-収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。各プロセスが下の項目を持ち、取れなかった項目は空にします。照合の強さは「同じ uid のプロセスがその値を偽れるか」で決めます。
+収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は項目のクラスで、「同じ uid のプロセスがその値を偽れるか」で決めます。depends を持つ項目は根のクラスを引き継ぎます(後述の「強さ: クラスと深さ」)。
 
 ### 識別子
 
@@ -55,13 +53,13 @@ macOS を先に実装し、Linux は後から足せる形にします。crate �
 | uid、gid、所属グループ(照合は数値。表示用に名前も持つ。1つの ID に名前が複数あり得るので列で持つ) | `LOCAL_PEERCRED`、audit token | 強 |
 | コード署名(識別子、Team ID、cdhash、署名者の証明書チェーン、ad-hoc・hardened runtime・platform binary の別、entitlements、公証) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid)、`SecCodeCheckValidity`、`SecCodeCopySigningInformation` | 強(検証が通ったときだけ) |
 | 実行パス | `proc_pidpath` | 中(ユーザーが書き換えられない場所なら) |
-| app bundle(bundle ID、版) | 実行パスから `.app` を遡り Info.plist を読む | 弱(署名と組でなければ) |
+| app bundle(bundle ID、版) | 実行パスから `.app` を遡り Info.plist を読む | 強の連鎖の葉(`team_id`、`signing_id` に依存) |
 | 責任プロセス | `responsibility_get_pid_responsible_for_pid`(私的 API) | 中 |
 | プロセス名、argv、cwd、tty | `KERN_PROCARGS2`、`PROC_PIDVNODEPATHINFO`、`kinfo_proc` | 弱 |
 | env | `KERN_PROCARGS2`(同じ uid か root のみ) | 弱(方針は後述) |
 | アイコン | `NSWorkspace.icon(forFile:)` を 64px PNG に縮小 | 表示専用(照合に使わない) |
 
-SPI や私的 API に依存する項目は、取れなければ空にするだけで、収集全体は止めません。
+SPI や私的 API に依存する項目は、取れなければ空にするだけで、収集全体は止めません。実機では自分が使う最新の macOS だけで確かめます。古い版で取れなくても空になるだけで、安全側に倒れるためです。
 
 ## 署名の信頼度と警告
 
@@ -110,7 +108,7 @@ argv、パス、env の値など、相手が自由に決められる文字列を
 1. 接続相手は audit token、祖先は unique\_id(なければ pid と起動時刻)を、収集の最初に記録する。
 2. 署名は、接続相手を audit token で参照して検証する(pid で参照すると、その間に別のプロセスになり得る)。
 3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。
-4. 祖先は途中で終了していることがある(親が先に終了し launchd に引き取られた場合など)。その場合は「ここで途切れた」と分かる形で列を終える。
+4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。
 
 ## ACL ルールの形と評価
 
@@ -131,9 +129,14 @@ subject は1つのプロセスへの条件で、接続相手か祖先かを区�
 
 ```json
 {
-  "match": { "signing_id": "com.anthropic.claude-code", "cwd": "~/src/pj1/**" },
+  "match": {
+    "signature_valid": true,
+    "team_id": "VWXYZ67890",
+    "signing_id": "com.anthropic.claude-code",
+    "cwd": "~/src/pj1/**"
+  },
   "ancestors": [
-    { "any": { "match": { "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } }
+    { "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345", "signing_id": "com.googlecode.iterm2" } } }
   ]
 }
 ```
@@ -156,8 +159,13 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
   "subject": {
     "ancestors": [{
       "any": {
-        "match": { "signing_id": "com.anthropic.claude-code", "cwd": "~/src/pj1/**" },
-        "ancestors": [{ "any": { "match": { "team_id": "ABCDE12345" } } }]
+        "match": {
+          "signature_valid": true,
+          "team_id": "VWXYZ67890",
+          "signing_id": "com.anthropic.claude-code",
+          "cwd": "~/src/pj1/**"
+        },
+        "ancestors": [{ "any": { "match": { "signature_valid": true, "team_id": "ABCDE12345" } } }]
       },
       "include_self": true
     }]
@@ -167,7 +175,8 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 
 これでルールの subject は `{"tags": ["claude-pj1"]}` だけで済みます。画面では、タグが付いたプロセスのすべてにタグを出します。そのタグを認可したときに通るプロセスと、画面でタグが付いているプロセスがそのまま一致します。
 
-- タグを条件にした場合の強さは、タグの定義の subject の強さと同じです。
+- タグを条件にした場合の強さは、タグの定義の subject の強さと同じです(算出の規則は「ルールの作成と強さの制約」)。
+- 上の `claude-pj1` は `ancestors` だけで対象自身への条件を持たないので弱で、これを subject にした `allow` ルールには世代の scope が要ります(下の rule の例は `os.boot` と `app.unlock` を持つので満たします)。
 - タグの定義もルールと同じ署名付きの一覧に入れます。同じ uid のプロセスが定義を書き換えられると、そのタグを条件にしたルールが全部広がるためです。
 - タグの定義が別のタグを参照してもよく、循環は読み込み時にエラーにします。
 
@@ -235,6 +244,8 @@ subject、tag、preset、条件の組は、どれも名前を付けて一覧に�
 
 ### matcher
 
+`match` の key は語彙(`Vocabulary`)に登録された項目の名前で、値はその項目への条件です。照合の形は項目ごとに決まります。
+
 | 形 | 使える項目 |
 | --- | --- |
 | 完全一致 | すべて |
@@ -242,13 +253,67 @@ subject、tag、preset、条件の組は、どれも名前を付けて一覧に�
 | 正規表現 | パス、argv |
 | 数値の範囲 | uid |
 
-`cdhash`、`unique_id`、`team_id` は完全一致だけにします。署名の条件は、署名の検証が通ったときだけ一致とみなします。ad-hoc 署名は Team ID が空なので、Team ID の条件には決して一致しません。
+`cdhash`、`unique_id`、`team_id` は完全一致だけにします。署名の条件は、署名の検証が通ったときだけ一致とみなします(署名系の項目はすべて `signature_valid` に依存します。下記)。ad-hoc 署名は Team ID が空なので、Team ID の条件には決して一致しません。
+
+### 項目の登録と depends
+
+条件に使える項目(`match` の key、寿命型の scope の名前、状態型の条件の名前)は、組み込みもアプリも同じ形で語彙に登録します(決定の記録: [DR-0002](decisions/DR-0002-matcher-depends-and-two-axis-strength.md))。
+
+```
+register(key, impl, depends: [key...])
+```
+
+| 引数 | 中身 |
+| --- | --- |
+| key | 項目の名前。組み込みは接頭辞なし(`signing_id`、`cwd`)か `os.` / `time.`、アプリは `app.`(名前空間の規則は「アプリが足す語彙」のとおり) |
+| impl | 項目の種類ごとの実装。matcher の項目は照合する関数、寿命型は世代を返す関数、状態型は真偽を返す関数 |
+| depends | この項目の値が意味を持つために、同じ `match`(寿命型なら同じ `conditions`)に値ごと pin されていなければならない項目の列 |
+
+登録先は procline-acl の `Vocabulary` で、matcher の項目、scope、条件が同じ器に入ります。`depends` に挙げた key が登録されていなければ、登録の時点でエラーにします。depends の循環もエラーです。
+
+組み込みの項目の depends は次のとおりです。
+
+| 項目 | depends | 理由 |
+| --- | --- | --- |
+| `signature_valid` | (なし、根) | 署名の検証が通ったこと。値は真偽。署名系の項目はすべてここに依存する |
+| `cdhash` | `signature_valid` | 検証が通っていない cdhash は、何を指すか保証がない |
+| `team_id` | `signature_valid` | 同上 |
+| `signing_id` | `team_id` | signing identifier は開発者が自由に決める値で、ad-hoc 署名でも名乗れる。単独では弱く、Team ID と組でだけ意味を持つ |
+| `bundle_id` | `team_id`、`signing_id` | Info.plist は誰でも書ける。署名者と signing identifier の組に乗せてだけ使う |
+| `os.wake` | `os.boot` | 起床の回数は起動セッションの中でだけ意味を持つ |
+| `os.screen_unlock` | `os.boot` | 同上 |
+
+寿命型にも同じ規則を当てはめます。ルールの `conditions` に `os.wake` を置くなら、`os.boot` も置かなければなりません。表に無い組み込みの項目(`unique_id`、`uid`、`path`、`cwd`、`argv`、`os.login_session`、`process` など)は、depends を持たない独立項目です。
+
+規則は 1 つだけです: **depends に挙がった項目は、同じ match に値ごと pin されている**。例えば `"signing_id": "com.anthropic.claude-code"` を条件にするなら、同じ match に `team_id` と `"signature_valid": true` も入ります(上の subject の例がこの形です)。各部品の責務は次のとおりです。
+
+| 誰 | 何をする |
+| --- | --- |
+| builder(承認画面からルールを作る `SubjectBuilder` / `RuleBuilder`) | 利用者には項目を 1 つ選ばせる(多くは葉)。選んだ項目から根までの祖先は、builder が収集結果の値で埋める。利用者に祖先を手で選ばせない |
+| 読み込み(`Policy::load_verified`) | 欠け(ある項目の depends の項目が同じ match に無い)はエラー。矛盾(同じ項目に食い違う値が与えられている)はエラー。重複(複数の葉が同じ祖先を共有し、値が一致している)は正常 |
+| 評価 | 連鎖全体を見る。match の項目をすべて AND で照合し、葉だけを見て祖先を省くことはしない |
+| UI(アプリ側。procline-acl は連鎖の列挙と並び順を提供する) | depends のある項目は、連鎖(depends で繋がった項目の集まり)ごとに 1 つの選択肢として見せ、候補を強度順に並べる(例: 署名の連鎖なら `signature_valid` < `team_id` < `signing_id` < `bundle_id`、別の枝に `cdhash`)。選ぶと、その項目から根までが pin される。依存の無い独立項目はそのまま並べる |
+
+### 強さ: クラスと深さ
+
+項目の強さは 2 つの軸で表します。
+
+| 軸 | 何を表すか | 値 |
+| --- | --- | --- |
+| クラス(連鎖の間) | 同じ uid のプロセスがその値を偽れるか(「収集する情報」の表の強さ) | 強 / 中 / 弱 |
+| 深さ(連鎖の中) | どれだけ絞るか。葉ほど祖先の値をすべて pin するので厳しい | 根からの距離 |
+
+- クラスは連鎖に 1 つです。登録するときに根(depends が空の項目)に与え、depends を持つ項目は根のクラスを引き継ぎます。複数の根に至る項目は、最も強い根のクラスになります(AND は条件を狭めるだけなので)。
+- 独立項目は 1 項目だけの連鎖で、自分が根です。クラスは「収集する情報」の表のとおりです(unique\_id、uid、署名系は強、実行パスと責任プロセスは中、名前、argv、cwd、tty、env は弱)。
+- bundle\_id は強の連鎖の葉(`team_id`、`signing_id` に依存)で、実行パスは中の独立項目です。
+- どの項目がどのクラスかは語彙が持ちます。収集結果の各項目は強さを持ちません。
+- 深さは UI の並び順と、アプリが追加で課す制約の材料です。ルールの強さの制約には使いません(「ルールの作成と強さの制約」)。
 
 ### 評価
 
 1. scope が切れたルールを除く(切れたルールは掃除の対象にする)。
 2. targets が対象に当たらないルールを除く。
-3. subject を照合する。`deny` が1つでも当たれば拒否。
+3. subject を照合する(match の項目は depends の祖先も含めてすべて照合する)。`deny` が1つでも当たれば拒否。
 4. `allow` が当たれば許可。
 5. `ask` が当たれば、または何も当たらなければ、既定の effect。
 
@@ -278,6 +343,8 @@ scope は複数並べられ、すべてが生きている間だけルールが�
 
 通知で数える世代(`os.wake`、`os.screen_unlock`、`os.console_user`)は、デーモンの起動中しか数えられません。デーモンが再起動したら、それらに紐づくルールはすべて失効させます(間に何が起きたか分からないため)。世代の値にはデーモンの起動 ID を含めれば、これも自動的に守られます。
 
+`os.wake` と `os.screen_unlock` は `os.boot` に依存し、ルールに置くときは `os.boot` も置きます(「項目の登録と depends」)。
+
 ### アプリが足す語彙
 
 アプリ固有の語彙は `app.` の名前空間に置きます。名前空間は組み込み(`os.`、`time.` など)と `app.` だけで、アプリが自由に作ることはしません。評価するアプリは常に1つなので複数の名前空間は要らず、自由にすると今後 crate に足す名前空間とぶつかり得るためです。cw なら次のようなものです。
@@ -304,11 +371,18 @@ scope は複数並べられ、すべてが生きている間だけルールが�
 
 ### ルールの作成と強さの制約
 
-ルールは、収集した情報から項目を選んで作ります(RuleBuilder)。承認画面で「このプロセスの署名で」「1つ上の祖先の Team ID で」と選ぶと、その値がそのまま条件になります。
+ルールは、収集した情報から項目を選んで作ります(RuleBuilder)。承認画面で「このプロセスの署名で」「1つ上の祖先の Team ID で」と選ぶと、その値がそのまま条件になります。depends のある項目を選ぶと、根までの祖先も収集結果の値で埋まります(「項目の登録と depends」)。
 
-ルールの強さは、subject の中で最も強い条件で決まります。build 時に次の制約を検査し、満たさなければエラーにします。制約の値はアプリが変えられます。
+ルールの強さは、subject のうち対象プロセス自身への条件から決まります(決定の記録: [DR-0003](decisions/DR-0003-rule-strength-from-own-match.md))。
 
-| ルールの強さ | `allow` で許される scope(既定) |
+- 対象プロセス自身への条件は、`match` と、`tags` が指すタグの定義のうち自身への条件です。ルールの強さは、それらの項目のクラスのうち最も強いものです。
+- `ancestors` の条件は数えません。祖先が強く特定されていても、対象は「その子孫なら何でも」で、対象自身は縛られないためです。`include_self` があっても同じです(「自身か祖先のどれか」であって、自身を pin していない)。
+- 自身への条件が何も無い subject(`ancestors` だけ)は最も弱く、弱と同じ制約を受けます。
+- タグを条件にしたときの強さは、タグの定義の subject を同じ規則で算出したものです。
+
+build 時に次の制約を検査し、満たさなければエラーにします。制約はクラスで判定し、深さは使いません。制約の値はアプリが変えられます。
+
+| ルールの強さ(クラス) | `allow` で許される scope(既定) |
 | --- | --- |
 | 強(署名、unique\_id) | 制限なし |
 | 中(実行パス、責任プロセス) | `until` が 7 日以内、または世代の scope を含む |
@@ -322,40 +396,46 @@ scope は複数並べられ、すべてが生きている間だけルールが�
 
 ## API の骨格
 
-収集、評価、ルールの作成の3つが入口です。語彙の拡張は、scope と条件で同じ形の trait を使います。
+収集、評価、ルールの作成の3つが入口です。語彙の拡張は、matcher の項目、scope、条件を同じ `register` で登録します。
 
 ```rust
-// 収集(procinfo-macos)
+// 収集(procline-macos)
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
     icon: true,
     max_ancestors: 32,
 })?;
 // chain.processes()[0] が対象、以降が祖先。chain.truncated
-// 各 ProcessInfo は項目ごとに Strength(Strong / Medium / Weak) を持つ
 // p.signature.trust(): Platform / Notarized / DeveloperId / AdHoc / Unsigned / Invalid
 
-// 語彙の拡張(proc-acl)
+// 強さ(procline-core の共有型)。どの項目がどのクラスかは Vocabulary が持ち、ProcessInfo の項目は持たない
+enum Strength { Strong, Medium, Weak }               // クラス(連鎖ごとに 1 つ)
+struct Depth(u8);                                    // 深さ(連鎖の根からの距離)
+// Chain: depends で繋がった項目の集まり。Vocabulary が列挙し、項目を強度順に並べる(UI の選択肢)
+
+// 語彙(procline-acl)
+let mut vocab = Vocabulary::builtin();               // matcher の項目(signature_valid / team_id / signing_id / cwd など)、os.* の scope と条件、until / age / uses / process
+// matcher の項目、寿命型、状態型を同じ register で足す。depends の key が未登録、または循環ならエラー
+vocab.register(Item::matcher("app.workspace", depends: [...], |p, arg| ...))?;      // 照合する関数
+vocab.register(Item::epoch("app.unlock", depends: [], CwUnlockEpoch::new(&vault)))?;  // 世代を返す
+// 状態型も Item::condition(...) で同じ register に渡す(真偽を返す)
+
 trait EpochProvider {
-    fn name(&self) -> &str;                          // "app.unlock"
     fn current(&self, ctx: &EvalContext) -> Option<Epoch>;
 }
 trait Condition {
-    fn name(&self) -> &str;                          // "os.not_remote"
     fn eval(&self, chain: &ProcessChain, args: &Value, ctx: &EvalContext) -> bool;
 }
 
-let mut vocab = Vocabulary::builtin();               // os.* と until / age / uses / process
-vocab.register_app_epoch("unlock", CwUnlockEpoch::new(&vault));  // app.unlock として登録
-
 // 一覧(subject、tag、rule、preset)の読み込みと評価
-let policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // 未登録の語彙、タグの循環はエラー
+let policy = Policy::load_verified(bytes, sig, &verifier, &vocab)?;  // 未登録の項目、タグの循環、depends の欠け・矛盾はエラー
 let tagged = policy.tag(&chain);                     // 各プロセスに付いたタグ(画面の表示にも使う)
 let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);
 // decision.effect / decision.matched_rule / decision.trace
 
 // 承認画面からルールを作る
-let subject = SubjectBuilder::from(&tagged, 0)       // 対象プロセスの項目から選ぶ
+let subject = SubjectBuilder::from(&tagged, 0, &vocab)  // 対象プロセスの項目から選ぶ
+    .pin("signing_id")                               // 祖先の team_id / signature_valid も収集結果の値で入る
     .tag("claude-pj1")
     .build()?;
 let rule = RuleBuilder::new(subject, &vocab)
@@ -363,7 +443,7 @@ let rule = RuleBuilder::new(subject, &vocab)
     .condition(Cond::age(Duration::from_secs(3600)))
     .condition(Cond::named("os.boot"))              // 寿命型なので今の世代をここで記録
     .allow()
-    .build()?;                                       // 強さと scope の制約を検査
+    .build()?;                                       // depends の欠けと、強さ(クラス)と scope の制約を検査
 
 // preset を適用する(世代の記録と age の時刻化をして普通のルールにする)
 let rule = policy.instantiate_preset("pj1-claude-usual", &ctx)?;
@@ -372,13 +452,6 @@ let rule = policy.instantiate_preset("pj1-claude-usual", &ctx)?;
 - `EvalContext` は現在時刻と世代の値を評価の開始時に一度だけ取り、評価の途中で値が変わらないようにします。テストでは全部を差し替えられます。
 - `uses` の回数は評価では増やさず、アプリが「実際に値を渡した」ときに `policy.record_use(rule_id)` で増やします。
 
-## 未決事項
+---
 
-- [x] subject、tag、preset の名前の参照の書き方(`{"ref": "…"}` か、文字列だけか)。 → 文字列だけ。置き場所で種類が決まる(`tags` の中はタグ名、`subject` に文字列があれば subject 名)。
-- [ ] crate の名前(候補を出すときは crates.io と GitHub の衝突を確認する)。
-- [x] `p_uniqueid` と責任プロセスの私的 API を、実機でどの macOS の版まで確かめるか。 → 自分が使う最新版だけ。取れなければ空にするだけなので、古い版で壊れても安全側。
-- [x] 公証の有無をどう判定するか(`SecStaticCodeCheckValidity` に公証の requirement を渡すか)と、そのコスト。 → requirement `notarized` を渡して真偽で判定する。重いことがあるので、結果は cdhash でキャッシュする。
-- [x] env の伏せ字の既定の規則の中身。 → 対象の判定と伏せ方を差し替え可能な関数にし、既定は既存のリストを参考に決める(本文の env の節)。
-- [x] 「署名者が変わった」の判定に使う、bundle ID と Team ID の組の記録を、crate に持たせるかアプリに任せるか。 → 持たない。ルールは署名者で照合するので、署名者が変われば自然に外れる。
-- [x] 強さの制約の既定値(中のルールの `until` の上限など)。 → アプリに任せる。crate は検査の仕組みだけを持つ。
-- [x] Linux 版の収集(SO\_PEERCRED、pidfd、/proc)と、署名に相当する項目をどう扱うか。 → macOS と同じやり方。今は使わないので優先度は低い。
+裁定待ちは [docs/QUESTIONS.md](QUESTIONS.md)、作業は `docs/issue/` にあります。
