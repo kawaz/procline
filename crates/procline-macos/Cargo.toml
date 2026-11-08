@@ -9,3 +9,10 @@ repository.workspace = true
 [dependencies]
 procline-core.workspace = true
 procline-acl.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+core-foundation.workspace = true
+security-framework.workspace = true
+security-framework-sys.workspace = true
+sha2.workspace = true
+plist.workspace = true

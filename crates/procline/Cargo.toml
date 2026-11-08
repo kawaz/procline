@@ -11,3 +11,6 @@ procline-core.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 procline-macos.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

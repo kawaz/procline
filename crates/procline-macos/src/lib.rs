@@ -1,5 +1,12 @@
 //! Collects a process and its ancestors on macOS, and provides the `os.*` vocabulary items.
 
+mod collect;
+mod file;
+mod path_meta;
+mod procargs;
+mod signing;
+mod sys;
+
 use std::fmt;
 use std::io;
 use std::os::fd::AsFd;
@@ -43,8 +50,10 @@ pub fn collect_peer<S: AsFd>(
 }
 
 /// Collects the process with the given pid and its ancestors.
-pub fn collect_pid(_pid: i32, _options: &CollectOptions) -> Result<ProcessChain, CollectError> {
-    todo!()
+///
+/// The identifiers of every process are recorded first, everything else is read by pid, and the identifiers are read again at the end: if the target is no longer the same process running the same image (no `exec` in between), the result is discarded with `IdentityChanged`; if an ancestor is no longer the same process, the chain ends before it with `Truncated::AncestorExited`. The code signature is looked up by pid.
+pub fn collect_pid(pid: i32, options: &CollectOptions) -> Result<ProcessChain, CollectError> {
+    collect::collect_pid(pid, options)
 }
 
 /// Collection failed as a whole.
@@ -54,6 +63,10 @@ pub enum CollectError {
     Peer(io::Error),
     /// No process with the pid exists.
     NoSuchProcess { pid: i32 },
+    /// The identifiers of the target process could not be read for a reason other than its absence.
+    Unreadable { pid: i32, source: io::Error },
+    /// The boot UUID (`kern.bootsessionuuid`) could not be read.
+    BootUuid(io::Error),
     /// An identifier recorded at the start changed before collection finished.
     IdentityChanged,
 }
@@ -63,6 +76,10 @@ impl fmt::Display for CollectError {
         match self {
             Self::Peer(err) => write!(f, "cannot read the peer of the socket: {err}"),
             Self::NoSuchProcess { pid } => write!(f, "no process with pid {pid}"),
+            Self::Unreadable { pid, source } => {
+                write!(f, "cannot read the process with pid {pid}: {source}")
+            }
+            Self::BootUuid(err) => write!(f, "cannot read the boot UUID: {err}"),
             Self::IdentityChanged => {
                 f.write_str("the process was replaced while collecting; retry the collection")
             }
@@ -73,7 +90,9 @@ impl fmt::Display for CollectError {
 impl std::error::Error for CollectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Peer(err) => Some(err),
+            Self::Peer(err) | Self::Unreadable { source: err, .. } | Self::BootUuid(err) => {
+                Some(err)
+            }
             Self::NoSuchProcess { .. } | Self::IdentityChanged => None,
         }
     }

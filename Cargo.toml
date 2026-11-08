@@ -11,6 +11,12 @@ repository = "https://github.com/kawaz/procline"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+libc = "0.2"
+core-foundation = "0.10"
+security-framework = "3"
+security-framework-sys = "2"
+sha2 = "0.11"
+plist = "1"
 procline-core = { path = "crates/procline-core" }
 procline-macos = { path = "crates/procline-macos" }
 procline-acl = { path = "crates/procline-acl" }
