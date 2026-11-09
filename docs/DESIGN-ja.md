@@ -613,7 +613,7 @@ for item in procline_macos::os_items() {             // os.* の項目(os.sessio
 // matcher の項目、寿命型、状態型を同じ register で足す。key の重複と名前空間の違反はエラー
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // クラスが値によらず一定の項目は、クラスを明示してクロージャで登録する
 // クラスが値で変わる項目は Matcher trait を実装し、Item::matcher(key, impl) で登録する
-//   matches(&self, target: &MatchTarget, value) -> bool(MatchTarget { process: &ProcessInfo, boot_uuid: &str }。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は弱い側)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)
+//   matches(&self, target: &MatchTarget, value) -> bool(MatchTarget { info: &ProcessInfo, boot_uuid: &str } = 収集済みスナップショットの 1 プロセス。照合中に OS は呼ばない。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は弱い側)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)
 //   resolve(&self, value: &MatchValue, target: &MatchTarget) -> Result<MatchValue, ResolveError>(placeholder を実値に。ResolveError::ValueUnavailable { field: Option<String> })
 // vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: 項目が値(とプロセス)から決めたクラス(未登録の key と条件の項目は None)
 vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // Condition を実装した値(寿命型)

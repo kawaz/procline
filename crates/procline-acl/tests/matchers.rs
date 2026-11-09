@@ -827,7 +827,7 @@ fn match_target_carries_the_boot_of_the_chain() {
     let p = process(501);
     let value = pinned(identity_of(&p));
     let other_boot = MatchTarget {
-        process: &p,
+        info: &p,
         boot_uuid: "OTHER-BOOT",
     };
     assert!(!matcher(&vocab, "process").matches(other_boot, &value));

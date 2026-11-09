@@ -165,7 +165,7 @@ impl Matching<'_> {
             return false;
         };
         let target = MatchTarget {
-            process: &self.chain.processes()[index],
+            info: &self.chain.processes()[index],
             boot_uuid: &self.chain.boot_uuid,
         };
         match self.placeholders {

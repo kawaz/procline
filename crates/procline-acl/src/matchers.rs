@@ -65,7 +65,7 @@ impl Matcher for ProcessMatcher {
         let MatchValue::Process(Pinnable::Value(pinned)) = value else {
             return false;
         };
-        let actual = target.process.identity.process_identity(target.boot_uuid);
+        let actual = target.info.identity.process_identity(target.boot_uuid);
         same_individual(pinned, &actual)
     }
 
@@ -87,7 +87,7 @@ impl Matcher for ProcessMatcher {
     ) -> Result<MatchValue, ResolveError> {
         match value {
             MatchValue::Process(Pinnable::Pin) => Ok(MatchValue::Process(Pinnable::Value(
-                target.process.identity.process_identity(target.boot_uuid),
+                target.info.identity.process_identity(target.boot_uuid),
             ))),
             other => Ok(other.clone()),
         }
@@ -100,7 +100,7 @@ impl Matcher for ResponsibleMatcher {
             return false;
         };
         target
-            .process
+            .info
             .responsible
             .as_ref()
             .is_some_and(|actual| same_individual(pinned, actual))
@@ -124,7 +124,7 @@ impl Matcher for ResponsibleMatcher {
     ) -> Result<MatchValue, ResolveError> {
         match value {
             MatchValue::Process(Pinnable::Pin) => target
-                .process
+                .info
                 .responsible
                 .clone()
                 .map(|identity| MatchValue::Process(Pinnable::Value(identity)))
@@ -172,7 +172,7 @@ impl Matcher for BinaryMatcher {
         if pin.validate().is_err() {
             return false;
         }
-        let process = target.process;
+        let process = target.info;
         let signature = verified_signature(process);
         field_matches(&pin.digest, process.digest.as_ref())
             && field_matches(&pin.team_id, signature.and_then(|s| s.team_id.as_ref()))
@@ -219,7 +219,7 @@ impl Matcher for BinaryMatcher {
         let MatchValue::Binary(pin) = value else {
             return Ok(value.clone());
         };
-        let process = target.process;
+        let process = target.info;
         let signature = verified_signature(process);
         Ok(MatchValue::Binary(BinaryPin {
             digest: fill(&pin.digest, process.digest.as_ref(), "digest")?,
@@ -284,7 +284,7 @@ fn fill<T: Clone>(
 
 impl Matcher for PathMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
-        let Some(path) = target.process.path.as_deref() else {
+        let Some(path) = target.info.path.as_deref() else {
             return false;
         };
         match value {
@@ -336,7 +336,7 @@ impl Matcher for PathMatcher {
         target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
-            MatchValue::Pin => resolve_path(target.process.path.as_deref()),
+            MatchValue::Pin => resolve_path(target.info.path.as_deref()),
             other => Ok(other.clone()),
         }
     }
@@ -344,7 +344,7 @@ impl Matcher for PathMatcher {
 
 impl Matcher for CwdMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
-        let Some(cwd) = target.process.cwd.as_deref() else {
+        let Some(cwd) = target.info.cwd.as_deref() else {
             return false;
         };
         match value {
@@ -378,7 +378,7 @@ impl Matcher for CwdMatcher {
         target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
-            MatchValue::Pin => resolve_path(target.process.cwd.as_deref()),
+            MatchValue::Pin => resolve_path(target.info.cwd.as_deref()),
             other => Ok(other.clone()),
         }
     }
@@ -386,7 +386,7 @@ impl Matcher for CwdMatcher {
 
 impl Matcher for NameMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
-        let Some(name) = target.process.name.as_deref() else {
+        let Some(name) = target.info.name.as_deref() else {
             return false;
         };
         match value {
@@ -416,7 +416,7 @@ impl Matcher for NameMatcher {
         target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
-            MatchValue::Pin => resolve_text(target.process.name.as_ref()),
+            MatchValue::Pin => resolve_text(target.info.name.as_ref()),
             other => Ok(other.clone()),
         }
     }
@@ -426,7 +426,7 @@ impl Matcher for TtyMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
         match value {
             MatchValue::Exact(Literal::Text(expected)) => {
-                target.process.tty.as_ref() == Some(expected)
+                target.info.tty.as_ref() == Some(expected)
             }
             _ => false,
         }
@@ -449,7 +449,7 @@ impl Matcher for TtyMatcher {
         target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
-            MatchValue::Pin => resolve_text(target.process.tty.as_ref()),
+            MatchValue::Pin => resolve_text(target.info.tty.as_ref()),
             other => Ok(other.clone()),
         }
     }
@@ -458,7 +458,7 @@ impl Matcher for TtyMatcher {
 /// `argv` has no placeholder: the value is one string matched against each element, and the arguments of a process are a list with no single element to pin.
 impl Matcher for ArgvMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
-        let Some(argv) = target.process.argv.as_deref() else {
+        let Some(argv) = target.info.argv.as_deref() else {
             return false;
         };
         match value {
@@ -499,7 +499,7 @@ impl Matcher for ArgvMatcher {
 
 impl Matcher for UidMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
-        let Some(credentials) = &target.process.credentials else {
+        let Some(credentials) = &target.info.credentials else {
             return false;
         };
         id_matches(value, credentials.uid.id, IdShapes::WithRange)
@@ -519,7 +519,7 @@ impl Matcher for UidMatcher {
         target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
-            MatchValue::Pin => resolve_id(target.process.credentials.as_ref().map(|c| c.uid.id)),
+            MatchValue::Pin => resolve_id(target.info.credentials.as_ref().map(|c| c.uid.id)),
             other => Ok(other.clone()),
         }
     }
@@ -527,7 +527,7 @@ impl Matcher for UidMatcher {
 
 impl Matcher for GidMatcher {
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool {
-        let Some(credentials) = &target.process.credentials else {
+        let Some(credentials) = &target.info.credentials else {
             return false;
         };
         id_matches(value, credentials.gid.id, IdShapes::ExactOnly)
@@ -547,7 +547,7 @@ impl Matcher for GidMatcher {
         target: MatchTarget<'_>,
     ) -> Result<MatchValue, ResolveError> {
         match value {
-            MatchValue::Pin => resolve_id(target.process.credentials.as_ref().map(|c| c.gid.id)),
+            MatchValue::Pin => resolve_id(target.info.credentials.as_ref().map(|c| c.gid.id)),
             other => Ok(other.clone()),
         }
     }

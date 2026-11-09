@@ -369,7 +369,7 @@ impl<'v> Policy<'v> {
                         .resolve(
                             value,
                             MatchTarget {
-                                process,
+                                info: process,
                                 boot_uuid: &chain.boot_uuid,
                             },
                         )
@@ -529,7 +529,7 @@ impl<'v> Policy<'v> {
         let outcome = matching.subject(&grant.subject, 0, tags);
         if let Some(process) = chain.processes().first() {
             let own = MatchTarget {
-                process,
+                info: process,
                 boot_uuid: &chain.boot_uuid,
             };
             for (key, value) in &grant.subject.r#match {

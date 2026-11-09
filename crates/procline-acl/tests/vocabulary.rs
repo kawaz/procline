@@ -171,7 +171,7 @@ fn matcher_fn_has_a_constant_class() {
     let mut vocab = Vocabulary::default();
     vocab
         .register(Item::matcher_fn("app.zsh", Strength::Medium, |t, _| {
-            t.process.name.as_deref() == Some("zsh")
+            t.info.name.as_deref() == Some("zsh")
         }))
         .unwrap();
     assert_eq!(

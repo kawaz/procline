@@ -113,7 +113,7 @@ pub fn chain(processes: Vec<ProcessInfo>) -> ProcessChain {
 /// The process as a matcher sees it in a chain collected in the boot `BOOT`.
 pub fn target(process: &ProcessInfo) -> MatchTarget<'_> {
     MatchTarget {
-        process,
+        info: process,
         boot_uuid: BOOT,
     }
 }

@@ -163,12 +163,12 @@ pub enum ItemKind {
     Condition(Box<dyn Condition>),
 }
 
-/// The process a matcher looks at, with the boot UUID of the chain it was collected in (`ProcessChain.boot_uuid`), which the identifiers of the `process` item are paired with.
+/// One process of a collected snapshot (`ProcessChain`) as a matcher sees it: its `ProcessInfo` and the boot UUID of the chain (`ProcessChain.boot_uuid`), which the identifiers of the `process` item are paired with. Matching never touches the OS; everything is read from the snapshot.
 ///
 /// An item sees no ancestors: the only value from the chain it needs is the boot UUID.
 #[derive(Debug, Clone, Copy)]
 pub struct MatchTarget<'a> {
-    pub process: &'a ProcessInfo,
+    pub info: &'a ProcessInfo,
     pub boot_uuid: &'a str,
 }
 
