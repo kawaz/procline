@@ -1,6 +1,6 @@
 //! Measures one cold and repeated warm `collect_pid` calls without printing collected values.
 //!
-//! Usage: `cargo run --release -p procline --example bench -- [--iterations N] [--max-ancestors N] [--env] [--digest] [--no-signature] <pid>...`
+//! Usage: `cargo run --release -p procline --example bench -- [--iterations N] [--max-ancestors N] [--env] [--digest] [--no-signature] [--all-names] <pid>...`
 
 #[cfg(target_os = "macos")]
 fn main() -> std::process::ExitCode {
@@ -11,7 +11,7 @@ fn main() -> std::process::ExitCode {
 
     fn usage() {
         eprintln!(
-            "usage: bench [--iterations N] [--max-ancestors N] [--env] [--digest] [--no-signature] <pid>..."
+            "usage: bench [--iterations N] [--max-ancestors N] [--env] [--digest] [--no-signature] [--all-names] <pid>..."
         );
     }
 
@@ -20,6 +20,7 @@ fn main() -> std::process::ExitCode {
     let mut env = EnvPolicy::None;
     let mut digest = false;
     let mut signature = true;
+    let mut all_names = false;
     let mut pids = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -46,6 +47,7 @@ fn main() -> std::process::ExitCode {
             "--env" => env = EnvPolicy::All,
             "--digest" => digest = true,
             "--no-signature" => signature = false,
+            "--all-names" => all_names = true,
             "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -70,6 +72,7 @@ fn main() -> std::process::ExitCode {
         icon: false,
         digest,
         signature,
+        all_names,
         max_ancestors,
     };
     fn timed_collect(

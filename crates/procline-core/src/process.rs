@@ -145,9 +145,12 @@ pub struct Credentials {
     pub groups: Vec<NamedId>,
 }
 
-/// A numeric ID with every name that resolves to it.
+/// A numeric ID, its representative name, and every name that resolves to the ID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedId {
     pub id: u32,
+    /// The representative name from `getpwuid_r` or `getgrgid_r`, if the ID resolves.
+    pub name: Option<String>,
+    /// All names resolving to the ID, including the representative name when available.
     pub names: Vec<String>,
 }

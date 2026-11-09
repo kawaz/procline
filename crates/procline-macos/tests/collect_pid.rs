@@ -15,6 +15,7 @@ fn options() -> CollectOptions {
         icon: false,
         digest: false,
         signature: true,
+        all_names: true,
         max_ancestors: 64,
     }
 }
@@ -84,6 +85,14 @@ fn own_process_has_the_always_collected_items() {
     let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
     assert_eq!(credentials.uid.id, euid);
     assert_eq!(credentials.gid.id, egid);
+    // The representative OS lookup name must also be present in the complete name list.
+    let uid_name = credentials.uid.name.as_ref().unwrap();
+    assert!(credentials.uid.names.contains(uid_name));
+    for group in &credentials.groups {
+        if let Some(name) = &group.name {
+            assert!(group.names.contains(name));
+        }
+    }
     // The kernel lists the effective gid first in the credential's groups.
     assert_eq!(credentials.groups.first().map(|g| g.id), Some(egid));
     assert_eq!(

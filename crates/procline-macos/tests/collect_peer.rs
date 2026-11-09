@@ -14,6 +14,7 @@ fn options() -> CollectOptions {
         icon: false,
         digest: false,
         signature: true,
+        all_names: false,
         max_ancestors: 64,
     }
 }

@@ -1,11 +1,13 @@
 //! BSD process information: `sysctl`, `proc_pidinfo`, `proc_pidpath`, and the passwd / group / tty name lookups.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, OsStr, c_char, c_int};
 use std::io;
 use std::mem::{MaybeUninit, size_of};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::Mutex;
 
 /// The fields of `struct kinfo_proc` the collector reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +350,67 @@ pub(crate) fn is_on_read_only_mount(path: &std::path::Path) -> io::Result<bool> 
 
 /// Upper bound for the `getpwuid_r` / `getgrgid_r` buffer; a group with every user as a member stays well below it.
 const MAX_LOOKUP_BUF: usize = 1 << 20;
+
+/// Serializes passwd and group enumeration, whose libc cursors are process-global and not thread-safe. Other code using these libc functions directly must coordinate independently.
+static DIRECTORY_ENUMERATION: Mutex<()> = Mutex::new(());
+
+/// Enumerates all passwd entries once, preserving every name for shared numeric IDs.
+pub(crate) fn all_user_names() -> HashMap<u32, Vec<String>> {
+    let _guard = DIRECTORY_ENUMERATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut names: HashMap<u32, Vec<String>> = HashMap::new();
+    // SAFETY: the mutex protects the process-global passwd cursor until endpwent; each returned name is copied before the next getpwent call.
+    unsafe {
+        libc::setpwent();
+        loop {
+            let entry = libc::getpwent();
+            if entry.is_null() {
+                break;
+            }
+            if !(*entry).pw_name.is_null() {
+                let name = CStr::from_ptr((*entry).pw_name)
+                    .to_string_lossy()
+                    .into_owned();
+                let aliases = names.entry((*entry).pw_uid).or_default();
+                if !aliases.contains(&name) {
+                    aliases.push(name);
+                }
+            }
+        }
+        libc::endpwent();
+    }
+    names
+}
+
+/// Enumerates all group entries once, preserving every name for shared numeric IDs.
+pub(crate) fn all_group_names() -> HashMap<u32, Vec<String>> {
+    let _guard = DIRECTORY_ENUMERATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut names: HashMap<u32, Vec<String>> = HashMap::new();
+    // SAFETY: the mutex protects the process-global group cursor until endgrent; each returned name is copied before the next getgrent call.
+    unsafe {
+        libc::setgrent();
+        loop {
+            let entry = libc::getgrent();
+            if entry.is_null() {
+                break;
+            }
+            if !(*entry).gr_name.is_null() {
+                let name = CStr::from_ptr((*entry).gr_name)
+                    .to_string_lossy()
+                    .into_owned();
+                let aliases = names.entry((*entry).gr_gid).or_default();
+                if !aliases.contains(&name) {
+                    aliases.push(name);
+                }
+            }
+        }
+        libc::endgrent();
+    }
+    names
+}
 
 /// The login name of `uid` (`getpwuid_r`).
 pub(crate) fn user_name(uid: u32) -> Option<String> {

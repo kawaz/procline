@@ -60,7 +60,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 | 項目 | 取り方(macOS) | 強さ |
 | --- | --- | --- |
-| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。1つの ID に名前が複数あり得るので列で持つ) | `LOCAL_PEERCRED`、audit token(接続相手)、`kinfo_proc`(祖先。所属グループは `cr_groups` の最大 16 件で、先頭が実効 gid) | 弱 |
+| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。代表名 `name` (`getpwuid_r` / `getgrgid_r` の結果) と、その ID に解決される全部の名前 `names` を持つ。全部の名前は passwd / group の全走査が要り 1 回の収集で約 16 ms かかるので `CollectOptions.all_names` で選ぶ。1 つの ID に名前が複数あるのは Open Directory で uid が重複している場合) | `LOCAL_PEERCRED`、audit token(接続相手)、`kinfo_proc`(祖先。所属グループは `cr_groups` の最大 16 件で、先頭が実効 gid) | 弱 |
 | コード署名(識別子、Team ID、cdhash、署名者の証明書チェーン、ad-hoc・hardened runtime・platform binary の別、entitlements、公証) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid)、`SecCodeCheckValidity`、`SecCodeCopySigningInformation` | 強(検証が通ったときだけ) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所)、中(利用者が書ける場所) |
 | 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い) |

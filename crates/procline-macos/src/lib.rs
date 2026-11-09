@@ -24,6 +24,8 @@ pub struct CollectOptions {
     pub digest: bool,
     /// Verify the code signature of every process (`ProcessInfo.code_signing`). Off leaves it `None` and makes the chain unusable for `binary` conditions, but cuts the time to well under a millisecond for a first, light pass (a Touch ID prompt that only needs names and paths).
     pub signature: bool,
+    /// Fill `NamedId.names` with every name that resolves to each uid / gid by enumerating the user and group databases once per collection (about 16 ms on a Mac with a few hundred system accounts; a resident daemon can cache the result). Off keeps only the representative name.
+    pub all_names: bool,
     pub max_ancestors: usize,
 }
 
@@ -35,6 +37,7 @@ impl fmt::Debug for CollectOptions {
             .field("icon", &self.icon)
             .field("digest", &self.digest)
             .field("signature", &self.signature)
+            .field("all_names", &self.all_names)
             .field("max_ancestors", &self.max_ancestors)
             .finish_non_exhaustive()
     }

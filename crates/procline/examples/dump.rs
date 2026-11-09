@@ -1,8 +1,8 @@
 //! Prints the collected chain of a process as JSON.
 //!
-//! Usage: `cargo run -p procline --example dump -- [--digest] [--env] [<pid>]`
+//! Usage: `cargo run -p procline --example dump -- [--digest] [--env] [--all-names] [<pid>]`
 //!
-//! Without a pid it collects its own parent. `--digest` hashes each executable; `--env` collects every environment variable (redacted with the default rules).
+//! Without a pid it collects its own parent. `--digest` hashes each executable; `--env` collects every environment variable (redacted with the default rules); `--all-names` enumerates the user and group databases for every name of each id (about 16 ms).
 
 #[cfg(target_os = "macos")]
 fn main() -> std::process::ExitCode {
@@ -10,17 +10,19 @@ fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
     let mut digest = false;
+    let mut all_names = false;
     let mut env = EnvPolicy::None;
     let mut pid = None;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--digest" => digest = true,
+            "--all-names" => all_names = true,
             "--env" => env = EnvPolicy::All,
             other => match other.parse::<i32>() {
                 Ok(p) if pid.is_none() => pid = Some(p),
                 _ => {
                     eprintln!(
-                        "usage: dump [--digest] [--env] [<pid>]  (unexpected argument {other:?})"
+                        "usage: dump [--digest] [--env] [--all-names] [<pid>]  (unexpected argument {other:?})"
                     );
                     return ExitCode::from(2);
                 }
@@ -43,6 +45,7 @@ fn main() -> std::process::ExitCode {
         icon: false,
         digest,
         signature: true,
+        all_names,
         max_ancestors: 64,
     };
     let chain = match collect_pid(pid, &options) {

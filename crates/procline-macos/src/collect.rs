@@ -116,37 +116,70 @@ fn walk(target: Recorded, max_ancestors: usize) -> (Vec<Recorded>, Option<Trunca
 }
 
 /// Names of uids and gids, looked up once per collection.
+/// Name resolution for one collection. The representative name comes from `getpwuid_r` / `getgrgid_r`; the complete name lists come from one enumeration of the user and group databases, done the first time a complete list is needed (`CollectOptions.all_names`).
 #[derive(Default)]
 struct Names {
-    users: HashMap<u32, Vec<String>>,
-    groups: HashMap<u32, Vec<String>>,
+    users: HashMap<u32, Option<String>>,
+    groups: HashMap<u32, Option<String>>,
+    all_users: Option<HashMap<u32, Vec<String>>>,
+    all_groups: Option<HashMap<u32, Vec<String>>>,
+    all_names: bool,
 }
 
 impl Names {
+    fn new(all_names: bool) -> Self {
+        Self {
+            all_names,
+            ..Self::default()
+        }
+    }
+
     fn user(&mut self, uid: u32) -> NamedId {
-        let names = self
+        let name = self
             .users
             .entry(uid)
-            .or_insert_with(|| sys::user_name(uid).into_iter().collect());
+            .or_insert_with(|| sys::user_name(uid))
+            .clone();
+        let names = if self.all_names {
+            self.all_users
+                .get_or_insert_with(sys::all_user_names)
+                .get(&uid)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            name.iter().cloned().collect()
+        };
         NamedId {
             id: uid,
-            names: names.clone(),
+            name,
+            names,
         }
     }
 
     fn group(&mut self, gid: u32) -> NamedId {
-        let names = self
+        let name = self
             .groups
             .entry(gid)
-            .or_insert_with(|| sys::group_name(gid).into_iter().collect());
+            .or_insert_with(|| sys::group_name(gid))
+            .clone();
+        let names = if self.all_names {
+            self.all_groups
+                .get_or_insert_with(sys::all_group_names)
+                .get(&gid)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            name.iter().cloned().collect()
+        };
         NamedId {
             id: gid,
-            names: names.clone(),
+            name,
+            names,
         }
     }
 }
 
-/// uid, gid and groups of the credential. Each id carries the one name `getpwuid_r` / `getgrgid_r` resolve it to. `groups` is the credential's group list as the kernel reports it (at most 16, the effective gid first).
+/// uid, gid and groups of the credential. Each id carries its representative name and, with `all_names`, every name that resolves to it. `groups` is the credential's group list as the kernel reports it (at most 16, the effective gid first).
 fn credentials(kinfo: &KinfoProc, names: &mut Names) -> Option<Credentials> {
     let gid = *kinfo.groups.first()?;
     Some(Credentials {
@@ -271,7 +304,7 @@ fn collect_recorded(
 ) -> Result<ProcessChain, CollectError> {
     let pid = target.pid;
     let (records, mut truncated) = walk(target, options.max_ancestors);
-    let mut names = Names::default();
+    let mut names = Names::new(options.all_names);
     let mut processes: Vec<ProcessInfo> = records
         .iter()
         .enumerate()

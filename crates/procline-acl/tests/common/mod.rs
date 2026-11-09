@@ -85,10 +85,12 @@ pub fn with_ids(process: ProcessInfo, uid: u32, gid: u32) -> ProcessInfo {
         credentials: Some(Credentials {
             uid: NamedId {
                 id: uid,
+                name: None,
                 names: Vec::new(),
             },
             gid: NamedId {
                 id: gid,
+                name: None,
                 names: Vec::new(),
             },
             groups: Vec::new(),
