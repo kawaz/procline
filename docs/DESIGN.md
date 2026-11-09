@@ -172,7 +172,27 @@ This example is a process that "has claude-code above it, and above that a proce
 - Matching is decided greedily from the near side. Entry 1 goes to the nearest matching ancestor, entry 2 to the nearest matching ancestor above that, and so on, so which ancestor's values fill an entry's placeholders is uniquely determined. An entry with no concrete values and no tags (only `{"match": {"binary": {"team_id": true}}}`) matches the nearest ancestor that has that value.
 - `ancestors` is not nested inside an entry, and entries are not referenced by name. Deep conditions are confined to tag definitions.
 
-All conditions within a subject are AND. OR is expressed by writing separate rules, so that readers of a rule do not have to follow nested logical expressions.
+All conditions within a subject are AND, and so are the conditions within each entry of `ancestors`. OR can be placed in only the following two places, and a subject has no syntax for logical expressions such as `any_of` (decision record: [DR-0010](decisions/DR-0010-or-in-values-and-tag-definitions.md)). This is so that readers of a rule do not have to follow nested logical expressions.
+
+| Place | How it is written | Meaning |
+| --- | --- | --- |
+| Value | A list of values for one key (a JSON array) | True for that key if any value in the list matches ("matcher") |
+| Tag | Several definitions with the same tag name | The tag is attached if any definition matches ("tag") |
+
+```json
+{
+  "match": {
+    "binary": [{ "team_id": "AAAAAAAAAA" }, { "team_id": "BBBBBBBBBB" }],
+    "argv": [{ "regex": "^/opt/a\\.sh$" }, { "regex": "^/opt/b\\.sh$" }]
+  },
+  "ancestors": [{ "tags": ["terminal-app"] }]
+}
+```
+
+This example is a process "whose code has the Team ID `AAAAAAAAAA` or `BBBBBBBBBB`, that has `/opt/a.sh` or `/opt/b.sh` among its arguments, and above which there is a process carrying the `terminal-app` tag (Terminal or iTerm2 with the example in "tag" below)".
+
+- A list of values holds alternatives for the values of one item. Alternatives that span items (Terminal written by `path`, iTerm2 by its signature) are absorbed by several definitions of a tag.
+- The "any of" is hidden behind a list of values or a tag name, so the logic a reader of a rule follows stays AND.
 
 ### tag
 
@@ -198,12 +218,24 @@ A tag is a named subject. On every collection, each process in the sequence is m
 
 With this, a rule's subject only needs `{"tags": ["claude-pj1"]}`. The UI shows the tag on every process that has it. The processes that pass when that tag is authorized are exactly the processes shown with the tag on screen.
 
-- The strength of a tag used as a condition is the same as the strength of the tag definition's subject (the calculation rules are in "Rule Creation and Strength Constraints").
+- The strength of a tag used as a condition is the strength of the tag definition's subject. If there are several definitions with the same name, it is the weakest of them (the calculation rules are in "Rule Creation and Strength Constraints").
 - The `claude-pj1` above has only `ancestors` and no condition on the target itself, so it is Weak. Which scopes an `allow` of a Weak rule requires is decided by the app's constraint table (with the example table in "Rule Creation and Strength Constraints", an epoch scope is needed, and the rule example below has `os.session` and `app.unlock`, so it satisfies this).
 - Placeholders (`true`) cannot be written in a tag definition ("rule").
 - Tag definitions go into the same signed list as rules. If a process with the same uid could rewrite a definition, every rule conditioned on that tag would widen.
-- A tag definition may refer to another tag; cycles are an error at load time.
+- A tag definition may refer to another tag; cycles are an error at load time. Cycles are checked per name: if any of the definitions with the same name is part of a cycle, it is invalid.
 - When the sequence is cut off, whether a tag with conditions on ancestors is attached may not be decidable. Such tags go into `TaggedChain.undecidable_tags`, and the approval UI shows them distinguished from "not attached" ("Evaluation").
+
+Several definitions with the same tag name may be placed. A process carries the tag if any of the definitions matches it. Duplicate definitions are normal and are not an error. They are used to gather alternatives that span items under one name.
+
+```json
+[
+  { "tag": "terminal-app", "subject": { "match": { "path": "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal" } } },
+  { "tag": "terminal-app", "subject": { "match": { "binary": { "team_id": "H7V7XYVQ7D", "signing_id": "com.googlecode.iterm2" } } } }
+]
+```
+
+- Whether the tag is carried stays three-valued. It is attached if any definition matches, not attached if every definition is decided not to match, and otherwise (only definitions that do not match and definitions that cannot be decided) it goes into `undecidable_tags` as an undecidable tag.
+- The definitions are all weighed the same, regardless of their order.
 
 ### rule
 
@@ -312,6 +344,15 @@ The keys of `match` are names of items registered in the vocabulary (`Vocabulary
 | Regular expression | `{"regex": "…"}` | Paths, argv (for argv it is applied per element and is true if any element matches. It is not applied to the joined string) |
 | Numeric range | `{"min": …, "max": …}` | uid |
 
+Writing a list of values (a JSON array) for one key makes it true for that key if any value in the list matches (`MatchValue::AnyOf`; e.g. `{"binary": [{"team_id": "AAAAAAAAAA"}, {"team_id": "BBBBBBBBBB"}]}`).
+
+- Each element of the list is one of the forms in the table above, and the form may differ per element (`{"name": ["zsh", {"glob": "ba*"}]}`). Each element is checked by the item's rules.
+- A list has one level only; a list nested in a list is invalid.
+- A placeholder (`true`) cannot be put in a list, since a grant cannot pin it to one value. The same goes for a `true` in a field of a structured value.
+- An empty list is invalid.
+- A list for `argv` is true if any of its elements (regular expressions) matches any of the arguments.
+- The vocabulary takes a list apart and hands the elements to the item. Matching is true if any element is true, checking covers every element, and the class is the weakest of the elements ("Strength: Class and Depth"). Items (built-in and app items alike) never see a list.
+
 An item or field whose rule value is a placeholder (`true`) becomes an exact match on the actual value in the grant ("rule"). There is no exact match on booleans. JSON `true` is reserved for placeholders; there are currently no boolean items, and when one is needed it is represented as a string.
 
 The item checks the validity of values (`Matcher::validate`, called by loading and the builder), and the item is also what replaces a placeholder with the actual value (`Matcher::resolve`; `ResolveError::ValueUnavailable` if the process has no value).
@@ -390,6 +431,7 @@ The definition of the class and the decision record for the built-in classes are
 - The class of `binary` is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
 - The class of `path` is decided by the attributes the collection side (procline-macos) obtains per path (the owner and whether the user can write to it, `PathMeta`). Strong / Medium is decided when creating a grant and at evaluation, where there is a process; at rule build and load time, where there is no process, it is Medium (the weaker side). "A location the user can write to" means the user can write to (replace) the file itself or any directory on the path.
 - `uid` and `gid` are Weak because every process with the same uid satisfies them, so they identify nothing.
+- The class of a list of values is the weakest among the classes of its elements. A process passes if it matches any one of them, so the class falls to the weaker side (`{"binary": [{"team_id": "AAAAAAAAAA"}, {"digest": "sha256:…"}]}` is Medium). Several definitions of a tag are the same: the strength of a tag used as a condition is the weakest of its definitions ("Rule Creation and Strength Constraints").
 - Which item has which class is held by the vocabulary (the implementations of the registered items). Items in the collection result do not carry a strength.
 - depth is a UI concept, and the crate has neither a calculation nor a type for it. It is material for UI ordering and for additional constraints an app may impose. It is not used for rule strength constraints ("Rule Creation and Strength Constraints").
 
@@ -519,8 +561,8 @@ struct ObserveError { reason: String }
 
 Rules are created by picking items in the approval UI (RuleBuilder). Choosing "by this process's signature" or "by the Team ID of the claude-code above" produces a subject with the picked fields set to placeholders (`true`), and the actual values are filled in when the grant is created. For `binary`, the builder aligns the picked fields into a valid combination, and for `os.session` the level is chosen via the condition's argument ("Item Registration"). `SubjectBuilder` creates the subject and `RuleBuilder` creates the static rule.
 
-- `SubjectBuilder` does not receive the collection result. It assembles a subject containing `true` from a `PinSpec`, and concrete values are written with `exact`. Ancestor entries are assembled with `AncestorBuilder` and added in order with `ancestor`.
-- `pin` and `exact` on the same key are merged per field into one value for `binary` (an error if the same field is in both), and for simple items and `process` the second one is an error (`BuildError::Conflict`). `SubjectBuilder::build` / `AncestorBuilder::build` check only the validity of values (the `binary` rules, empty); checking against the vocabulary (unregistered items, `Matcher::validate`, `Condition::validate_args`) is done by `RuleBuilder::build`.
+- `SubjectBuilder` does not receive the collection result. It assembles a subject containing `true` from a `PinSpec`, concrete values are written with `exact`, and lists of values with `any_of`. Ancestor entries are assembled with `AncestorBuilder` and added in order with `ancestor`.
+- `pin` and `exact` on the same key are merged per field into one value for `binary` (an error if the same field is in both), and for simple items and `process` the second one is an error (`BuildError::Conflict`). A list from `any_of` is also one value and is not merged with a `pin` / `exact` on the same key (`BuildError::Conflict`, `binary` included). `SubjectBuilder::build` / `AncestorBuilder::build` check only the validity of values (the `binary` rules, the shape of a list, empty); checking against the vocabulary (unregistered items, `Matcher::validate`, `Condition::validate_args`) is done by `RuleBuilder::build`.
 - `RuleBuilder` is created from `Policy::rule_builder(id, subject)`. This is because calculating the strength needs both the definitions of tags and named subjects and the vocabulary. The rule's `id` is given by this argument.
 - `RuleBuilder::build()` returns a static `Rule` and does not record epochs. It checks the validity of values and the strength (class) vs scope constraints (below). The strength class can be judged even with placeholders in place.
 - Pinning is done by `Policy::grant(rule, tagged, ctx)`. It fills the subject's placeholders with the actual values from `tagged`, pins each condition, and returns the grant. It does not put it into the in-memory Policy (signing and saving are up to the app, which puts it in with `Policy::add_grant` after the write succeeds). A `GrantError` is one of: no value to fill a placeholder (`ValueUnavailable`), `pin` failed (`PinError`: no observed value, invalid arguments), a value is invalid, or the constraints are not met (`ScopeTooWeak`).
@@ -531,7 +573,8 @@ A rule's strength is determined by the subject's conditions on the target proces
 - The conditions on the target process itself are the `match` and, from the definitions of the tags referenced by `tags`, the conditions on the process itself. The rule's strength is the strongest class among those items.
 - `ancestors` conditions are not counted. Even if the ancestors are strongly identified, the target is "any descendant of them", and the target itself is not constrained. The same holds with `include_self` (it only lets matching of the list start from the process itself, and does not constrain the process itself).
 - A subject with no condition on the process itself (only `ancestors`) is the weakest and is subject to the same constraints as Weak.
-- The strength of a tag used as a condition is that of the tag definition's subject, calculated by the same rules.
+- The strength of a tag used as a condition is that of the tag definition's subject, calculated by the same rules. If there are several definitions with the same name, it is the weakest of them. If even one definition has no condition on the process itself (only `ancestors`), the tag adds nothing to the strength.
+- A list of values counts as the weakest among the classes of its elements.
 
 The constraint table (the scope conditions allowed for `allow` per class, `AllowConstraints`) is given by the app to `RuleBuilder` / `Policy`. The crate has no default values and holds only the checking mechanism. `Policy` holds the `AllowConstraints` (given as an argument of `Policy::load_verified`), and `RuleBuilder::build`, `Policy::load_verified`, `Policy::grant`, and `Policy::load_grant` perform the same check and return an error if it is not met (`BuildError::ScopeTooWeak`, `LoadError::ScopeTooWeak`, `GrantError::ScopeTooWeak`). Constraints are judged by class; depth is not used. Which scopes satisfy the constraints is also decided by the app's constraint table.
 
@@ -613,9 +656,9 @@ for item in procline_macos::os_items() {             // os.* items (os.session /
 // matcher items, lifetime, and state items are added with the same register. Duplicate keys and namespace violations are errors
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // items whose class is constant regardless of the value are registered with a closure, stating the class explicitly
 // items whose class changes with the value implement the Matcher trait and are registered with Item::matcher(key, impl)
-//   matches(&self, target: &MatchTarget, value) -> bool (MatchTarget { info: &ProcessInfo, boot_uuid: &str } = one process of the collected snapshot; matching never touches the OS. An item never sees the ancestors, and boot_uuid is the only thing it needs from the chain) / class(&self, value, process: Option<&ProcessInfo>) -> Strength (in build / load where there is no process, items decided by the process are the weaker side) / validate(&self, value: &MatchValue) -> Result<(), String> (validity of the value. Called by loading and the builder)
+//   matches(&self, target: &MatchTarget, value) -> bool (MatchTarget { info: &ProcessInfo, boot_uuid: &str } = one process of the collected snapshot; matching never touches the OS. An item never sees the ancestors, and boot_uuid is the only thing it needs from the chain) / class(&self, value, process: Option<&ProcessInfo>) -> Strength (in build / load where there is no process, items decided by the process are the weaker side) / validate(&self, value: &MatchValue) -> Result<(), String> (validity of the value. Called by loading and the builder). value is never a list of values (AnyOf; the vocabulary hands the elements one by one)
 //   resolve(&self, value: &MatchValue, target: &MatchTarget) -> Result<MatchValue, ResolveError> (placeholder to actual value. ResolveError::ValueUnavailable { field: Option<String> })
-// vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: the class the item decided from the value (and the process) (None for unregistered keys and condition items)
+// vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: the class the item decided from the value (and the process). A list of values is the weakest of its elements (None for unregistered keys and condition items)
 vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // a value implementing Condition (lifetime)
 // state items are also passed to register with the same Item::condition(...). Whether lifetime or state is returned by Condition::kind
 
@@ -673,9 +716,10 @@ pub struct Decision {
 // The shape of a subject (procline-acl)
 struct Subject { r#match: BTreeMap<String, MatchValue>, tags: Vec<String>, ancestors: Vec<AncestorMatch>, include_self: bool }
 struct AncestorMatch { r#match: BTreeMap<String, MatchValue>, tags: Vec<String> }  // an entry of ancestors. Holds no nested ancestors
-// MatchValue { Pin, Exact(Literal), Glob(..), Regex(..), Range { .. }, Process(Pinnable<ProcessIdentity>), Binary(BinaryPin) }: Pin is the placeholder for simple items
-// In JSON, Exact is a string or a number, Glob is {"glob": …}, Regex is {"regex": …}, Range is {"min": …, "max": …}. The Regex of argv is applied per element
+// MatchValue { Pin, Exact(Literal), Glob(..), Regex(..), Range { .. }, Process(Pinnable<ProcessIdentity>), Binary(BinaryPin), AnyOf(Vec<MatchValue>) }: Pin is the placeholder for simple items. AnyOf is a list of values for one key (true if any matches. Nested, placeholder-containing and empty lists are invalid; the class is the weakest of the elements)
+// In JSON, Exact is a string or a number, Glob is {"glob": …}, Regex is {"regex": …}, Range is {"min": …, "max": …}, AnyOf is an array. The Regex of argv is applied per element
 // SubjectRef { Inline(Box<Subject>), Named(String) }: the position of a rule's subject. Placeholders can be written only in a rule's Inline
+// Tag { name: String, subject: SubjectRef }: the list may hold several Tags with the same name (the tag is attached if any definition matches)
 // Grant { id, rule_id: String, effect, subject: Subject, targets, conditions, … }: a grant's subject is inline (a named subject is expanded when the grant is created. Tag names are kept as names)
 // targets (rule and grant): each element is a glob over the target (the string of a Target). An empty targets matches every target
 
@@ -693,10 +737,11 @@ let subject = SubjectBuilder::new()
     )
     .ancestor(AncestorBuilder::new().tag("terminal-app").build()?)  // added in order, nearest first
     .build()?;
-// SubjectBuilder: new / pin(key, PinSpec) / exact(key, MatchValue) / tag(name) / ancestor(AncestorMatch) / include_self() / build() -> Result<Subject, BuildError>
-// AncestorBuilder: new / pin / exact / tag / build() -> Result<AncestorMatch, BuildError>
-// build checks only the validity of values (the binary rules, empty). Unregistered items and Matcher::validate are checked by RuleBuilder::build
-// pin and exact on the same key: binary is merged per field (BuildError::Conflict if the same field is in both), simple items and process give BuildError::Conflict on the second one
+// SubjectBuilder: new / pin(key, PinSpec) / exact(key, MatchValue) / any_of(key, values) / tag(name) / ancestor(AncestorMatch) / include_self() / build() -> Result<Subject, BuildError>
+// AncestorBuilder: new / pin / exact / any_of / tag / build() -> Result<AncestorMatch, BuildError>
+// any_of(key, impl IntoIterator<Item = MatchValue>) is the list version of exact (puts a MatchValue::AnyOf)
+// build checks only the validity of values (the binary rules, the shape of a list, empty). Unregistered items and Matcher::validate are checked by RuleBuilder::build
+// pin and exact on the same key: binary is merged per field (BuildError::Conflict if the same field is in both), simple items and process give BuildError::Conflict on the second one. A list from any_of is not merged and gives BuildError::Conflict on a second value for the same key
 // PinSpec { All, Binary(Vec<BinaryField>) }: All is for process and simple items (sets the whole value to true). The level of os.session is specified with RuleBuilder::condition below
 // BinaryField { Digest, TeamId, SigningId, BundleId, CdHash }
 

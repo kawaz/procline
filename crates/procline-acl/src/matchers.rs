@@ -16,6 +16,8 @@
 //! | `responsible` | structured (`Process`) | - | - | - | yes | Medium |
 //!
 //! `class` returns `Weak` for a value of a shape the item rejects, so an invalid value never makes a rule look stronger.
+//!
+//! A list of alternatives (`MatchValue::AnyOf`) never reaches these items: the vocabulary checks the list and calls the item once per value (`vocabulary::value_matches` and its siblings). On `argv`, a list of regexes thus matches when one of them matches one of the elements.
 
 use std::ffi::OsStr;
 use std::path::Path;

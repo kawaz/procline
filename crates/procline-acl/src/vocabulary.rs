@@ -87,7 +87,7 @@ impl Vocabulary {
             })
     }
 
-    /// The class the matcher item decides from the value, and from the process when one is given (see `Matcher::class`); `None` for an unregistered key or a condition item.
+    /// The class the matcher item decides from the value, and from the process when one is given (see `Matcher::class`); for a list (`MatchValue::AnyOf`), the weakest class among its values, since any of them lets a process through. `None` for an unregistered key or a condition item.
     pub fn class(
         &self,
         key: &str,
@@ -95,9 +95,66 @@ impl Vocabulary {
         process: Option<&ProcessInfo>,
     ) -> Option<Strength> {
         match self.items.get(key)?.kind() {
-            ItemKind::Matcher(matcher) => Some(matcher.class(value, process)),
+            ItemKind::Matcher(matcher) => Some(value_class(matcher.as_ref(), value, process)),
             ItemKind::Condition(_) => None,
         }
+    }
+}
+
+// The entry points to a matcher item for every caller. A list of alternatives (`MatchValue::AnyOf`) is taken apart here, so an item (built-in or registered by the application) only ever sees one value.
+
+/// Whether the process satisfies the value: for a list, one of its values.
+pub(crate) fn value_matches(
+    matcher: &dyn Matcher,
+    target: MatchTarget<'_>,
+    value: &MatchValue,
+) -> bool {
+    match value {
+        MatchValue::AnyOf(values) => values.iter().any(|value| matcher.matches(target, value)),
+        value => matcher.matches(target, value),
+    }
+}
+
+/// The class of the value: for a list, the weakest class among its values (`Weak` for an empty list, which `validate_value` rejects).
+pub(crate) fn value_class(
+    matcher: &dyn Matcher,
+    value: &MatchValue,
+    process: Option<&ProcessInfo>,
+) -> Strength {
+    match value {
+        MatchValue::AnyOf(values) => values
+            .iter()
+            .map(|value| matcher.class(value, process))
+            .min()
+            .unwrap_or(Strength::Weak),
+        value => matcher.class(value, process),
+    }
+}
+
+/// Checks the value: for a list, its shape (`MatchValue::check_alternatives`) and then each value by the item's rules.
+pub(crate) fn validate_value(matcher: &dyn Matcher, value: &MatchValue) -> Result<(), String> {
+    match value {
+        MatchValue::AnyOf(values) => {
+            MatchValue::check_alternatives(values)?;
+            values.iter().enumerate().try_for_each(|(position, value)| {
+                matcher
+                    .validate(value)
+                    .map_err(|reason| format!("value {position} of the list: {reason}"))
+            })
+        }
+        value => matcher.validate(value),
+    }
+}
+
+/// Replaces the placeholders of the value with the actual values of the process. A list holds no placeholder, so it comes back as is.
+pub(crate) fn resolve_value(
+    matcher: &dyn Matcher,
+    value: &MatchValue,
+    target: MatchTarget<'_>,
+) -> Result<MatchValue, ResolveError> {
+    match value {
+        MatchValue::AnyOf(_) => Ok(value.clone()),
+        value => matcher.resolve(value, target),
     }
 }
 
@@ -173,6 +230,8 @@ pub struct MatchTarget<'a> {
 }
 
 /// Matches one process against the value written in `match`, checks and resolves that value, and decides its class.
+///
+/// `value` is never a list (`MatchValue::AnyOf`): the vocabulary checks the shape of a list, calls the item once per value, and combines the results (one value matches, every value is valid, the weakest class), so an item implements only its own values.
 pub trait Matcher: Send + Sync {
     /// Whether the process satisfies the value. A value that `validate` rejects, a placeholder included, never matches.
     fn matches(&self, target: MatchTarget<'_>, value: &MatchValue) -> bool;

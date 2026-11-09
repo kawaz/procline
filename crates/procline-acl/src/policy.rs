@@ -14,7 +14,8 @@ use crate::matching::{ChainTags, Matching, Placeholders, TagLookup, Truth, tag_c
 use crate::rule::{ConditionUse, Effect, Grant, PinnedCondition, Rule, Target};
 use crate::subject::{AncestorMatch, MatchValue, Subject, SubjectRef, Tag};
 use crate::vocabulary::{
-    Condition, ConditionKind, MatchTarget, PinError, ResolveError, Vocabulary,
+    Condition, ConditionKind, MatchTarget, PinError, ResolveError, Vocabulary, resolve_value,
+    validate_value, value_matches,
 };
 
 /// The key a grant stores an `age` under: `Policy::grant` turns its pin value into the time it ends.
@@ -307,6 +308,8 @@ impl<'v> Policy<'v> {
 
     /// The strength of a subject (DR-0003): the strongest class among its conditions on the process itself, `match` and the own conditions of the definitions of its `tags` (following tags that require tags). `ancestors` and `include_self` do not count. A subject with no condition on the process itself is `Weak`.
     ///
+    /// The alternatives count on the weak side (DR-0010): a list in `match` has the weakest class of its values, and a tag with several definitions the weakest of its definitions.
+    ///
     /// `process` is the target when granting and `None` when building or loading; an item whose class depends on the process (`path`) takes the weaker class without it.
     pub(crate) fn own_class(&self, subject: &Subject, process: Option<&ProcessInfo>) -> Strength {
         self.own_class_of(subject, process, &mut BTreeSet::new())
@@ -332,19 +335,27 @@ impl<'v> Policy<'v> {
         items.max(tags)
     }
 
-    /// The strength of the definition of a tag; `None` for a tag without a definition or without own conditions. A definition that refers back to a tag being decided (a cycle, which loading rejects) adds nothing.
+    /// The strength of a tag: the weakest among its definitions, since any of them attaches it. `None` for a tag without a definition, or when one of its definitions has no own conditions (that definition attaches the tag without pinning down the process itself). A definition that refers back to a tag being decided (a cycle, which loading rejects) adds nothing.
     fn tag_class(
         &self,
         name: &str,
         process: Option<&ProcessInfo>,
         visiting: &mut BTreeSet<String>,
     ) -> Option<Strength> {
-        let definition = self.tags.iter().find(|tag| tag.name == name)?;
-        let subject = self.expand(&definition.subject).ok()?;
         if !visiting.insert(name.to_owned()) {
             return None;
         }
-        let class = self.own_class_of(subject, process, visiting);
+        let class = self
+            .tags
+            .iter()
+            .filter(|tag| tag.name == name)
+            .map(|definition| {
+                self.expand(&definition.subject)
+                    .ok()
+                    .and_then(|subject| self.own_class_of(subject, process, visiting))
+            })
+            .min()
+            .flatten();
         visiting.remove(name);
         class
     }
@@ -365,20 +376,20 @@ impl<'v> Policy<'v> {
                     .matcher(key)
                     .ok_or_else(|| GrantError::UnknownItem { key: key.clone() })?;
                 let resolved = match process {
-                    Some(process) => matcher
-                        .resolve(
-                            value,
-                            MatchTarget {
-                                info: process,
-                                boot_uuid: &chain.boot_uuid,
-                            },
-                        )
-                        .map_err(|ResolveError::ValueUnavailable { field }| {
-                            GrantError::ValueUnavailable {
-                                key: key.clone(),
-                                field,
-                            }
-                        })?,
+                    Some(process) => resolve_value(
+                        matcher,
+                        value,
+                        MatchTarget {
+                            info: process,
+                            boot_uuid: &chain.boot_uuid,
+                        },
+                    )
+                    .map_err(|ResolveError::ValueUnavailable { field }| {
+                        GrantError::ValueUnavailable {
+                            key: key.clone(),
+                            field,
+                        }
+                    })?,
                     None if value.has_placeholder() => {
                         return Err(GrantError::ValueUnavailable {
                             key: key.clone(),
@@ -387,12 +398,10 @@ impl<'v> Policy<'v> {
                     }
                     None => value.clone(),
                 };
-                matcher
-                    .validate(&resolved)
-                    .map_err(|reason| GrantError::InvalidValue {
-                        key: key.clone(),
-                        reason,
-                    })?;
+                validate_value(matcher, &resolved).map_err(|reason| GrantError::InvalidValue {
+                    key: key.clone(),
+                    reason,
+                })?;
                 Ok((key.clone(), resolved))
             })
             .collect()
@@ -536,7 +545,7 @@ impl<'v> Policy<'v> {
                 let hit = self
                     .vocab
                     .matcher(key)
-                    .is_some_and(|matcher| matcher.matches(own, value));
+                    .is_some_and(|matcher| value_matches(matcher, own, value));
                 record(key.clone(), hit.then_some(0), hit);
             }
         }

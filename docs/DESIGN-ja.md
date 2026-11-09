@@ -172,7 +172,27 @@ subject は1つのプロセスへの条件で、接続相手か祖先かを区�
 - 照合は近い側から貪欲に決めます。要素 1 を最も近い当たる祖先に、要素 2 をそのさらに上で最も近い当たる祖先に、と決めるので、要素の placeholder をどの祖先の値で埋めるかが一意に決まります。具体値もタグも無い要素(`{"match": {"binary": {"team_id": true}}}` だけ)は、その値を持つ最も近い祖先に当たります。
 - 要素の中に `ancestors` は入れ子にせず、要素を名前で参照することもしません。深い条件はタグの定義に閉じ込めます。
 
-subject の中の条件はすべて AND です。OR はルールを分けて書きます。ルールを読む人が入れ子の論理式を追わずに済むようにするためです。
+subject の中の条件はすべて AND で、`ancestors` の各要素の中も AND です。OR を置ける場所は次の 2 つだけで、subject に `any_of` のような論理式の構文は持ちません(決定の記録: [DR-0010](decisions/DR-0010-or-in-values-and-tag-definitions.md))。ルールを読む人が入れ子の論理式を追わずに済むようにするためです。
+
+| 置き場 | 書き方 | 意味 |
+| --- | --- | --- |
+| 値 | 1 つの key に値の列(JSON の配列) | その key について、列のどれかの値に一致すれば真(「matcher」) |
+| タグ | 同じタグ名の定義を複数置く | どれかの定義に当たればタグが付く(「tag」) |
+
+```json
+{
+  "match": {
+    "binary": [{ "team_id": "AAAAAAAAAA" }, { "team_id": "BBBBBBBBBB" }],
+    "argv": [{ "regex": "^/opt/a\\.sh$" }, { "regex": "^/opt/b\\.sh$" }]
+  },
+  "ancestors": [{ "tags": ["terminal-app"] }]
+}
+```
+
+この例は「Team ID が `AAAAAAAAAA` か `BBBBBBBBBB` のコードで、引数に `/opt/a.sh` か `/opt/b.sh` を持ち、祖先に `terminal-app` のタグ(下の「tag」の例なら Terminal か iTerm2)が付いたプロセスがいる」プロセスです。
+
+- 値の列は同じ項目の値の選択肢です。項目をまたぐ選択肢(Terminal は `path` で、iTerm2 は署名で書く)は、タグの複数定義で吸収します。
+- 「どれか」は値の列かタグ名の後ろに隠れるので、ルールを読む人が追う論理は AND のままです。
 
 ### tag
 
@@ -198,12 +218,24 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 
 これでルールの subject は `{"tags": ["claude-pj1"]}` だけで済みます。画面では、タグが付いたプロセスのすべてにタグを出します。そのタグを認可したときに通るプロセスと、画面でタグが付いているプロセスがそのまま一致します。
 
-- タグを条件にした場合の強さは、タグの定義の subject の強さと同じです(算出の規則は「ルールの作成と強さの制約」)。
+- タグを条件にした場合の強さは、タグの定義の subject の強さです。同名の定義が複数あれば、そのうち最も弱いものです(算出の規則は「ルールの作成と強さの制約」)。
 - 上の `claude-pj1` は `ancestors` だけで対象自身への条件を持たないので弱です。弱のルールの `allow` にどの scope を求めるかはアプリの制約表が決めます(「ルールの作成と強さの制約」の例の表なら世代の scope が要り、下の rule の例は `os.session` と `app.unlock` を持つので満たします)。
 - タグの定義に placeholder(`true`)は書けません(「rule」)。
 - タグの定義もルールと同じ署名付きの一覧に入れます。同じ uid のプロセスが定義を書き換えられると、そのタグを条件にしたルールが全部広がるためです。
-- タグの定義が別のタグを参照してもよく、循環は読み込み時にエラーにします。
+- タグの定義が別のタグを参照してもよく、循環は読み込み時にエラーにします。循環は名前単位で見て、同名の定義のどれかが循環すれば不正です。
 - 列が途切れていると、祖先への条件を持つタグは有無を判定できないことがあります。そうしたタグは `TaggedChain.undecidable_tags` に入り、承認画面は「付いていない」と区別して見せます(「評価」)。
+
+同じタグ名の定義を複数置けます。プロセスは、どれかの定義に当たればそのタグを持ちます。定義の重複は正常で、エラーにしません。項目をまたぐ選択肢を 1 つの名前にまとめるのに使います。
+
+```json
+[
+  { "tag": "terminal-app", "subject": { "match": { "path": "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal" } } },
+  { "tag": "terminal-app", "subject": { "match": { "binary": { "team_id": "H7V7XYVQ7D", "signing_id": "com.googlecode.iterm2" } } } }
+]
+```
+
+- 有無の判定は三値のままです。どれかの定義が当たれば付き、全部の定義が当たらないと決まれば付かず、それ以外(当たらない定義と判定できない定義だけ)は判定できないタグとして `undecidable_tags` に入ります。
+- 定義は並び順によらず、どれも同じ重みで見ます。
 
 ### rule
 
@@ -312,6 +344,15 @@ subject、tag、rule、条件の組は、どれも名前を付けて一覧に置
 | 正規表現 | `{"regex": "…"}` | パス、argv(argv は要素ごとに当て、いずれかの要素に一致すれば真。結合した文字列には当てない) |
 | 数値の範囲 | `{"min": …, "max": …}` | uid |
 
+1 つの key に値の列(JSON の配列)を書くと、その key について、列のどれかの値に一致すれば真です(`MatchValue::AnyOf`。例 `{"binary": [{"team_id": "AAAAAAAAAA"}, {"team_id": "BBBBBBBBBB"}]}`)。
+
+- 列の要素は上の表の形のどれかで、要素ごとに形が違ってよい(`{"name": ["zsh", {"glob": "ba*"}]}`)。各要素は項目の規則で検査します。
+- 列の中は 1 段だけで、列の入れ子は不正です。
+- placeholder(`true`)は列に入れられません。grant で 1 つの値に pin できないためです。構造を持つ値の field の `true` も同じです。
+- 空の列は不正です。
+- `argv` の列は、どれかの要素(正規表現)がどれかの引数に一致すれば真です。
+- 列は語彙が要素に分けて項目に渡します。照合は要素のどれかが真なら真、検査は要素の全部、クラスは要素の最弱です(「強さ: クラスと深さ」)。項目(組み込みもアプリのものも)は列を見ません。
+
 rule の値が placeholder(`true`)の項目や field は、grant で実値の完全一致になります(「rule」)。真偽値の完全一致はありません。JSON の `true` は placeholder 専用で、真偽値の項目は今は無く、要るときは文字列で表します。
 
 値の妥当性は項目が検査し(`Matcher::validate`。読み込みと builder が呼ぶ)、placeholder を実値に置き換えるのも項目です(`Matcher::resolve`。そのプロセスに値が無ければ `ResolveError::ValueUnavailable`)。
@@ -390,6 +431,7 @@ register(key, impl)
 - `binary` のクラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中です。
 - `path` のクラスは、収集側(procline-macos)が path ごとに取る属性(所有者と利用者の書き込み可否、`PathMeta`)で決まります。プロセスがある grant の作成時と評価時に強 / 中を判定し、プロセスが無い rule の build 時と読み込み時は中(弱い側)とします。「利用者が書ける場所」は、ファイル自体か、パス上のいずれかのディレクトリに利用者が書ける(差し替えられる)ことを指します。
 - `uid` と `gid` が弱なのは、同じ uid の全プロセスが満たすので、何も特定しないためです。
+- 値の列のクラスは、要素のクラスのうち最も弱いものです。列のどれか 1 つに一致すれば通るので、弱い側に倒します(`{"binary": [{"team_id": "AAAAAAAAAA"}, {"digest": "sha256:…"}]}` は中)。タグの複数定義も同じで、タグを条件にしたときの強さは定義のうち最も弱いものです(「ルールの作成と強さの制約」)。
 - どの項目がどのクラスかは語彙(登録された項目の実装)が持ちます。収集結果の各項目は強さを持ちません。
 - 深さは UI の概念で、crate は算出も型も持ちません。UI の並び順と、アプリが追加で課す制約の材料です。ルールの強さの制約には使いません(「ルールの作成と強さの制約」)。
 
@@ -519,8 +561,8 @@ struct ObserveError { reason: String }
 
 ルールは、承認画面で項目を選んで作ります(RuleBuilder)。「このプロセスの署名で」「上にいる claude-code の Team ID で」と選ぶと、選んだ field を placeholder(`true`)にした subject ができ、実値は grant を作るときに埋まります。`binary` は選んだ field から builder が妥当な組に揃え、`os.session` は段階を条件の引数で選びます(「項目の登録」)。`SubjectBuilder` が subject を、`RuleBuilder` が静的な rule を作ります。
 
-- `SubjectBuilder` は収集結果を受け取りません。`PinSpec` から `true` 入りの subject を組み、具体値は `exact` で書きます。祖先の要素は `AncestorBuilder` で組んで `ancestor` で順に足します。
-- 同じ key への `pin` と `exact` は、`binary` では field 単位で 1 つの値に合成し(同じ field が両方にあればエラー)、単純項目と `process` では 2 回目をエラーにします(`BuildError::Conflict`)。`SubjectBuilder::build` / `AncestorBuilder::build` が検査するのは値の妥当性(`binary` の規則、空)だけで、語彙との照合(未登録の項目、`Matcher::validate`、`Condition::validate_args`)は `RuleBuilder::build` が行います。
+- `SubjectBuilder` は収集結果を受け取りません。`PinSpec` から `true` 入りの subject を組み、具体値は `exact` で、値の列は `any_of` で書きます。祖先の要素は `AncestorBuilder` で組んで `ancestor` で順に足します。
+- 同じ key への `pin` と `exact` は、`binary` では field 単位で 1 つの値に合成し(同じ field が両方にあればエラー)、単純項目と `process` では 2 回目をエラーにします(`BuildError::Conflict`)。`any_of` の列も 1 つの値で、同じ key の `pin` / `exact` とは合成しません(`binary` でも `BuildError::Conflict`)。`SubjectBuilder::build` / `AncestorBuilder::build` が検査するのは値の妥当性(`binary` の規則、列の形、空)だけで、語彙との照合(未登録の項目、`Matcher::validate`、`Condition::validate_args`)は `RuleBuilder::build` が行います。
 - `RuleBuilder` は `Policy::rule_builder(id, subject)` から作ります。強さの算出に、タグ・名前付きの subject の定義と語彙の両方が要るためです。rule の `id` はこの引数で与えます。
 - `RuleBuilder::build()` は静的な `Rule` を返し、世代は記録しません。検査するのは値の妥当性と、強さ(クラス)と scope の制約(下記)です。強さのクラスは placeholder のままでも判定できます。
 - pin は `Policy::grant(rule, tagged, ctx)` が行います。subject の placeholder を `tagged` の実値で埋め、各 condition を pin した grant を返します。メモリ上の Policy には入れません(署名と保存はアプリで、書けてから `Policy::add_grant` で入れる)。`GrantError` は、placeholder を埋める値が無い(`ValueUnavailable`)、`pin` が失敗した(`PinError`: 観測値が無い、引数が不正)、値が妥当でない、制約を満たさない(`ScopeTooWeak`)、のどれかです。
@@ -531,7 +573,8 @@ struct ObserveError { reason: String }
 - 対象プロセス自身への条件は、`match` と、`tags` が指すタグの定義のうち自身への条件です。ルールの強さは、それらの項目のクラスのうち最も強いものです。
 - `ancestors` の条件は数えません。祖先が強く特定されていても、対象は「その子孫なら何でも」で、対象自身は縛られないためです。`include_self` があっても同じです(列の照合を自身から始めてよいだけで、自身を縛らない)。
 - 自身への条件が何も無い subject(`ancestors` だけ)は最も弱く、弱と同じ制約を受けます。
-- タグを条件にしたときの強さは、タグの定義の subject を同じ規則で算出したものです。
+- タグを条件にしたときの強さは、タグの定義の subject を同じ規則で算出したものです。同名の定義が複数あれば、そのうち最も弱いものです。自身への条件を持たない定義(`ancestors` だけ)が 1 つでもあれば、そのタグは強さに何も足しません。
+- 値の列は、要素のクラスのうち最も弱いものとして数えます。
 
 制約の表(クラスごとに `allow` で許す scope の条件、`AllowConstraints`)はアプリが `RuleBuilder` / `Policy` に与えます。crate は既定値を持たず、検査の仕組みだけを持ちます。`Policy` が `AllowConstraints` を持ち(`Policy::load_verified` の引数で与える)、`RuleBuilder::build`、`Policy::load_verified`、`Policy::grant`、`Policy::load_grant` が同じ検査をして、満たさなければエラーにします(`BuildError::ScopeTooWeak`、`LoadError::ScopeTooWeak`、`GrantError::ScopeTooWeak`)。制約はクラスで判定し、深さは使いません。どの scope が制約を満たすかも、アプリの制約表が決めます。
 
@@ -613,9 +656,9 @@ for item in procline_macos::os_items() {             // os.* の項目(os.sessio
 // matcher の項目、寿命型、状態型を同じ register で足す。key の重複と名前空間の違反はエラー
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // クラスが値によらず一定の項目は、クラスを明示してクロージャで登録する
 // クラスが値で変わる項目は Matcher trait を実装し、Item::matcher(key, impl) で登録する
-//   matches(&self, target: &MatchTarget, value) -> bool(MatchTarget { info: &ProcessInfo, boot_uuid: &str } = 収集済みスナップショットの 1 プロセス。照合中に OS は呼ばない。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は弱い側)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)
+//   matches(&self, target: &MatchTarget, value) -> bool(MatchTarget { info: &ProcessInfo, boot_uuid: &str } = 収集済みスナップショットの 1 プロセス。照合中に OS は呼ばない。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は弱い側)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)。value に値の列(AnyOf)は来ない(語彙が要素に分けて渡す)
 //   resolve(&self, value: &MatchValue, target: &MatchTarget) -> Result<MatchValue, ResolveError>(placeholder を実値に。ResolveError::ValueUnavailable { field: Option<String> })
-// vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: 項目が値(とプロセス)から決めたクラス(未登録の key と条件の項目は None)
+// vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: 項目が値(とプロセス)から決めたクラス。値の列は要素の最弱(未登録の key と条件の項目は None)
 vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // Condition を実装した値(寿命型)
 // 状態型も同じ Item::condition(...) で register に渡す。寿命型か状態型かは Condition::kind が返す
 
@@ -673,9 +716,10 @@ pub struct Decision {
 // subject の形(procline-acl)
 struct Subject { r#match: BTreeMap<String, MatchValue>, tags: Vec<String>, ancestors: Vec<AncestorMatch>, include_self: bool }
 struct AncestorMatch { r#match: BTreeMap<String, MatchValue>, tags: Vec<String> }  // ancestors の要素。入れ子の ancestors は持たない
-// MatchValue { Pin, Exact(Literal), Glob(..), Regex(..), Range { .. }, Process(Pinnable<ProcessIdentity>), Binary(BinaryPin) }: Pin は単純項目の placeholder
-// JSON では Exact は文字列か数値、Glob は {"glob": …}、Regex は {"regex": …}、Range は {"min": …, "max": …}。argv の Regex は要素ごとに当てる
+// MatchValue { Pin, Exact(Literal), Glob(..), Regex(..), Range { .. }, Process(Pinnable<ProcessIdentity>), Binary(BinaryPin), AnyOf(Vec<MatchValue>) }: Pin は単純項目の placeholder。AnyOf は 1 つの key の値の列(どれかに一致すれば真。入れ子・placeholder 入り・空は不正、クラスは要素の最弱)
+// JSON では Exact は文字列か数値、Glob は {"glob": …}、Regex は {"regex": …}、Range は {"min": …, "max": …}、AnyOf は配列。argv の Regex は要素ごとに当てる
 // SubjectRef { Inline(Box<Subject>), Named(String) }: rule の subject の位置。placeholder を書けるのは rule の Inline だけ
+// Tag { name: String, subject: SubjectRef }: 一覧に同じ name の Tag を複数置ける(どれかの定義に当たればタグが付く)
 // Grant { id, rule_id: String, effect, subject: Subject, targets, conditions, … }: grant の subject は inline(名前付きの subject は grant を作るときに展開。タグ名は名前のまま)
 // targets(rule と grant): 要素は対象(Target の文字列)に対する glob。空の targets は全対象に当たる
 
@@ -693,10 +737,11 @@ let subject = SubjectBuilder::new()
     )
     .ancestor(AncestorBuilder::new().tag("terminal-app").build()?)  // 近い方から順に足す
     .build()?;
-// SubjectBuilder: new / pin(key, PinSpec) / exact(key, MatchValue) / tag(name) / ancestor(AncestorMatch) / include_self() / build() -> Result<Subject, BuildError>
-// AncestorBuilder: new / pin / exact / tag / build() -> Result<AncestorMatch, BuildError>
-// build が検査するのは値の妥当性だけ(binary の規則、空)。未登録の項目と Matcher::validate は RuleBuilder::build が検査する
-// 同じ key への pin と exact: binary は field 単位で合成(同じ field が両方にあれば BuildError::Conflict)、単純項目と process は 2 回目で BuildError::Conflict
+// SubjectBuilder: new / pin(key, PinSpec) / exact(key, MatchValue) / any_of(key, values) / tag(name) / ancestor(AncestorMatch) / include_self() / build() -> Result<Subject, BuildError>
+// AncestorBuilder: new / pin / exact / any_of / tag / build() -> Result<AncestorMatch, BuildError>
+// any_of(key, impl IntoIterator<Item = MatchValue>) は exact の列版(MatchValue::AnyOf を置く)
+// build が検査するのは値の妥当性だけ(binary の規則、列の形、空)。未登録の項目と Matcher::validate は RuleBuilder::build が検査する
+// 同じ key への pin と exact: binary は field 単位で合成(同じ field が両方にあれば BuildError::Conflict)、単純項目と process は 2 回目で BuildError::Conflict。any_of の列は合成せず、同じ key の 2 回目で BuildError::Conflict
 // PinSpec { All, Binary(Vec<BinaryField>) }: All は process と単純項目用(値全体を true にする)。os.session の段階は下の RuleBuilder::condition で指定する
 // BinaryField { Digest, TeamId, SigningId, BundleId, CdHash }
 

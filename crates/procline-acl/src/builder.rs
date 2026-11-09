@@ -6,6 +6,7 @@ use procline_core::{BinaryField, BinaryPin, Pinnable, Strength};
 use crate::policy::{Policy, rule_meets, target_glob};
 use crate::rule::{ConditionUse, Effect, Rule};
 use crate::subject::{AncestorMatch, MatchValue, Subject, SubjectRef};
+use crate::vocabulary::validate_value;
 
 /// The key of the `binary` item, whose fields `pin` and `exact` merge.
 const BINARY: &str = "binary";
@@ -42,6 +43,15 @@ impl SubjectBuilder {
         self
     }
 
+    /// Matches the item against one of the concrete values (`MatchValue::AnyOf`).
+    pub fn any_of(
+        self,
+        key: impl Into<String>,
+        values: impl IntoIterator<Item = MatchValue>,
+    ) -> Self {
+        self.exact(key, MatchValue::AnyOf(values.into_iter().collect()))
+    }
+
     /// Requires a tag the process carries.
     pub fn tag(mut self, name: impl Into<String>) -> Self {
         self.tags.push(name.into());
@@ -60,9 +70,9 @@ impl SubjectBuilder {
         self
     }
 
-    /// Combines the placeholders and the concrete values into a subject. Checks the values only (the validity rules of `binary`, an empty subject); checking the keys against the vocabulary is `RuleBuilder::build`'s job.
+    /// Combines the placeholders and the concrete values into a subject. Checks the values only (the validity rules of `binary`, the shape of a list, an empty subject); checking the keys against the vocabulary is `RuleBuilder::build`'s job.
     ///
-    /// `pin` and `exact` on the same `binary` key merge field by field into one value; a field given by both is a `Conflict`. An item with an unstructured value and `process` hold one value, so a second `pin` or `exact` on the key is a `Conflict`.
+    /// `pin` and `exact` on the same `binary` key merge field by field into one value; a field given by both is a `Conflict`. An item with an unstructured value and `process` hold one value, so a second `pin` or `exact` on the key is a `Conflict`. A list (`any_of`) is one value too: it does not merge with another `pin` or `exact` on the key.
     pub fn build(self) -> Result<Subject, BuildError> {
         let r#match = combine(self.pins, self.exacts)?;
         if r#match.is_empty() && self.tags.is_empty() && self.ancestors.is_empty() {
@@ -100,6 +110,15 @@ impl AncestorBuilder {
     pub fn exact(mut self, key: impl Into<String>, value: MatchValue) -> Self {
         self.exacts.push((key.into(), value));
         self
+    }
+
+    /// Matches the item of the ancestor against one of the concrete values (`MatchValue::AnyOf`).
+    pub fn any_of(
+        self,
+        key: impl Into<String>,
+        values: impl IntoIterator<Item = MatchValue>,
+    ) -> Self {
+        self.exact(key, MatchValue::AnyOf(values.into_iter().collect()))
     }
 
     /// Requires a tag the ancestor carries.
@@ -242,12 +261,10 @@ fn check_entries(
             .vocab()
             .matcher(key)
             .ok_or_else(|| BuildError::UnknownItem { key: key.clone() })?;
-        matcher
-            .validate(value)
-            .map_err(|reason| BuildError::InvalidValue {
-                key: key.clone(),
-                reason,
-            })?;
+        validate_value(matcher, value).map_err(|reason| BuildError::InvalidValue {
+            key: key.clone(),
+            reason,
+        })?;
     }
     match tags.iter().find(|name| !policy.has_tag(name)) {
         Some(name) => Err(BuildError::UnknownTag { name: name.clone() }),
@@ -258,6 +275,8 @@ fn check_entries(
 /// Merges the placeholders and the concrete values of a builder into `match`.
 ///
 /// `binary` merges field by field (a field given twice is a `Conflict` naming it), then the fields the chosen placeholder fields require are added as placeholders when absent (`signing_id` needs `team_id`, `bundle_id` needs `team_id` and `signing_id`), and the merged value is checked with `BinaryPin::validate`. Any other key takes one value: a second one is a `Conflict`.
+///
+/// A list is checked for its shape (`MatchValue::check_alternatives`), and on `binary` each of its values with `BinaryPin::validate`.
 fn combine(
     pins: Vec<(String, PinSpec)>,
     exacts: Vec<(String, MatchValue)>,
@@ -291,6 +310,9 @@ fn combine(
         insert(&mut entries, key, value)?;
     }
     for (key, value) in exacts {
+        if let MatchValue::AnyOf(values) = &value {
+            check_list(&key, values)?;
+        }
         if value.has_placeholder() {
             return Err(BuildError::InvalidValue {
                 key,
@@ -309,6 +331,23 @@ fn combine(
         })?;
     }
     Ok(entries)
+}
+
+/// The shape of a list given to `any_of`, and the validity rules of `binary` for each value on that key.
+fn check_list(key: &str, values: &[MatchValue]) -> Result<(), BuildError> {
+    let invalid = |reason: String| BuildError::InvalidValue {
+        key: key.to_owned(),
+        reason,
+    };
+    MatchValue::check_alternatives(values).map_err(invalid)?;
+    if key == BINARY {
+        for value in values {
+            if let MatchValue::Binary(pin) = value {
+                pin.validate().map_err(|err| invalid(err.to_string()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn insert(

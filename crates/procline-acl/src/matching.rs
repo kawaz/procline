@@ -6,7 +6,7 @@ use procline_core::ProcessChain;
 
 use crate::policy::TaggedChain;
 use crate::subject::{AncestorMatch, MatchValue, Subject, SubjectRef, Tag};
-use crate::vocabulary::{ItemKind, MatchTarget, Vocabulary};
+use crate::vocabulary::{ItemKind, MatchTarget, Vocabulary, resolve_value, value_matches};
 
 /// The result of a condition on a possibly truncated chain, in three-valued (Kleene) logic.
 ///
@@ -22,6 +22,11 @@ impl Truth {
     /// Kleene AND: `False` wins over `Unknown`, which wins over `True`.
     fn and(self, other: Self) -> Self {
         self.min(other)
+    }
+
+    /// Kleene OR: `True` wins over `Unknown`, which wins over `False`.
+    fn or(self, other: Self) -> Self {
+        self.max(other)
     }
 }
 
@@ -159,7 +164,7 @@ impl Matching<'_> {
         (Truth::True, hits)
     }
 
-    /// One `match` entry against one process. A key that is not a registered matcher item never matches; loading rejects such keys.
+    /// One `match` entry against one process; a list matches when one of its values does. A key that is not a registered matcher item never matches; loading rejects such keys.
     fn item(&self, key: &str, value: &MatchValue, index: usize) -> bool {
         let Some(ItemKind::Matcher(matcher)) = self.vocab.get(key).map(|item| item.kind()) else {
             return false;
@@ -168,18 +173,18 @@ impl Matching<'_> {
             info: &self.chain.processes()[index],
             boot_uuid: &self.chain.boot_uuid,
         };
+        let matcher = matcher.as_ref();
         match self.placeholders {
-            Placeholders::Reject => matcher.matches(target, value),
-            Placeholders::Fill => matcher
-                .resolve(value, target)
-                .is_ok_and(|resolved| matcher.matches(target, &resolved)),
+            Placeholders::Reject => value_matches(matcher, target, value),
+            Placeholders::Fill => resolve_value(matcher, value, target)
+                .is_ok_and(|resolved| value_matches(matcher, target, &resolved)),
         }
     }
 }
 
 /// Attaches the tags to each process of the chain.
 ///
-/// A tag may require other tags, on the process itself or on its ancestors, so the tags are computed on demand and memoized per (tag, process). Loading rejects cycles among the definitions; should one reach here, the tag being computed counts as `Unknown` where the cycle closes, which ends the recursion.
+/// A tag may require other tags, on the process itself or on its ancestors, so the tags are computed on demand and memoized per (definition, process). A name with several definitions is carried when one of them matches. Loading rejects cycles among the names; should one reach here, the definition being computed counts as `Unknown` where the cycle closes, which ends the recursion.
 ///
 /// A tag that is `Unknown` at some process (the chain is truncated and the missing ancestors could make it match) goes into `undecidable_tags`.
 pub(crate) fn tag_chain<'c>(
@@ -225,8 +230,8 @@ struct Tagger<'a> {
     matching: Matching<'a>,
     definitions: &'a [Tag],
     subjects: &'a [(String, Subject)],
-    /// Tag name to the position of its definition; the first definition of a name wins.
-    index: BTreeMap<&'a str, usize>,
+    /// Tag name to the positions of its definitions, in the order of the list.
+    index: BTreeMap<&'a str, Vec<usize>>,
     /// `[definition][process]`.
     states: Vec<Vec<TagState>>,
 }
@@ -238,9 +243,9 @@ impl<'a> Tagger<'a> {
         definitions: &'a [Tag],
         chain: &'a ProcessChain,
     ) -> Self {
-        let mut index = BTreeMap::new();
+        let mut index: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (position, tag) in definitions.iter().enumerate() {
-            index.entry(tag.name.as_str()).or_insert(position);
+            index.entry(tag.name.as_str()).or_default().push(position);
         }
         Self {
             matching: Matching {
@@ -269,14 +274,9 @@ impl<'a> Tagger<'a> {
             }
         }
     }
-}
 
-impl TagLookup for Tagger<'_> {
-    /// A tag that is not defined is carried by no process; loading rejects references to such tags.
-    fn tag(&mut self, name: &str, index: usize) -> Truth {
-        let Some(&position) = self.index.get(name) else {
-            return Truth::False;
-        };
+    /// Whether the definition at `position` matches the process at `index`, memoized.
+    fn definition(&mut self, position: usize, index: usize) -> Truth {
         match self.states[position][index] {
             TagState::Done(truth) => return truth,
             TagState::InProgress => return Truth::Unknown,
@@ -291,6 +291,22 @@ impl TagLookup for Tagger<'_> {
             None => Truth::False,
         };
         self.states[position][index] = TagState::Done(truth);
+        truth
+    }
+}
+
+impl TagLookup for Tagger<'_> {
+    /// The OR of the definitions of the name, in three values: `True` when one of them is `True`, `False` when all are `False`, `Unknown` otherwise. A tag that is not defined is carried by no process; loading rejects references to such tags.
+    fn tag(&mut self, name: &str, index: usize) -> Truth {
+        let count = self.index.get(name).map_or(0, Vec::len);
+        let mut truth = Truth::False;
+        for nth in 0..count {
+            let position = self.index[name][nth];
+            truth = truth.or(self.definition(position, index));
+            if truth == Truth::True {
+                break;
+            }
+        }
         truth
     }
 }
@@ -642,5 +658,16 @@ mod tests {
         assert_eq!(Unknown.and(False), False);
         assert_eq!(True.and(False), False);
         assert_eq!(Unknown.and(Unknown), Unknown);
+    }
+
+    // Kleene の OR (同名のタグの定義を束ねる): True は Unknown より、Unknown は False より強い。
+    #[test]
+    fn truth_or_is_kleene() {
+        use Truth::{False, True, Unknown};
+        assert_eq!(False.or(False), False);
+        assert_eq!(False.or(Unknown), Unknown);
+        assert_eq!(Unknown.or(True), True);
+        assert_eq!(False.or(True), True);
+        assert_eq!(Unknown.or(Unknown), Unknown);
     }
 }

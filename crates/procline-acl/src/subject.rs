@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use procline_core::{BinaryPin, Pinnable, ProcessIdentity};
 
-/// A condition on one process and on its ancestors. All parts are ANDed.
+/// A condition on one process and on its ancestors. All parts are ANDed; the only alternatives are the values of one item (`MatchValue::AnyOf`) and the several definitions of one tag name (`Tag`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Subject {
     /// Conditions on the process itself, keyed by item. Flat: a structured value stays under its own key.
@@ -45,10 +45,12 @@ pub enum MatchValue {
     Process(Pinnable<ProcessIdentity>),
     /// The identity of the code (`binary` item). Every field present is checked; each field may be a placeholder.
     Binary(BinaryPin),
+    /// Alternatives for one item, an array in JSON: the item matches when one of the values does. One level only (no list in a list), no placeholder (a grant cannot pin one value out of several), and not empty. The vocabulary checks the list and hands the item one value at a time, so an item never sees a list.
+    AnyOf(Vec<MatchValue>),
 }
 
 impl MatchValue {
-    /// The value is or holds a placeholder (`Pin`, `Process(Pin)`, or a `Binary` with a placeholder field).
+    /// The value is or holds a placeholder a grant fills in (`Pin`, `Process(Pin)`, or a `Binary` with a placeholder field). A list (`AnyOf`) holds none: a placeholder written in one is not filled in, and `validate` rejects it.
     pub(crate) fn has_placeholder(&self) -> bool {
         match self {
             Self::Pin | Self::Process(Pinnable::Pin) => true,
@@ -63,8 +65,23 @@ impl MatchValue {
             | Self::Glob(_)
             | Self::Regex(_)
             | Self::Range { .. }
-            | Self::Process(Pinnable::Value(_)) => false,
+            | Self::Process(Pinnable::Value(_))
+            | Self::AnyOf(_) => false,
         }
+    }
+
+    /// The shape rules of a list of alternatives, the same for every item: not empty, no list in it, no placeholder in it. The values themselves are the item's to check.
+    pub(crate) fn check_alternatives(values: &[MatchValue]) -> Result<(), String> {
+        if values.is_empty() {
+            return Err("an empty list matches nothing; give at least one value".to_owned());
+        }
+        if values.iter().any(|value| matches!(value, Self::AnyOf(_))) {
+            return Err("a list cannot hold a list; write the values in one list".to_owned());
+        }
+        if values.iter().any(Self::has_placeholder) {
+            return Err("a list cannot hold a placeholder (true), since a grant pins one value; pin the item without a list".to_owned());
+        }
+        Ok(())
     }
 
     /// The name of the first placeholder field of a `Binary` value, for an error that names it.
@@ -98,7 +115,7 @@ pub enum SubjectRef {
     Named(String),
 }
 
-/// A named subject; matching processes carry the tag.
+/// A named subject; matching processes carry the tag. A name may have several definitions: a process carries the tag when one of them matches it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tag {
     pub name: String,
