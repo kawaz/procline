@@ -115,7 +115,6 @@ fn walk(target: Recorded, max_ancestors: usize) -> (Vec<Recorded>, Option<Trunca
     }
 }
 
-/// Names of uids and gids, looked up once per collection.
 /// Name resolution for one collection. The representative name comes from `getpwuid_r` / `getgrgid_r`; the complete name lists come from one enumeration of the user and group databases, done the first time a complete list is needed (`CollectOptions.all_names`).
 #[derive(Default)]
 struct Names {
@@ -141,11 +140,14 @@ impl Names {
             .or_insert_with(|| sys::user_name(uid))
             .clone();
         let names = if self.all_names {
-            self.all_users
-                .get_or_insert_with(sys::all_user_names)
-                .get(&uid)
-                .cloned()
-                .unwrap_or_default()
+            with_representative(
+                self.all_users
+                    .get_or_insert_with(sys::all_user_names)
+                    .get(&uid)
+                    .cloned()
+                    .unwrap_or_default(),
+                &name,
+            )
         } else {
             name.iter().cloned().collect()
         };
@@ -163,11 +165,14 @@ impl Names {
             .or_insert_with(|| sys::group_name(gid))
             .clone();
         let names = if self.all_names {
-            self.all_groups
-                .get_or_insert_with(sys::all_group_names)
-                .get(&gid)
-                .cloned()
-                .unwrap_or_default()
+            with_representative(
+                self.all_groups
+                    .get_or_insert_with(sys::all_group_names)
+                    .get(&gid)
+                    .cloned()
+                    .unwrap_or_default(),
+                &name,
+            )
         } else {
             name.iter().cloned().collect()
         };
@@ -177,6 +182,16 @@ impl Names {
             names,
         }
     }
+}
+
+/// The enumerated names with the representative name added when the enumeration did not list it (an id that a directory service resolves but does not enumerate).
+fn with_representative(mut names: Vec<String>, representative: &Option<String>) -> Vec<String> {
+    if let Some(name) = representative
+        && !names.contains(name)
+    {
+        names.insert(0, name.clone());
+    }
+    names
 }
 
 /// uid, gid and groups of the credential. Each id carries its representative name and, with `all_names`, every name that resolves to it. `groups` is the credential's group list as the kernel reports it (at most 16, the effective gid first).
