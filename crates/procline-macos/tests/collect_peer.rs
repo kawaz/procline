@@ -13,6 +13,7 @@ fn options() -> CollectOptions {
         redaction: Redaction::default(),
         icon: false,
         digest: false,
+        signature: true,
         max_ancestors: 64,
     }
 }

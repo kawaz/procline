@@ -22,6 +22,8 @@ pub struct CollectOptions {
     pub icon: bool,
     /// Hash the contents of the executable (`ProcessInfo.digest`); off unless set.
     pub digest: bool,
+    /// Verify the code signature of every process (`ProcessInfo.code_signing`). Off leaves it `None` and makes the chain unusable for `binary` conditions, but cuts the time to well under a millisecond for a first, light pass (a Touch ID prompt that only needs names and paths).
+    pub signature: bool,
     pub max_ancestors: usize,
 }
 
@@ -32,6 +34,7 @@ impl fmt::Debug for CollectOptions {
             .field("env", &self.env)
             .field("icon", &self.icon)
             .field("digest", &self.digest)
+            .field("signature", &self.signature)
             .field("max_ancestors", &self.max_ancestors)
             .finish_non_exhaustive()
     }

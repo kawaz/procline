@@ -42,6 +42,7 @@ fn main() -> std::process::ExitCode {
         redaction: Redaction::default(),
         icon: false,
         digest,
+        signature: true,
         max_ancestors: 64,
     };
     let chain = match collect_pid(pid, &options) {

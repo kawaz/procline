@@ -1,6 +1,6 @@
 //! Measures one cold and repeated warm `collect_pid` calls without printing collected values.
 //!
-//! Usage: `cargo run --release -p procline --example bench -- [--iterations N] [--max-ancestors N] [--env] [--digest] <pid>...`
+//! Usage: `cargo run --release -p procline --example bench -- [--iterations N] [--max-ancestors N] [--env] [--digest] [--no-signature] <pid>...`
 
 #[cfg(target_os = "macos")]
 fn main() -> std::process::ExitCode {
@@ -10,13 +10,16 @@ fn main() -> std::process::ExitCode {
     use std::time::{Duration, Instant};
 
     fn usage() {
-        eprintln!("usage: bench [--iterations N] [--max-ancestors N] [--env] [--digest] <pid>...");
+        eprintln!(
+            "usage: bench [--iterations N] [--max-ancestors N] [--env] [--digest] [--no-signature] <pid>..."
+        );
     }
 
     let mut iterations = 50;
     let mut max_ancestors = 64;
     let mut env = EnvPolicy::None;
     let mut digest = false;
+    let mut signature = true;
     let mut pids = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -42,6 +45,7 @@ fn main() -> std::process::ExitCode {
             }
             "--env" => env = EnvPolicy::All,
             "--digest" => digest = true,
+            "--no-signature" => signature = false,
             "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -65,6 +69,7 @@ fn main() -> std::process::ExitCode {
         redaction: Redaction::default(),
         icon: false,
         digest,
+        signature,
         max_ancestors,
     };
     fn timed_collect(

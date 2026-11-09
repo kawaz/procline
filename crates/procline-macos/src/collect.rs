@@ -188,9 +188,13 @@ fn process_info(
     ProcessInfo {
         identity,
         credentials: credentials(&record.kinfo, names),
-        code_signing: match peer_token {
-            Some(token) => signing::code_signing_for_peer(token),
-            None => signing::code_signing(pid),
+        code_signing: if options.signature {
+            match peer_token {
+                Some(token) => signing::code_signing_for_peer(token),
+                None => signing::code_signing(pid),
+            }
+        } else {
+            None
         },
         path_meta: path
             .as_deref()
