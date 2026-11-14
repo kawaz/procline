@@ -4,9 +4,9 @@
 //!
 //! | item | exact | glob | regex | range | placeholder | class |
 //! | --- | --- | --- | --- | --- | --- | --- |
-//! | `process` | structured (`Process`) | - | - | - | yes | Strong |
-//! | `binary` | structured (`Binary`, fields) | - | - | - | per field | Strong with a signature field, Medium with `digest` alone |
-//! | `path` | absolute text | absolute | yes | - | yes | Strong when root-owned and not writable by the user, Medium otherwise or without a process |
+//! | `process` | structured (`Process`) | - | - | - | yes | by the protection: Strong / Medium / Weak |
+//! | `binary` | structured (`Binary`, fields) | - | - | - | per field | with a signature field by the protection: Strong / Medium / Weak; with `digest` alone: Medium / Medium / Weak |
+//! | `path` | absolute text | absolute | yes | - | yes | root-owned and not writable by the user, by the protection: Strong / Medium / Weak; otherwise Medium / Medium / Weak |
 //! | `cwd` | absolute text | absolute | - | - | yes | Weak |
 //! | `name` | text | yes | - | - | yes | Weak |
 //! | `tty` | text | - | - | - | yes | Weak |
@@ -16,6 +16,8 @@
 //! | `responsible` | structured (`Process`) | - | - | - | yes | Medium |
 //!
 //! `class` returns `Weak` for a value of a shape the item rejects, so an invalid value never makes a rule look stronger.
+//!
+//! The classes of `process`, `binary` and `path` follow the protection of the matched process (`Protection`, DR-0012): a process another process of the same user can attach to or inject into does not pin down its code or itself. Without a process (building a rule, loading the list) they take the class of a protected process at a root-owned path that the user cannot write, the upper bound; granting and evaluating decide the class from the matched process.
 //!
 //! A list of alternatives (`MatchValue::AnyOf`) never reaches these items: the vocabulary checks the list and calls the item once per value (`vocabulary::value_matches` and its siblings). On `argv`, a list of regexes thus matches when one of them matches one of the elements.
 
@@ -70,9 +72,13 @@ impl Matcher for ProcessMatcher {
         same_individual(pinned, &actual)
     }
 
-    fn class(&self, value: &MatchValue, _process: Option<&ProcessInfo>) -> Strength {
+    fn class(&self, value: &MatchValue, process: Option<&ProcessInfo>) -> Strength {
         match value {
-            MatchValue::Process(_) => Strength::Strong,
+            MatchValue::Process(_) => match process.map(|p| Protection::of(p, Pins::Individual)) {
+                None | Some(Protection::Protected) => Strength::Strong,
+                Some(Protection::OpenedByAuthorization) => Strength::Medium,
+                Some(Protection::Open) => Strength::Weak,
+            },
             _ => Strength::Weak,
         }
     }
@@ -188,20 +194,20 @@ impl Matcher for BinaryMatcher {
             && field_matches(&pin.cdhash, signature.map(VerifiedSignature::cdhash))
     }
 
-    fn class(&self, value: &MatchValue, _process: Option<&ProcessInfo>) -> Strength {
+    fn class(&self, value: &MatchValue, process: Option<&ProcessInfo>) -> Strength {
         let MatchValue::Binary(pin) = value else {
             return Strength::Weak;
         };
-        if pin.team_id.is_some()
+        let protection = process.map(|p| Protection::of(p, Pins::Code));
+        let signature_field = pin.team_id.is_some()
             || pin.signing_id.is_some()
             || pin.bundle_id.is_some()
-            || pin.cdhash.is_some()
-        {
-            Strength::Strong
-        } else if pin.digest.is_some() {
-            Strength::Medium
-        } else {
-            Strength::Weak
+            || pin.cdhash.is_some();
+        match protection {
+            Some(Protection::Open) => Strength::Weak,
+            _ if !signature_field && pin.digest.is_none() => Strength::Weak,
+            None | Some(Protection::Protected) if signature_field => Strength::Strong,
+            _ => Strength::Medium,
         }
     }
 
@@ -259,6 +265,58 @@ fn verified_signature(process: &ProcessInfo) -> Option<&VerifiedSignature> {
     }
 }
 
+/// The entitlement that lets a declared debugger attach after the user authorizes it.
+const GET_TASK_ALLOW: &str = "com.apple.security.get-task-allow";
+
+/// The other entitlements that relax the protection of the hardened runtime. Their effect has not been observed, so their presence counts as open.
+const OTHER_RELAXING_ENTITLEMENTS: [&str; 3] = [
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.cs.disable-executable-page-protection",
+];
+
+/// How well the matched process is protected against another process of the same user, from the kernel's dynamic status and the entitlements of its verified signature (DR-0012).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protection {
+    /// Nothing of the same user can inject into it at launch or attach to it.
+    Protected,
+    /// Attaching needs the user's authorization of a declared debugger, which is not a strong boundary.
+    OpenedByAuthorization,
+    /// The same user can inject into it or attach to it; also a process whose signature did not verify.
+    Open,
+}
+
+/// What a condition pins down: the code (`binary`, `path`), which a new launch of the same code also satisfies, or the individual (`process`), which only taking over the running process can satisfy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pins {
+    Code,
+    Individual,
+}
+
+impl Protection {
+    /// `Protected` with `CS_RUNTIME` in the status, not debugged, and none of the four relaxing entitlements (a key present counts, whatever its value); `OpenedByAuthorization` when `com.apple.security.get-task-allow` is the only one of them. For the individual, a process without `CS_RUNTIME` and without any of them is also `OpenedByAuthorization`: injecting at launch makes another process, and attaching from a process without entitlements is refused. Anything else, and a signature that did not verify, is `Open`.
+    fn of(process: &ProcessInfo, pins: Pins) -> Self {
+        let Some(signature) = verified_signature(process) else {
+            return Self::Open;
+        };
+        let has = |key: &str| {
+            signature
+                .entitlements
+                .as_ref()
+                .is_some_and(|entitlements| entitlements.contains_key(key))
+        };
+        if signature.runtime.debugged || OTHER_RELAXING_ENTITLEMENTS.into_iter().any(has) {
+            return Self::Open;
+        }
+        match (signature.runtime.hardened_runtime, has(GET_TASK_ALLOW)) {
+            (true, false) => Self::Protected,
+            (true, true) => Self::OpenedByAuthorization,
+            (false, false) if pins == Pins::Individual => Self::OpenedByAuthorization,
+            (false, _) => Self::Open,
+        }
+    }
+}
+
 /// An absent field asks nothing; a concrete field must equal the actual value; a placeholder never matches (it is resolved before matching).
 fn field_matches<T, A>(field: &Option<Pinnable<T>>, actual: Option<&A>) -> bool
 where
@@ -308,19 +366,23 @@ impl Matcher for PathMatcher {
         }
     }
 
+    /// A path the user cannot replace pins down the code as far as the process is protected; a path the user can replace (or whose owner and permissions could not be examined) is at most `Medium`.
     fn class(&self, value: &MatchValue, process: Option<&ProcessInfo>) -> Strength {
         match value {
             MatchValue::Pin
             | MatchValue::Exact(Literal::Text(_))
             | MatchValue::Glob(_)
             | MatchValue::Regex(_) => {
-                let protected = process
-                    .and_then(|p| p.path_meta)
+                let Some(process) = process else {
+                    return Strength::Strong;
+                };
+                let unreplaceable = process
+                    .path_meta
                     .is_some_and(|meta| meta.owner_uid == 0 && !meta.writable_by_user);
-                if protected {
-                    Strength::Strong
-                } else {
-                    Strength::Medium
+                match Protection::of(process, Pins::Code) {
+                    Protection::Open => Strength::Weak,
+                    Protection::Protected if unreplaceable => Strength::Strong,
+                    _ => Strength::Medium,
                 }
             }
             _ => Strength::Weak,

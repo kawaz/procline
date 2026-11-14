@@ -238,7 +238,7 @@ pub trait Matcher: Send + Sync {
 
     /// The class of the value, placeholders included (a placeholder names its field, so the class is known before the value is). Most items return a constant; `binary` returns the strongest field present (`Strong` with a signature field, `Medium` with `digest` alone).
     ///
-    /// `process` is the matched process when granting or evaluating, and `None` when building or loading. An item whose class depends on the process decides it from `process` when given, and returns the weaker class otherwise: `path` is `Strong` when its `PathMeta` shows a root-owned path the user cannot write, `Medium` otherwise or without `process`.
+    /// `process` is the matched process when granting or evaluating, and `None` when building or loading. An item whose class depends on the process decides it from `process` when given, and returns its upper bound otherwise, since granting and evaluating check the class again with the process: `process`, `binary` and `path` follow the protection of the process (its dynamic status and entitlements), and `path` also whether its `PathMeta` shows a root-owned path the user cannot write.
     fn class(&self, value: &MatchValue, process: Option<&ProcessInfo>) -> Strength;
 
     /// Checks the shape and validity of the value, placeholders included. Loading the list and `RuleBuilder::build` call it; `Err` holds the reason.

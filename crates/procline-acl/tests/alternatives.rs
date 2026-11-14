@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::{BOOT, NOW, at, chain, named, process, signature, signed, vocabulary};
 use procline_acl::{
     AllowConstraints, AncestorBuilder, AncestorMatch, BuildError, ConditionUse, Effect,
-    EvalContext, Grant, Literal, MatchValue, PinSpec, Policy, ScopeOption, ScopeRequirement,
-    Subject, SubjectBuilder, SubjectRef, Tag, TaggedChain, Target, Vocabulary,
+    EvalContext, Grant, Literal, MatchValue, PinSpec, PinnedCondition, Policy, ScopeOption,
+    ScopeRequirement, Subject, SubjectBuilder, SubjectRef, Tag, TaggedChain, Target, Vocabulary,
 };
 use procline_core::{
     BinaryField, BinaryPin, Pinnable, ProcessChain, ProcessInfo, Strength, Truncated,
@@ -203,7 +203,7 @@ fn a_list_of_binary_values_matches_either_team() {
     );
 }
 
-// grant の照合 (evaluate) も列のどれかで当たり、trace の項目は当たったものとして残る。列に無い名前の対象には当たらず既定の effect。
+// grant の照合 (evaluate) も列のどれかで当たり、trace の項目は当たったものとして残る。列に無い名前の対象には当たらず既定の effect。name の列は弱なので、評価で確かめ直す制約 (このファイルの制約の表は弱に app.unlock を求める) を満たすよう、grant は app.unlock を pin し、評価の観測値も同じ回にする。
 #[test]
 fn a_grant_with_a_list_matches_on_evaluation() {
     let vocab = vocabulary();
@@ -214,11 +214,15 @@ fn a_grant_with_a_list_matches_on_evaluation() {
         effect: Effect::Allow,
         subject: own("name", any_of(vec![text("zsh"), text("bash")])),
         targets: Vec::new(),
-        conditions: Vec::new(),
+        conditions: vec![PinnedCondition {
+            key: "app.unlock".to_owned(),
+            args: None,
+            pinned: Some(serde_json::json!(1)),
+        }],
         created_at: at(NOW),
         created_from: None,
     });
-    let ctx = EvalContext::new(at(NOW));
+    let ctx = EvalContext::new(at(NOW)).with_observed("app.unlock", Ok(Some(serde_json::json!(1))));
     let target = Target("key:k1".to_owned());
     let bash = chain(vec![named(2, "bash"), named(1, "launchd")]);
     let decision = policy.evaluate(&policy.tag(&bash), &target, &ctx);

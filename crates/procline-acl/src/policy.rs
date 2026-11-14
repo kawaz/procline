@@ -23,6 +23,8 @@ const AGE: &str = "age";
 const UNTIL: &str = "until";
 /// The consumable condition: a grant with it changes when adopted, so others are adopted first.
 const USES: &str = "uses";
+/// The trace key of the check that a matching `allow` grant is still strong enough for its scope.
+const STRENGTH: &str = "strength";
 
 /// Numbers the grants made by this process, so two grants made at the same instant get distinct ids.
 static GRANT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -127,7 +129,7 @@ impl<'v> Policy<'v> {
 
     /// Fills in the placeholders of the rule's subject from `tagged` (via `resolve_subject`), checks an `allow` rule against the `AllowConstraints`, pins the conditions, and returns the resulting grant without adding it. The application signs and stores it, then calls `add_grant`.
     ///
-    /// Each condition is pinned with the time and its observed value from `ctx`; an `age` becomes an `until` (its key too, without the arguments). The strength is decided from the target process (`path` is `Strong` or `Medium` by its `PathMeta`), and a `ScopeOption::UntilWithin` is measured from `ctx.now()`, which is also `created_at`.
+    /// Each condition is pinned with the time and its observed value from `ctx`; an `age` becomes an `until` (its key too, without the arguments). The strength is decided from the target process (`process`, `binary` and `path` by its protection, `path` also by its `PathMeta`), and a `ScopeOption::UntilWithin` is measured from `ctx.now()`, which is also `created_at`.
     ///
     /// The id is `g-<nanoseconds since the epoch>-<sequence>`, from the clock when the grant is made and a counter of this process, and differs from the ids of the grants in the policy.
     pub fn grant(
@@ -258,6 +260,8 @@ impl<'v> Policy<'v> {
 
     /// Decides the effect for the target and advances the adopted grant. Memory is not changed: the application stores `updated_grant` and replaces it with `add_grant`, and removes the grants in `expired`.
     ///
+    /// An `allow` grant that matches is adopted only when its strength, decided again from the target process, still meets the `AllowConstraints` with its conditions; otherwise it goes into `too_weak` (a build of the same identity without the protection the grant was made with).
+    ///
     /// The application serializes `evaluate`, storing and `add_grant`: evaluations running at once can consume a `uses` beyond its limit.
     pub fn evaluate(
         &self,
@@ -310,7 +314,7 @@ impl<'v> Policy<'v> {
     ///
     /// The alternatives count on the weak side (DR-0010): a list in `match` has the weakest class of its values, and a tag with several definitions the weakest of its definitions.
     ///
-    /// `process` is the target when granting and `None` when building or loading; an item whose class depends on the process (`path`) takes the weaker class without it.
+    /// `process` is the target when granting or evaluating and `None` when building or loading; an item whose class depends on the process (`process`, `binary`, `path`) takes its upper bound without it.
     pub(crate) fn own_class(&self, subject: &Subject, process: Option<&ProcessInfo>) -> Strength {
         self.own_class_of(subject, process, &mut BTreeSet::new())
             .unwrap_or(Strength::Weak)
@@ -432,12 +436,14 @@ impl<'v> Policy<'v> {
         let mut trace = Trace::default();
         let mut expired = Vec::new();
         let mut undecidable = Vec::new();
+        let mut too_weak = Vec::new();
         let mut matched: Vec<&Grant> = Vec::new();
         for grant in &self.grants {
             match self.judge(grant, tagged, target, ctx, &mut tags, &mut trace) {
                 Verdict::Expired => expired.push(grant.id.clone()),
                 Verdict::Undecidable => undecidable.push(grant.id.clone()),
                 Verdict::Unmatched => {}
+                Verdict::TooWeak => too_weak.push(grant.id.clone()),
                 Verdict::Matched => matched.push(grant),
             }
         }
@@ -461,6 +467,7 @@ impl<'v> Policy<'v> {
             updated_grant,
             expired,
             undecidable,
+            too_weak,
         }
     }
 
@@ -572,8 +579,25 @@ impl<'v> Policy<'v> {
             Truth::False => Verdict::Unmatched,
             _ if !state => Verdict::Unmatched,
             Truth::Unknown => Verdict::Undecidable,
+            Truth::True if grant.effect == Effect::Allow => {
+                let strong_enough = self.strong_enough(grant, chain);
+                record(STRENGTH.to_owned(), None, strong_enough);
+                if strong_enough {
+                    Verdict::Matched
+                } else {
+                    Verdict::TooWeak
+                }
+            }
             Truth::True => Verdict::Matched,
         }
+    }
+
+    /// Whether the conditions of an `allow` grant still meet the `AllowConstraints` for its strength decided from the target process (DR-0012). A grant made with a protected process can be matched by a build of the same identity without the protection, whose class is lower. `UntilWithin` is measured from the grant's `created_at`, as when loading it.
+    fn strong_enough(&self, grant: &Grant, chain: &ProcessChain) -> bool {
+        let class = self.own_class(&grant.subject, chain.processes().first());
+        self.constraints
+            .requirement(class)
+            .is_met(|option| grant_meets(&grant.conditions, grant.created_at, option))
     }
 
     /// The grant with each pin value replaced by its condition's `advance`; `None` when no pin value changed.
@@ -618,6 +642,8 @@ enum Advance {
 enum Verdict {
     /// A lifetime condition is false.
     Expired,
+    /// An `allow` grant that matched, but whose strength decided from the target process does not meet the constraints with its conditions.
+    TooWeak,
     /// An observation failed, or the subject could not be decided on a truncated chain.
     Undecidable,
     Unmatched,
@@ -707,6 +733,8 @@ pub struct Decision {
     ///
     /// A grant is listed when the chain is truncated, the grant has conditions on the ancestors (`ancestors`, or a tag whose definition has them, following tags that reference other tags), and it did not match: the conditions of a subject only add requirements, so a grant that matches the truncated chain also matches the whole chain and takes part. A grant is also listed when `observe` of one of its conditions failed.
     pub undecidable: Vec<String>,
+    /// Ids of the `allow` grants that matched but were not adopted, since their strength decided from the target process (its protection, DR-0012) does not meet the `AllowConstraints` with their conditions. They did not take part in deciding the effect.
+    pub too_weak: Vec<String>,
 }
 
 /// Why each grant matched or did not.
@@ -719,7 +747,7 @@ pub struct Trace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceEntry {
     pub grant_id: String,
-    /// What was checked: a condition key (false also when its observation failed), `targets`, a `match` key of the subject (at the target), `tag:<name>` for a tag of the subject (at the target), or `ancestors[<n>]` for the n-th entry of `ancestors`.
+    /// What was checked: a condition key (false also when its observation failed), `targets`, a `match` key of the subject (at the target), `tag:<name>` for a tag of the subject (at the target), `ancestors[<n>]` for the n-th entry of `ancestors`, or `strength` for whether a matching `allow` grant still meets the constraints with the strength decided from the target process.
     pub key: String,
     /// Index into the chain of the process the item matched, if any.
     pub process: Option<usize>,

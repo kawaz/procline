@@ -523,13 +523,20 @@ fn a_tag_counts_with_the_own_conditions_of_its_definition() {
     );
 }
 
-// プロセスの無い build では path は中。中の制約 (UntilWithin 7 日) は age の長さで判定し、until は時刻を grant まで見ないので通す。
+// プロセスの無い build で中になる項目 (digest だけの binary。保護の状態によらず上限が中) で、中の制約 (UntilWithin 7 日) は age の長さで判定し、until は時刻を grant まで見ないので通す。
 #[test]
 fn medium_needs_a_short_enough_age_or_an_until() {
     let vocab = vocabulary();
     let policy = policy(&vocab);
+    let digest = MatchValue::Binary(BinaryPin {
+        digest: Some(Pinnable::Pin),
+        team_id: None,
+        signing_id: None,
+        bundle_id: None,
+        cdhash: None,
+    });
     let build = |condition: Option<ConditionUse>| {
-        let builder = policy.rule_builder("r", inline(own("path", MatchValue::Pin)));
+        let builder = policy.rule_builder("r", inline(own("binary", digest.clone())));
         match condition {
             Some(condition) => builder.condition(condition),
             None => builder,
@@ -554,6 +561,30 @@ fn medium_needs_a_short_enough_age_or_an_until() {
         .is_ok()
     );
     assert!(build(Some(ConditionUse::named("app.unlock"))).is_ok());
+}
+
+// プロセスの無い build と読み込みでは、プロセスで決まる項目 (process、署名由来の field を持つ binary、path) を上限 (保護あり、root 所有で利用者が書けない場所) で検査する。path は root 所有の場所を指しうるので強で、制限なしの allow を作れる。実際のクラスは grant を作る時と評価の時に、照合したプロセスで決め直す (弱い条件の grant はそこで弾かれる)。上限で検査しないと、署名由来の field を持つ手書きの rule (「このアプリは常に allow」) が書けなくなる。
+#[test]
+fn process_dependent_items_build_at_their_upper_bound() {
+    let vocab = vocabulary();
+    let policy = policy(&vocab);
+    for (key, value) in [
+        ("path", MatchValue::Pin),
+        ("process", MatchValue::Process(Pinnable::Pin)),
+        (
+            "binary",
+            MatchValue::Binary(binary(Some(Pinnable::Pin), Some(Pinnable::Pin), None)),
+        ),
+    ] {
+        assert!(
+            policy
+                .rule_builder("r", inline(own(key, value)))
+                .allow()
+                .build()
+                .is_ok(),
+            "{key}"
+        );
+    }
 }
 
 // deny と ask には制約をかけない。弱い条件の拒否も scope なしで作れる。

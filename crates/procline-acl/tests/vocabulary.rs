@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{named, target};
+use common::{named, signature, signed, target};
 use procline_acl::{
     Condition, ConditionKind, Item, ItemKind, Literal, MatchValue, ObserveError, Observed,
     PinError, RegisterError, Vocabulary,
@@ -136,7 +136,7 @@ fn register_rejects_keys_outside_the_namespaces() {
     }
 }
 
-// class は登録された matcher の項目が値 (とプロセス) から決めたクラスを返す。条件の項目と未登録の key は None。
+// class は登録された matcher の項目が値 (とプロセス) から決めたクラスを返す。条件の項目と未登録の key は None。path はプロセスが無ければ上限の強で、プロセスがあればその PathMeta (と保護の状態) で決まる: 保護のあるプロセスでも、利用者が書ける場所なら中。
 #[test]
 fn class_delegates_to_the_matcher_item() {
     let vocab = Vocabulary::builtin();
@@ -149,17 +149,17 @@ fn class_delegates_to_the_matcher_item() {
     });
     assert_eq!(vocab.class("binary", &team, None), Some(Strength::Strong));
     let path = MatchValue::Exact(Literal::Text("/bin/zsh".to_owned()));
-    let protected = ProcessInfo {
+    let writable = ProcessInfo {
         path_meta: Some(PathMeta {
-            owner_uid: 0,
-            writable_by_user: false,
+            owner_uid: 501,
+            writable_by_user: true,
         }),
-        ..named(1, "zsh")
+        ..signed(named(1, "zsh"), signature("VWXYZ67890", "com.example.zsh"))
     };
-    assert_eq!(vocab.class("path", &path, None), Some(Strength::Medium));
+    assert_eq!(vocab.class("path", &path, None), Some(Strength::Strong));
     assert_eq!(
-        vocab.class("path", &path, Some(&protected)),
-        Some(Strength::Strong)
+        vocab.class("path", &path, Some(&writable)),
+        Some(Strength::Medium)
     );
     assert_eq!(vocab.class("until", &MatchValue::Pin, None), None);
     assert_eq!(vocab.class("app.unknown", &MatchValue::Pin, None), None);

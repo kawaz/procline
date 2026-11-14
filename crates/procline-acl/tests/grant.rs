@@ -387,15 +387,18 @@ fn a_lifetime_condition_without_an_observation_cannot_be_pinned() {
     ));
 }
 
-/// The target with an executable path and its `PathMeta`.
+/// The target with an executable path and its `PathMeta`, running protected code (a verified signature with the hardened runtime and no relaxing entitlement), so that the class of `path` follows the place alone.
 fn at_path(meta: PathMeta) -> ProcessChain {
     chain(vec![ProcessInfo {
         path_meta: Some(meta),
-        ..common::at_path(process(4), "/usr/local/bin/tool")
+        ..common::at_path(
+            signed(process(4), signature(CLAUDE_TEAM, "com.example.tool")),
+            "/usr/local/bin/tool",
+        )
     }])
 }
 
-// path のクラスは grant でプロセスから決まる: root 所有で書けない場所なら強 (制限なし)、利用者が書ける場所なら中 (7 日以内の until が要る)。
+// path のクラスは grant でプロセスから決まる: 保護のあるプロセスなら、root 所有で書けない場所は強 (制限なし)、利用者が書ける場所は中 (7 日以内の until が要る)。保護の無いプロセス (ここでは署名を検証できていない) は、同じ uid のプロセスが起動時の差し込みで満たせるので、root 所有の場所でも弱。
 #[test]
 fn path_is_classed_by_the_process_when_granting() {
     let vocab = vocabulary();
@@ -425,6 +428,21 @@ fn path_is_classed_by_the_process_when_granting() {
             .map(drop),
         Err(GrantError::ScopeTooWeak {
             class: Strength::Medium
+        })
+    );
+    let unprotected = chain(vec![ProcessInfo {
+        path_meta: Some(PathMeta {
+            owner_uid: 0,
+            writable_by_user: false,
+        }),
+        ..common::at_path(process(4), "/usr/local/bin/tool")
+    }]);
+    assert_eq!(
+        policy
+            .grant(&unscoped, &policy.tag(&unprotected), &ctx)
+            .map(drop),
+        Err(GrantError::ScopeTooWeak {
+            class: Strength::Weak
         })
     );
 }

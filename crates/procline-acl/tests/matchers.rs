@@ -570,17 +570,18 @@ fn path_exact_is_not_normalized() {
     assert!(!matcher(&vocab, "path").matches(target(&p), &text("/opt//app/bin")));
 }
 
-// クラスは収集側が取った PathMeta で決まる: root 所有で利用者が書けない場所なら強 (同じ uid のプロセスが差し替えられない)、利用者が書ける場所か root 以外の所有なら中。プロセスが無い (rule の build、読み込み) ときと PathMeta が取れなかったときは弱い側の中。
+// path のクラスは収集側が取った PathMeta と、照合したプロセスの保護の状態で決まる。保護のあるプロセスなら、root 所有で利用者が書けない場所は強 (同じ uid のプロセスが差し替えられない)、利用者が書ける場所か root 以外の所有なら中、PathMeta が取れなかった時も書ける側の中。プロセスが無い (rule の build、読み込み) 時は、root 所有の場所を指しうるので上限の強 (実際のクラスは grant と評価で決め直す)。
 #[test]
 fn path_class_follows_path_meta() {
     let vocab = Vocabulary::builtin();
     let m = matcher(&vocab, "path");
+    let protected_zsh = || signed(zsh(), signature("VWXYZ67890", "com.example.zsh"));
     let with_meta = |owner_uid, writable_by_user| ProcessInfo {
         path_meta: Some(PathMeta {
             owner_uid,
             writable_by_user,
         }),
-        ..zsh()
+        ..protected_zsh()
     };
     let value = text("/bin/zsh");
     assert_eq!(
@@ -592,11 +593,262 @@ fn path_class_follows_path_meta() {
         m.class(&value, Some(&with_meta(501, false))),
         Strength::Medium
     );
-    assert_eq!(m.class(&value, Some(&zsh())), Strength::Medium);
-    assert_eq!(m.class(&value, None), Strength::Medium);
-    assert_eq!(m.class(&MatchValue::Pin, None), Strength::Medium);
+    assert_eq!(m.class(&value, Some(&protected_zsh())), Strength::Medium);
+    assert_eq!(m.class(&value, None), Strength::Strong);
+    assert_eq!(m.class(&MatchValue::Pin, None), Strength::Strong);
     // path の形でない値 (不正) は弱。
     assert_eq!(m.class(&int(1), Some(&with_meta(0, false))), Strength::Weak);
+}
+
+// ---------- 保護の状態とクラス ----------
+//
+// process、binary、path のクラスは、照合したプロセスの保護の状態で決まる。保護の状態は、検証に成功した署名のカーネルの動的な status (hardened runtime、debugged) と entitlements から決める。
+//
+// - 保護あり: hardened runtime があり、debugged でなく、保護を緩める 4 つの entitlement (get-task-allow、cs.allow-dyld-environment-variables、cs.disable-library-validation、cs.disable-executable-page-protection) のどれも無い
+// - 認可で開く: hardened runtime があり、debugged でなく、4 つのうち get-task-allow だけがある。宣言済みのデバッガの接続が利用者の認可の段に進むだけで、同じ uid のプロセスだけでは満たせない。process に限り、hardened runtime が無く 4 つのどれも無い時もこれ (起動時の差し込みは別のプロセスを作るだけで、走っている個体の乗っ取りには entitlement を持たないプロセスからの接続が要り、それはカーネルが断る)
+// - 開いている: それ以外。debugged、get-task-allow 以外の 3 つ (観測していないので弱い側に倒す)、hardened runtime が無い (binary と path は起動時の差し込みで同じコードの身元を満たせる)、署名を検証できなかった
+//
+// クラスの表 (保護あり / 認可で開く / 開いている): 署名由来の field を持つ binary、root 所有で書けない場所の path、process は 強 / 中 / 弱。digest だけの binary と書ける場所の path は 中 / 中 / 弱。責任プロセスは保護によらず中、name / cwd / argv / uid / gid / tty は弱。
+
+/// The entitlements as a dictionary with the keys, each `true`.
+fn entitlements(keys: &[&str]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    (!keys.is_empty()).then(|| {
+        keys.iter()
+            .map(|key| ((*key).to_owned(), serde_json::Value::Bool(true)))
+            .collect()
+    })
+}
+
+const GET_TASK_ALLOW: &str = "com.apple.security.get-task-allow";
+const OTHER_RELAXING: [&str; 3] = [
+    "com.apple.security.cs.allow-dyld-environment-variables",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.cs.disable-executable-page-protection",
+];
+
+/// A process with the code signing, at a root-owned path the user cannot write (`unreplaceable`) or at a path the user can write.
+fn running(code_signing: Option<CodeSigning>, unreplaceable: bool) -> ProcessInfo {
+    ProcessInfo {
+        code_signing,
+        path_meta: Some(PathMeta {
+            owner_uid: if unreplaceable { 0 } else { 501 },
+            writable_by_user: !unreplaceable,
+        }),
+        ..at_path(process(900), "/Applications/Tool.app/Contents/MacOS/tool")
+    }
+}
+
+fn verified(hardened_runtime: bool, debugged: bool, keys: &[&str]) -> Option<CodeSigning> {
+    let mut signature = signature("VWXYZ67890", "com.example.tool");
+    signature.runtime.hardened_runtime = hardened_runtime;
+    signature.runtime.debugged = debugged;
+    signature.entitlements = entitlements(keys);
+    Some(CodeSigning::Verified(signature))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    Protected,
+    Authorization,
+    Open,
+}
+
+/// The class of the table for the state: strong items are Strong / Medium / Weak, medium items Medium / Medium / Weak.
+fn table(strong_item: bool, state: State) -> Strength {
+    match (state, strong_item) {
+        (State::Protected, true) => Strength::Strong,
+        (State::Open, _) => Strength::Weak,
+        _ => Strength::Medium,
+    }
+}
+
+// 保護の状態の決め方の全行 × 表の全セル。各ケースは (検証の結果、binary と path から見た状態、process から見た状態)。
+#[test]
+fn class_follows_the_protection_of_the_matched_process() {
+    let vocab = Vocabulary::builtin();
+    let cases: Vec<(&str, Option<CodeSigning>, State, State)> = vec![
+        (
+            "protected",
+            verified(true, false, &[]),
+            State::Protected,
+            State::Protected,
+        ),
+        (
+            "hardened, get-task-allow",
+            verified(true, false, &[GET_TASK_ALLOW]),
+            State::Authorization,
+            State::Authorization,
+        ),
+        (
+            "not hardened, no entitlement",
+            verified(false, false, &[]),
+            State::Open,
+            State::Authorization,
+        ),
+        (
+            "not hardened, get-task-allow",
+            verified(false, false, &[GET_TASK_ALLOW]),
+            State::Open,
+            State::Open,
+        ),
+        (
+            "hardened, debugged",
+            verified(true, true, &[]),
+            State::Open,
+            State::Open,
+        ),
+        (
+            "not hardened, debugged",
+            verified(false, true, &[]),
+            State::Open,
+            State::Open,
+        ),
+        (
+            "hardened, get-task-allow and another",
+            verified(true, false, &[GET_TASK_ALLOW, OTHER_RELAXING[1]]),
+            State::Open,
+            State::Open,
+        ),
+        (
+            "failed",
+            Some(CodeSigning::Failed(FailureReason::Replaced)),
+            State::Open,
+            State::Open,
+        ),
+        (
+            "unsigned",
+            Some(CodeSigning::Unsigned),
+            State::Open,
+            State::Open,
+        ),
+        (
+            "not checked",
+            Some(CodeSigning::NotChecked),
+            State::Open,
+            State::Open,
+        ),
+        ("not collected", None, State::Open, State::Open),
+    ];
+    let other_relaxing = OTHER_RELAXING.iter().map(|key| {
+        (
+            *key,
+            verified(true, false, &[key]),
+            State::Open,
+            State::Open,
+        )
+    });
+    let signature_field = MatchValue::Binary(BinaryPin {
+        team_id: Some(Pinnable::Pin),
+        signing_id: Some(Pinnable::Pin),
+        ..no_fields()
+    });
+    let digest_only = MatchValue::Binary(BinaryPin {
+        digest: Some(Pinnable::Pin),
+        ..no_fields()
+    });
+    for (name, code_signing, code_state, individual_state) in
+        cases.into_iter().chain(other_relaxing)
+    {
+        let unreplaceable = running(code_signing.clone(), true);
+        let writable = running(code_signing, false);
+        let class = |key: &str, value: &MatchValue, process: &ProcessInfo| {
+            matcher(&vocab, key).class(value, Some(process))
+        };
+        assert_eq!(
+            class("binary", &signature_field, &unreplaceable),
+            table(true, code_state),
+            "{name}: binary signature field"
+        );
+        assert_eq!(
+            class("binary", &digest_only, &unreplaceable),
+            table(false, code_state),
+            "{name}: binary digest"
+        );
+        assert_eq!(
+            class("path", &MatchValue::Pin, &unreplaceable),
+            table(true, code_state),
+            "{name}: path root-owned"
+        );
+        assert_eq!(
+            class("path", &MatchValue::Pin, &writable),
+            table(false, code_state),
+            "{name}: path writable"
+        );
+        assert_eq!(
+            class(
+                "process",
+                &MatchValue::Process(Pinnable::Pin),
+                &unreplaceable
+            ),
+            table(true, individual_state),
+            "{name}: process"
+        );
+        assert_eq!(
+            class(
+                "responsible",
+                &MatchValue::Process(Pinnable::Pin),
+                &unreplaceable
+            ),
+            Strength::Medium,
+            "{name}: responsible"
+        );
+        for key in ["name", "cwd", "argv", "uid", "gid", "tty"] {
+            assert_eq!(
+                class(key, &MatchValue::Pin, &unreplaceable),
+                Strength::Weak,
+                "{name}: {key}"
+            );
+        }
+    }
+}
+
+// entitlement は key があれば値を見ない: get-task-allow が false でも「ある」に数える。値で判定すると、意味の分からない値の扱いを決める必要が出て、弱い側に倒すという規則が崩れる。
+#[test]
+fn a_relaxing_entitlement_counts_whatever_its_value() {
+    let vocab = Vocabulary::builtin();
+    let mut signature = signature("VWXYZ67890", "com.example.tool");
+    signature.entitlements = Some(
+        [(GET_TASK_ALLOW.to_owned(), serde_json::Value::Bool(false))]
+            .into_iter()
+            .collect(),
+    );
+    let process = running(Some(CodeSigning::Verified(signature)), true);
+    let value = MatchValue::Process(Pinnable::Pin);
+    assert_eq!(
+        matcher(&vocab, "process").class(&value, Some(&process)),
+        Strength::Medium
+    );
+}
+
+// プロセスが無い (rule の build、読み込み) 時は上限: process と署名由来の field を持つ binary は強、digest だけの binary は中。
+#[test]
+fn without_a_process_the_class_is_the_upper_bound() {
+    let vocab = Vocabulary::builtin();
+    let class = |key: &str, value: MatchValue| matcher(&vocab, key).class(&value, None);
+    assert_eq!(
+        class("process", MatchValue::Process(Pinnable::Pin)),
+        Strength::Strong
+    );
+    assert_eq!(
+        class(
+            "binary",
+            MatchValue::Binary(BinaryPin {
+                team_id: Some(Pinnable::Pin),
+                ..no_fields()
+            })
+        ),
+        Strength::Strong
+    );
+    assert_eq!(
+        class(
+            "binary",
+            MatchValue::Binary(BinaryPin {
+                digest: Some(Pinnable::Pin),
+                ..no_fields()
+            })
+        ),
+        Strength::Medium
+    );
 }
 
 #[test]

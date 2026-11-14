@@ -1,4 +1,4 @@
-//! `Policy::evaluate` / `Policy::explain` (DR-0008): deny > allow > ask, the default effect, targets, the order of adoption, `uses` and `updated_grant`, `expired`, `undecidable`, and the trace.
+//! `Policy::evaluate` / `Policy::explain` (DR-0008): deny > allow > ask, the default effect, targets, the order of adoption, `uses` and `updated_grant`, `expired`, `undecidable`, `too_weak` (DR-0012), and the trace.
 
 mod common;
 
@@ -6,13 +6,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{NOW, at, chain, named, vocabulary};
+use common::{NOW, at, chain, named, process, signature, signed, vocabulary};
 use procline_acl::{
     AllowConstraints, AncestorMatch, Condition, ConditionKind, Decision, Effect, EvalContext,
-    Grant, Item, Literal, MatchValue, ObserveError, Observed, PinError, PinnedCondition, Policy,
-    ScopeRequirement, Subject, SubjectRef, Tag, Target, TraceEntry, Vocabulary,
+    Grant, Item, Literal, MatchValue, ObserveError, Observed, PinError, PinSpec, PinnedCondition,
+    Policy, ScopeOption, ScopeRequirement, Subject, SubjectBuilder, SubjectRef, Tag, Target,
+    TraceEntry, Vocabulary,
 };
-use procline_core::{ProcessChain, Truncated};
+use procline_core::{BinaryField, ProcessChain, Truncated};
 use serde_json::{Value, json};
 
 fn constraints() -> AllowConstraints {
@@ -637,4 +638,161 @@ fn the_trace_records_each_item() {
         ]
     );
     assert_eq!(decision.effect, Effect::Deny);
+}
+
+// ---------- 評価での強さの確かめ直し (too_weak) ----------
+//
+// allow の grant は、評価のたびに、自身への条件のクラスを照合したプロセス (列の先頭) の保護の状態で決め直し、その grant の scope が制約の表を満たさなければ採用しない (id を Decision.too_weak に載せる)。Team ID と signing identifier は同じ身元の別のビルド (古い版、hardened runtime なしの開発版) でも満たせるので、保護のあるビルドで作った grant に、攻撃者が持ち込んだ保護の無いビルドが当たるのを、ここで止める。deny と ask には制約をかけないので、評価の時のクラスで採否は変わらない。
+
+const TEAM: &str = "VWXYZ67890";
+const TOOL: &str = "com.example.tool";
+
+/// 強は制限なし、中は 7 日以内の until、弱は app.unlock を求める制約の表。
+fn graded() -> AllowConstraints {
+    AllowConstraints {
+        strong: ScopeRequirement::Unrestricted,
+        medium: ScopeRequirement::AnyOf(vec![ScopeOption::UntilWithin(
+            std::time::Duration::from_secs(7 * 24 * 3600),
+        )]),
+        weak: ScopeRequirement::AnyOf(vec![ScopeOption::Condition("app.unlock".to_owned())]),
+    }
+}
+
+fn graded_policy(vocab: &Vocabulary) -> Policy<'_> {
+    Policy::from_parts(
+        vocab,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        graded(),
+        Effect::Ask,
+    )
+}
+
+/// The tool with the Team ID and identifier, running with the hardened runtime switched as given and the entitlements given.
+fn tool(pid: i32, hardened_runtime: bool, entitlements: &[&str]) -> ProcessChain {
+    let mut signature = signature(TEAM, TOOL);
+    signature.runtime.hardened_runtime = hardened_runtime;
+    signature.entitlements = (!entitlements.is_empty()).then(|| {
+        entitlements
+            .iter()
+            .map(|key| ((*key).to_owned(), Value::Bool(true)))
+            .collect()
+    });
+    chain(vec![signed(process(pid), signature)])
+}
+
+/// A grant of `effect` on `binary {team_id, signing_id}`, made by `Policy::grant` with the protected build.
+fn grant_on_the_protected_build(policy: &Policy<'_>, effect: Effect) -> Grant {
+    let subject = SubjectBuilder::new()
+        .pin(
+            "binary",
+            PinSpec::Binary(vec![BinaryField::TeamId, BinaryField::SigningId]),
+        )
+        .build()
+        .unwrap();
+    let builder = policy.rule_builder("tool", SubjectRef::Inline(Box::new(subject)));
+    let rule = match effect {
+        Effect::Allow => builder.allow(),
+        Effect::Deny => builder.deny(),
+        Effect::Ask => builder.ask(),
+    }
+    .build()
+    .unwrap();
+    let protected = tool(10, true, &[]);
+    policy
+        .grant(&rule, &policy.tag(&protected), &EvalContext::new(at(NOW)))
+        .unwrap()
+}
+
+// 保護のあるビルドで作った制限なしの allow の grant: 保護のあるビルド (強) には採用され、too_weak は空。同じ Team ID と signing identifier の、hardened runtime の無いビルド (開いている、弱) と get-task-allow を持つビルド (認可で開く、中) には当たるが、scope (無し) が弱にも中にも足りないので採用されず、id が too_weak に載り、effect は既定 (ask) になる。trace には strength の項目が残る。explain も同じ判定をする。
+#[test]
+fn an_allow_grant_too_weak_for_the_matched_build_is_not_adopted() {
+    let vocab = vocabulary();
+    let mut policy = graded_policy(&vocab);
+    let grant = grant_on_the_protected_build(&policy, Effect::Allow);
+    let id = grant.id.clone();
+    policy.add_grant(grant);
+    let ctx = EvalContext::new(at(NOW));
+
+    let decision = policy.evaluate(&policy.tag(&tool(11, true, &[])), &target(), &ctx);
+    assert_eq!(decision.effect, Effect::Allow);
+    assert_eq!(decision.grant_id.as_deref(), Some(id.as_str()));
+    assert!(decision.too_weak.is_empty());
+
+    for unprotected in [
+        tool(12, false, &[]),
+        tool(13, true, &["com.apple.security.get-task-allow"]),
+    ] {
+        for decision in [
+            policy.evaluate(&policy.tag(&unprotected), &target(), &ctx),
+            policy.explain(&policy.tag(&unprotected), &target(), &ctx),
+        ] {
+            assert_eq!(decision.effect, Effect::Ask);
+            assert_eq!(decision.grant_id, None);
+            assert_eq!(decision.too_weak, vec![id.clone()]);
+            assert!(
+                decision
+                    .trace
+                    .entries
+                    .iter()
+                    .any(|entry| entry.grant_id == id && entry.key == "strength" && !entry.matched)
+            );
+        }
+    }
+}
+
+// 保護の無いビルドでも、grant の scope がそのクラスの制約を満たしていれば採用する (確かめ直すのは scope の足りなさだけで、保護の無いビルドを一律に拒むのではない)。弱の制約 (app.unlock) を持つ grant は、開いているビルドでも同じ回の間は採用される。
+#[test]
+fn an_allow_grant_with_enough_scope_is_adopted_for_an_unprotected_build() {
+    let vocab = vocabulary();
+    let mut policy = graded_policy(&vocab);
+    let mut grant = grant_on_the_protected_build(&policy, Effect::Allow);
+    grant.conditions = vec![pinned("app.unlock", None, Some(json!(7)))];
+    let id = grant.id.clone();
+    policy.add_grant(grant);
+    let ctx = EvalContext::new(at(NOW)).with_observed("app.unlock", Ok(Some(json!(7))));
+    let decision = policy.evaluate(&policy.tag(&tool(12, false, &[])), &target(), &ctx);
+    assert_eq!(decision.effect, Effect::Allow);
+    assert_eq!(decision.grant_id, Some(id));
+    assert!(decision.too_weak.is_empty());
+}
+
+// deny には制約をかけないので、保護の無いビルドにも当たって拒否する。照合は事実のまま行うので、攻撃者が保護の無いビルドを使うだけで deny を外すことはできない。allow が too_weak で外れても、同じ評価の deny は効く。
+#[test]
+fn a_deny_grant_matches_an_unprotected_build() {
+    let vocab = vocabulary();
+    let mut policy = graded_policy(&vocab);
+    let deny = grant_on_the_protected_build(&policy, Effect::Deny);
+    let deny_id = deny.id.clone();
+    let allow = grant_on_the_protected_build(&policy, Effect::Allow);
+    let allow_id = allow.id.clone();
+    policy.add_grant(deny);
+    policy.add_grant(allow);
+    let decision = policy.evaluate(
+        &policy.tag(&tool(12, false, &[])),
+        &target(),
+        &EvalContext::new(at(NOW)),
+    );
+    assert_eq!(decision.effect, Effect::Deny);
+    assert_eq!(decision.grant_id, Some(deny_id));
+    assert_eq!(decision.too_weak, vec![allow_id]);
+}
+
+// too_weak に載るのは、当たったのに採用しなかった allow の grant だけ。subject が当たらない grant (別の身元のコード) は、クラスが足りなくても too_weak に載せない (採否の対象ではないので)。
+#[test]
+fn an_allow_grant_that_does_not_match_is_not_too_weak() {
+    let vocab = vocabulary();
+    let mut policy = graded_policy(&vocab);
+    policy.add_grant(grant_on_the_protected_build(&policy, Effect::Allow));
+    let mut other = signature("ABCDE12345", "com.example.other");
+    other.runtime.hardened_runtime = false;
+    let decision = policy.evaluate(
+        &policy.tag(&chain(vec![signed(process(14), other)])),
+        &target(),
+        &EvalContext::new(at(NOW)),
+    );
+    assert_eq!(decision.effect, Effect::Ask);
+    assert!(decision.too_weak.is_empty());
 }
