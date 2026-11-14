@@ -16,7 +16,7 @@
 ### クラスの定義
 
 - クラスは、その条件が、承認した個体・コードをどれだけ特定するかで決める。3 段階(強 / 中 / 弱)と `Strength` 型はそのまま。
-- 組み込みのクラス:
+- 組み込みのクラス(照合したプロセスが保護ありの時。保護の状態での決め方は [DR-0012](DR-0012-strength-class-from-protection.md)):
 
 | クラス | 項目 |
 | --- | --- |
@@ -25,11 +25,12 @@
 | 弱 | `name`、`cwd`、`argv`、`uid`、`gid`、`tty` |
 
 - `uid` / `gid` が弱なのは、同じ uid の全プロセスが満たすので何も特定しないため。
-- クラスは `Matcher::class(value, process: Option<&ProcessInfo>) -> Strength` が決める。`digest` のクラスは値で決まる。
-- `path` のクラスは、収集側(procline-macos)が path ごとに取る属性(所有者と利用者の書き込み可否、`PathMeta`)で決まる。プロセスがある grant の作成時と評価時に強 / 中を判定し、プロセスが無い rule の build 時と読み込み時は中(弱い側)とする。
+- クラスは `Matcher::class(value, process: Option<&ProcessInfo>) -> Strength` が決める。
+- `binary`、`path`、`process` のクラスは、照合したプロセスの保護の状態(hardened runtime、保護を緩める entitlement、debugged)でも下がる。保護の無いコードは、同じ uid のプロセスが差し込みや接続で満たせるため([DR-0012](DR-0012-strength-class-from-protection.md))。
+- `path` のクラスは、収集側(procline-macos)が path ごとに取る属性(所有者と利用者の書き込み可否、`PathMeta`)と、上の保護の状態で決まる。
+- プロセスで決まるクラスは、grant の作成時と評価時に照合したプロセスで決め、プロセスが無い rule の build 時と読み込み時は上限(保護あり、root 所有で利用者が書けない場所)で制約を検査する。評価時に照合したプロセスでのクラスが grant の scope で満たせなければ、その `allow` の grant は採用しない([DR-0012](DR-0012-strength-class-from-protection.md))。
 - 「利用者が書ける場所」は、ファイル自体か、パス上のいずれかのディレクトリに利用者が書ける(差し替えられる)こと。
 - env は伏せた後の値しか持たないので照合に使えず(表示専用)、クラスを持たない。
-- 署名由来の field は、署名の identity がそのプロセスの code を表している前提で強とする。hardened runtime の無い署名済バイナリは同じ uid のプロセスが乗っ取れるが、これは脅威モデルの前提として書き、クラスの判定には使わない(乗っ取られたプロセスの識別はこの crate の範囲外)。
 
 ### 制約の表はアプリが与える
 
@@ -65,7 +66,7 @@
 
 - `uid` / `gid` だけで絞ったルールは弱になり、アプリの制約表が弱に課す scope が要る。
 - アプリは `AllowConstraints` を用意して `Policy::load_verified` に渡す必要がある。crate に既定の表は無い。
-- `path` のクラスの判定のために、収集は path の所有者と利用者の書き込み可否を取る(`ProcessInfo.path_meta`)。`path` を自身の条件に持つ rule は、build 時と読み込み時には中として制約を検査し、grant を作るときに実際のプロセスで強 / 中を決めて検査し直す。
+- `path` のクラスの判定のために、収集は path の所有者と利用者の書き込み可否を取る(`ProcessInfo.path_meta`)。`path` を自身の条件に持つ rule は、build 時と読み込み時には上限で制約を検査し、grant を作るときと評価のときに実際のプロセスで決めて検査し直す。
 - 世代を事象の値にしたので、デーモンの再起動を理由に grant が失効することはなくなる。
 - `process` の pin 値は boot UUID を持つので、再起動の後に同じ pid・unique\_id のプロセスが現れても当たらない。
 - `os.login_session` の grant は、再起動の後に同じ asid のセッションが現れても当たらない。
@@ -77,3 +78,4 @@
 - [DR-0005](DR-0005-process-identity-as-one-item.md): `process` の値の形と照合
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): 構造を持つ値の座と、強さのクラスと深さ
 - [DR-0008](DR-0008-evaluation-semantics.md): 評価の意味論(失効の確定)
+- [DR-0012](DR-0012-strength-class-from-protection.md): `binary`、`path`、`process` のクラスを照合したプロセスの保護の状態で決め、評価のたびに確かめ直す

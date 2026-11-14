@@ -27,7 +27,7 @@ register(key, impl)
 ```
 
 - `key`: 項目の名前(名前空間は下記)。
-- `impl`: 項目の種類ごとの実装。matcher の項目は `Matcher` trait(照合する `matches`、値からクラスを決める `class(&self, value, process: Option<&ProcessInfo>) -> Strength`(`process` で決まる項目は、無ければ弱い側。[DR-0009](DR-0009-strength-class-as-specificity.md))、値の妥当性を検査する `validate`、placeholder を実値に置き換える `resolve`)を実装して `Item::matcher(key, impl)` で登録する。クラスが値によらず一定の項目は、クラスを明示してクロージャで `Item::matcher_fn(key, class, f)` と登録できる。寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))で、`Item::condition(key, impl)`。
+- `impl`: 項目の種類ごとの実装。matcher の項目は `Matcher` trait(照合する `matches`、値からクラスを決める `class(&self, value, process: Option<&ProcessInfo>) -> Strength`(`process` で決まる項目は、無ければ上限で、grant の作成と評価で照合したプロセスで決め直す。[DR-0009](DR-0009-strength-class-as-specificity.md)、[DR-0012](DR-0012-strength-class-from-protection.md))、値の妥当性を検査する `validate`、placeholder を実値に置き換える `resolve`)を実装して `Item::matcher(key, impl)` で登録する。クラスが値によらず一定の項目は、クラスを明示してクロージャで `Item::matcher_fn(key, class, f)` と登録できる。寿命型と状態型は condition の trait(observe / pin / check / advance、[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))で、`Item::condition(key, impl)`。
 - 登録先は procline-acl の `Vocabulary`。matcher の項目、scope、条件が同じ器に入る。
 - 登録時の検査は key の重複と名前空間だけ。
 
@@ -82,7 +82,7 @@ key をまたぐ依存は持たない。値の形と妥当性の規則は項目�
 | クラス | その条件が、承認した個体・コードをどれだけ特定するか([DR-0009](DR-0009-strength-class-as-specificity.md)) | `Strength { Strong, Medium, Weak }` |
 | 深さ | 値がどれだけ絞るか | 値の段階、または pin した field の数(UI の概念で、crate は算出も型も持たない) |
 
-- クラスは項目が値から決める(`Matcher::class`。`path` のようにプロセスの属性で決まる項目は、grant の作成時と評価時に渡るプロセスで決め、build 時と読み込み時は弱い側)。placeholder 入りの値も受け、どの field に置かれているかで決める([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。組み込みのクラスは [DR-0009](DR-0009-strength-class-as-specificity.md) の表(`process` と署名由来の field を持つ `binary` が Strong、責任プロセスと `digest` が Medium、`path` は場所で Strong か Medium、名前、argv、cwd、uid、gid、tty が Weak)。`binary` は値にある field の最強(上の表)。
+- クラスは項目が値から決める(`Matcher::class`。`path`、`binary`、`process` のようにプロセスの属性で決まる項目は、grant の作成時と評価時に渡るプロセスで決め、build 時と読み込み時は上限)。placeholder 入りの値も受け、どの field に置かれているかで決める([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md))。組み込みのクラスは [DR-0009](DR-0009-strength-class-as-specificity.md) の表と、保護の状態での決め方は [DR-0012](DR-0012-strength-class-from-protection.md)(保護ありなら `process` と署名由来の field を持つ `binary` が Strong、責任プロセスと `digest` が Medium、`path` は場所で Strong か Medium、名前、argv、cwd、uid、gid、tty が Weak)。`binary` は値にある field の最強(上の表)。
 - `Strength` は procline-core に置く共有型。どの項目がどのクラスかは Vocabulary(登録された項目の実装)が持つので、`ProcessInfo` の各項目は Strength を持たない。
 - ルールの強さの制約はクラスで判定する(算出の規則は [DR-0003](DR-0003-rule-strength-from-own-match.md))。深さは制約に使わず、UI の並び順と、アプリが追加で課す制約の材料にする。
 

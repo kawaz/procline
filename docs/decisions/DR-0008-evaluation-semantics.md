@@ -53,6 +53,7 @@
 - `Decision.undecidable: Vec<String>` は、祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、対象自身への条件は当たったのに祖先の条件が途切れた列の中で見つからなかった grant の id。自身への条件で外れた grant は全列でも外れるので含めない。効果の決定にはそれらを使わない。
 - `TaggedChain.undecidable_tags: BTreeSet<String>` は、途切れた列で有無を判定できなかったタグ。承認画面は「付いていない」と区別して見せる。
 - 判定できない deny があるのに allow を通してよいかはアプリが決める。crate は事実を返す。
+- `allow` の grant は、自身への条件のクラスを対象のプロセスの保護の状態で決め直し、scope が制約を満たさなければ採用しない。id は `Decision.too_weak: Vec<String>` に載せる([DR-0012](DR-0012-strength-class-from-protection.md))。
 
 ### 観測の失敗
 

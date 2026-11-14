@@ -24,8 +24,8 @@ macOS is implemented first, in a form that Linux can be added to later. Linux co
 
 The adversary is another process with the same uid. root and impersonation of the evaluating app itself are out of scope (the same as cw's design document).
 
-- A signature only shows the identity of the code; it does not represent what that code executes (a script read by an interpreter, the operations of an AI agent).
-- Signature-derived fields are used on the premise that the signature's identity represents that process's code. A signed binary without hardened runtime can be hijacked by a process with the same uid, but identifying a hijacked process is outside the scope of this crate and is not used in deciding the class.
+- The signature and the protection state show that the code runs without injection or modification, and no more; they do not represent what that code executes (a script read by an interpreter, the operations of an AI agent).
+- An unprotected signed binary (no hardened runtime, or an entitlement that relaxes the protection) lets a process with the same uid launch it itself with a library injected, which makes a process that satisfies the signature-derived conditions of that code. Another build with the same identity does the same. So the class of `binary`, `path` and `process` is decided by the protection state of the matched process, and checked again at every evaluation (decision record: [DR-0012](decisions/DR-0012-strength-class-from-protection.md)).
 - Protecting the storage of the list and grants and the signing key (a key that processes with the same uid cannot use) is the app's responsibility. cw handles it with a Secure Enclave key.
 
 ## Structure
@@ -35,7 +35,7 @@ Collection is implemented in per-OS crates, while the types and matching live in
 | crate | Contents | Depends on |
 | --- | --- | --- |
 | procline | Entry point. Re-exports the core types and the collect of the build target's OS | core, a per-OS crate (only one, per target) |
-| procline-core | Types for collection results, the strength class type (`Strength`), signature trust evaluation, sanitization for display, env policy and redaction, the JSON shape | none (OS-independent) |
+| procline-core | Types for collection results, the strength class type (`Strength`), the signature verification steps and the trust mark, sanitization for display, env policy and redaction, the JSON shape | none (OS-independent) |
 | procline-macos | Collection of the peer and ancestors, code signature verification, icons, providing the `os.*` vocabulary (`procline_macos::os_items()`) | core, procline-acl, Security framework, AppKit |
 | procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, the OS-independent built-in vocabulary, rule creation and grant issuance | core |
 
@@ -61,10 +61,10 @@ These identifiers are an internal classification of collection: in the rule voca
 | Item | How to obtain (macOS) | Strength |
 | --- | --- | --- |
 | uid, gid, supplementary groups (matched numerically; for display each ID carries its representative `name` (the result of `getpwuid_r` / `getgrgid_r`) and `names`, every name that resolves to the ID. The full list needs one enumeration of the passwd / group databases, about 16 ms per collection, so it is chosen with `CollectOptions.all_names`. One ID has several names when Open Directory has duplicate uids) | `LOCAL_PEERCRED`, audit token (peer), `kinfo_proc` (ancestors. Supplementary groups are up to 16 entries of `cr_groups`, the first being the effective gid) | Weak |
-| Code signature (identifier, Team ID, cdhash, signer certificate chain, whether ad-hoc / hardened runtime / platform binary, entitlements, notarization) | `SecCodeCopyGuestWithAttributes` (audit token for the peer, pid for ancestors), `SecCodeCheckValidity`, `SecCodeCopySigningInformation` | Strong (only when verification passes) |
-| Executable path. Its owner (whether root) and whether the user can write to it are also collected (used for deciding the class. "Writable" means the user can write to the file itself or to any directory on the path) | `proc_pidpath` | Strong (a root-owned location the user cannot write to), Medium (a location the user can write to) |
-| Executable digest | sha256 of the contents of the file at the executable path | Medium (same as the path. If the file is replaced after exec, it diverges from the running image. On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively strong) |
-| app bundle (bundle ID, version) | Taken from `kSecCodeInfoPList` of `SecCodeCopySigningInformation` (the Info.plist sealed by the signature) and held in `Signature.bundle_id` (used for matching). `ProcessInfo.bundle`, read by walking up from the executable path to the `.app`, is for display | Strong (a field of `binary`. Paired with `team_id` and `signing_id`) |
+| Code signature (the result of verification; only when it succeeds: identifier, cdhash, signer certificate chain, the root and kind of the certificate, Team ID, notarization, entitlements, and hardened runtime / platform binary / debugged from the kernel's dynamic status) | `SecCodeCopyGuestWithAttributes` (audit token for the peer, pid for ancestors; when the executable cannot be read or was replaced, verified again with `kSecGuestAttributeDynamicCode` added), `SecCodeCheckValidity` (with requirements), `SecCodeCopySigningInformation` | Strong (only when verification succeeds and the process is protected; "Signature Verification and the Trust Mark", "Strength: Class and Depth") |
+| Executable path. Its owner (whether root) and whether the user can write to it are also collected (used for deciding the class. "Writable" means the user can write to the file itself or to any directory on the path) | `proc_pidpath` | Strong (a root-owned location the user cannot write to, and protected), Medium (a location the user can write to, or open with consent), Weak (open) |
+| Executable digest | sha256 of the contents of the file at the executable path | Medium (same as the path. If the file is replaced after exec, it diverges from the running image. On Linux, `/proc/<pid>/exe` points to the running inode, so it is effectively strong). Weak when the protection is open |
+| app bundle (bundle ID, version) | Taken from `kSecCodeInfoPList` of `SecCodeCopySigningInformation` (the Info.plist sealed by the signature) and held in `VerifiedSignature.bundle_id` (used for matching). `ProcessInfo.bundle`, read by walking up from the executable path to the `.app`, is for display | Strong (a field of `binary`. Paired with `team_id` and `signing_id`) |
 | Responsible process | `responsibility_get_pid_responsible_for_pid` (private API). Held as the identification of the individual process (`ProcessInfo.responsible: Option<ProcessIdentity>`) rather than a pid | Medium |
 | Process name, argv, cwd, tty | `kinfo_proc` (name and tty), `KERN_PROCARGS2` (argv), `PROC_PIDVNODEPATHINFO` (cwd). argv and cwd for the same uid or root only | Weak |
 | env | `KERN_PROCARGS2` (same uid or root only. `KERN_PROCARGS2` does not return the env of a platform binary, so it is unavailable and becomes `None` rather than empty) | Display only (it holds only the values after redaction, so it cannot be used for matching. Policy below) |
@@ -74,27 +74,44 @@ BSD information (pid, ppid, uid / gid, start time, name, tty) is taken from `kin
 
 Items that depend on SPIs or private APIs are simply left empty if unavailable; collection as a whole does not stop. On real hardware, they are verified only on the latest macOS in use. If an older version cannot provide them, they just end up empty, which fails safe.
 
-## Signature Trust and Warnings
+## Signature Verification and the Trust Mark
 
-Icons and names are "what it looks like"; the signature is "who it actually is". The core assigns each process a signature trust level and provides the evaluation used to highlight cases where the two disagree. Both pam-passkey's approval UI and cw's rule creation UI display this evaluation as is.
+Icons and names are "what it looks like"; the signature is "who it actually is". The signing information holds only facts verified with requirements (decision record: [DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md)). The core decides the trust mark from those facts in one place, and both pam-passkey's approval UI and cw's rule creation UI map that value to their display. The mark tells "whose binary this was confirmed to be"; it does not tell whether the operation is safe (`zsh` and `sudo` are always `apple`).
 
-| Trust level | State | Display |
+**Result of verification** (`CodeSigning`): `Verified` (verification succeeded), `Failed` (verification failed; the reason is "the executable was updated or replaced while it ran", "the executable is gone", or "other"), `Unsigned`, `NotChecked` (not verified within the collection's time budget). The identity (identifier, cdhash, certificates, Team ID, bundle ID, entitlements) exists only in `Verified`, and a process whose verification failed has no identity. When the executable was replaced, what can be read is the information of the file it was replaced with, not of the running code.
+
+**Verification steps**:
+
+1. Obtain the SecCode (audit token for the peer, pid for ancestors) and call `SecCodeCheckValidity` without a requirement.
+2. Only when the executable cannot be read (seeing a setuid process such as a running `sudo` from user privileges) or the executable on disk differs from the running one, verify again against the signature the kernel holds, by adding `kSecGuestAttributeDynamicCode`. If that fails too, the result is `Failed`, with the reason decided from the first return value.
+3. Check the root of the certificate with the requirement `anchor apple` (Apple's own code), then `anchor apple generic` (a certificate Apple issued). Only for a certificate Apple issued, check its kind by the extension OIDs of the certificate (requirements combined with `anchor apple generic`): Mac App Store, then Developer ID, then development. Only for Developer ID, check `notarized`.
+4. Take hardened runtime, platform binary and debugged from the kernel's dynamic status (`kSecCodeInfoStatus`). Some code is treated as hardened by the kernel while its CodeDirectory flags have no hardened runtime (a running `sudo`, for example).
+
+Every verification uses `kSecCSNoNetworkAccess` and does not use the network (no online revocation check of certificates or notarization). No static check of the whole on-disk code is done. The order of the steps, the classification of failures and the decision of the mark live in procline-core; procline-macos supplies the Security framework calls.
+
+**Trust mark** (`CodeSigning::mark()`; the first row that applies, from the top):
+
+| Mark | Condition | Suggested display |
 | --- | --- | --- |
-| platform | Apple platform binary | No warning |
-| app\_store | Distributed through the App Store (Apple signed, no notarization ticket) | No warning |
-| notarized | Developer ID signed and notarized | No warning (signer name and Team ID shown alongside) |
-| developer\_id | Developer ID signed but not notarized | ⚠️ Not notarized |
-| adhoc | ad-hoc signed (no Team ID) | ⚠️ ad-hoc |
-| unknown | Validly signed, but the chain cannot be confirmed to end at an Apple root (a self-made or third-party certificate, or it could not be evaluated) | ⚠️ Signer cannot be confirmed |
-| unsigned / invalid | Unsigned, or verification failed | ⛔ Unsigned / Invalid signature |
+| `apple` | Verified, the root is Apple itself | Green |
+| `developer_id_notarized` | The root is Apple-issued, Developer ID, notarized | No color, with the Team ID |
+| `developer_id` | The same, not notarized | No color, with the Team ID |
+| `mac_app_store` | The root is Apple-issued, Mac App Store | No color, with the Team ID |
+| `development` | The root is Apple-issued, development (Apple Development) | No color, with the Team ID |
+| `apple_issued_other` | The root is Apple-issued, none of the above | No color |
+| `other_certificate` | A certificate whose root is not Apple (self-signed, another authority) | Red |
+| `adhoc` | No certificate | Red |
+| `failed` | Verification failed | Red, with the reason |
+| `unsigned` | Unsigned | Red |
+| `not_checked` | Not verified within the time budget | Red |
 
-platform, app\_store, notarized, and developer\_id presuppose that the signature's certificate chain ends at an Apple root (`Signature.apple_anchored`, the result of `SecCodeCheckValidity` with the requirement `anchor apple generic`). The platform binary mark and the certificate names can both be written by the signer, so a signature whose chain cannot be confirmed is unknown. The decision order is: unsigned → invalid → ad-hoc → unknown if not anchored at Apple (including when it could not be evaluated) → platform → App Store → Developer ID (notarized if notarized). An ad-hoc signature has no chain, and the OS's platform binaries are not ad-hoc signed, so placing ad-hoc before the anchor check does not produce false warnings for OS binaries. The kind of certificate is decided by the string of the leaf certificate's subject summary (`Apple Mac OS Application Signing` is App Store, `Developer ID Application: …` is Developer ID) (provisional. Other Apple certificates fall back to developer\_id).
+Red is kept for "the identity could not be confirmed". Hardened runtime and platform binary are not used for the mark; they are shown as facts without a color. The Team ID is held only when the root is Apple (it is a value the signer wrote in the CodeDirectory, so it shows nothing otherwise).
 
-Since anyone can imitate icons and names, the UI always shows the signer name and Team ID side by side. There is no mechanism that compares against past approvals and warns "the signer changed". Rules and tags match on the signer, so when the signer changes they naturally stop matching.
+Since anyone can imitate icons and names, the UI shows the mark and the Team ID side by side. There is no mechanism that compares against past approvals and warns "the signer changed". Rules and tags match on the signer, so when the signer changes they naturally stop matching.
 
-Whether something is notarized can be obtained as a boolean via `SecCodeCheckValidity` with the requirement `notarized`. Signature verification is heavy for large apps, and if the ticket is not stapled it may trigger a network lookup, so results are cached keyed by cdhash with an expiry (notarization can be revoked later, so the cache is not indefinite).
+The crate does not cache verification results. Verifying one running process takes 1.8 ms at the median and does not use the network (whether a resident app caches is up to the app).
 
-**Icons**: taken from the local .app. The App Store API is not used, because it cannot return Developer ID distributed apps and would mean querying an external service about which apps are in use. The cache key is the cdhash (or the bundle ID and version if there is none). Since anyone can imitate icons, the UI always shows them alongside the signature trust level.
+**Icons**: taken from the local .app. The App Store API is not used, because it cannot return Developer ID distributed apps and would mean querying an external service about which apps are in use. The cache key is the cdhash (or the bundle ID and version if there is none). Since anyone can imitate icons, the UI always shows them alongside the trust mark.
 
 ## env, Sanitization, and Collection Consistency
 
@@ -357,11 +374,11 @@ An item or field whose rule value is a placeholder (`true`) becomes an exact mat
 
 The item checks the validity of values (`Matcher::validate`, called by loading and the builder), and the item is also what replaces a placeholder with the actual value (`Matcher::resolve`; `ResolveError::ValueUnavailable` if the process has no value).
 
-`process`, `binary`, and `os.session` are structured values and allow exact match only (every field of `binary` is exact match). Signature conditions are considered a match only when signature verification passed. An ad-hoc signature has an empty Team ID, so it never matches a Team ID condition.
+`process`, `binary`, and `os.session` are structured values and allow exact match only (every field of `binary` is exact match). Signature conditions are considered a match only when signature verification succeeded (`CodeSigning::Verified`). The Team ID is held only for a certificate whose root is Apple, so an ad-hoc signature and a signature with a certificate not from Apple never match a Team ID condition.
 
-**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). In a rule it is written as `true` (pin the approved individual process) or a concrete composite value, and in a grant it becomes a composite value that `Policy::grant` gives every identifier obtainable at that moment plus the boot UUID (`kern.bootsessionuuid`) (e.g. `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares every identifier present on both sides, and matches only when all of them match. At worst it checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong. It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process". `process` is the identity of the individual process, and it stays the same individual even when exec changes the code inside it. The identity of the code is carried by `binary`, so to also fix the code, pin `binary` together with it.
+**`process`** is the item meaning "this individual process" (decision record: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md)). In a rule it is written as `true` (pin the approved individual process) or a concrete composite value, and in a grant it becomes a composite value that `Policy::grant` gives every identifier obtainable at that moment plus the boot UUID (`kern.bootsessionuuid`) (e.g. `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`). Matching compares every identifier present on both sides, and matches only when all of them match. At worst it checks that the pair of pid and start time matches. The person writing the rule does not care which identifier was compared. Its class is Strong, and goes down with the protection state of the matched process ("Strength: Class and Depth"). It can be written both in `match` and inside `ancestors`, so "descendants of the shell in this terminal tab" can be expressed. Once the pinned process exits, it is no longer in the sequence and the grant stops matching. This expresses the lifetime of a process in the sequence. Deleting grants that point to exited processes is the responsibility of cleanup (the app). The UI shows it as the single choice "only this process". `process` is the identity of the individual process, and it stays the same individual even when exec changes the code inside it. The identity of the code is carried by `binary`, so to also fix the code, pin `binary` together with it.
 
-**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Each field value is a string or the placeholder `true`, and in a grant every one is a string. `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature and the Info.plist sealed by the signature as is (`bundle_id` is matched against `Signature.bundle_id`). No field takes a boolean value, so `true` only has the meaning of a placeholder. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification passed. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`. Apple's OS binaries (Terminal.app, `/bin/zsh`, etc.) have no Team ID, so they are written with a root-owned `path` rather than `binary` (Strong).
+**`binary`** is the item meaning "this process's code". Its value is a composite of any number of fields, `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` (e.g. `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`). Each field value is a string or the placeholder `true`, and in a grant every one is a string. `digest` is `sha256:<hex>`, `cdhash` is hex, and `team_id`, `signing_id`, and `bundle_id` are the values from the signature and the Info.plist sealed by the signature as is (matched against `team_id()`, `signing_id()` (the identifier), `bundle_id` and `cdhash` of `VerifiedSignature`; `cdhash` is `kSecCodeInfoUnique` of the verified code, the cdhash of the running code). No field takes a boolean value, so `true` only has the meaning of a placeholder. Matching verifies each field present in the value, and matches only when all of them match (AND). Signature-derived fields (`team_id`, `signing_id`, `bundle_id`, `cdhash`) are considered a match only when signature verification succeeded. A valid signature is a property of matching the signature-derived fields, so there is no item that represents only that. Its class is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`, and it goes down with the protection state of the matched process ("Strength: Class and Depth"). Apple's OS binaries (Terminal.app, `/bin/zsh`, etc.) have no Team ID, so they are written with a root-owned `path` rather than `binary` (Strong).
 
 The validity rules for values are closed within `binary`.
 
@@ -419,17 +436,30 @@ An item's strength is expressed on two axes.
 | class | How much the condition pins down the approved individual process or code (the strength in the "Collected Information" tables) | Strong / Medium / Weak |
 | depth | How narrowly the value constrains | The level of the value, or the number of pinned fields |
 
-The definition of the class and the decision record for the built-in classes are in [DR-0009](decisions/DR-0009-strength-class-as-specificity.md).
+The definition of the class and the decision records for the built-in classes are in [DR-0009](decisions/DR-0009-strength-class-as-specificity.md) and [DR-0012](decisions/DR-0012-strength-class-from-protection.md).
 
-| Class | Built-in items |
+The class of `binary`, `path` and `process` is decided by the protection state of the matched process. The protection state is decided from the kernel's dynamic status and the entitlements of the verified signature.
+
+| Protection state | Condition |
 | --- | --- |
-| Strong | `process`, `binary` with a signature-derived field, `path` in a root-owned location the user cannot write to |
-| Medium | Responsible process, `digest` (a `binary` with only it), `path` in a location the user can write to |
-| Weak | `name`, `cwd`, `argv`, `uid`, `gid`, `tty` |
+| protected | The status has hardened runtime (`CS_RUNTIME`), the process is not debugged, and none of the 4 entitlements that relax the protection (`get-task-allow`, `cs.allow-dyld-environment-variables`, `cs.disable-library-validation`, `cs.disable-executable-page-protection`) is present |
+| open with consent | The status has hardened runtime, the process is not debugged, and of the 4 only `get-task-allow` is present. For `process`, also when there is no hardened runtime and none of the 4 is present |
+| open | Anything else (including when the signature could not be verified) |
 
-- The class is decided by the item from the value (`Matcher::class(value, process)`). It also accepts rule values containing placeholders, and decides by which fields they are placed in (`{"binary": {"team_id": true}}` is Strong). `process` is the process being matched; it is passed when creating a grant and at evaluation, and is absent (`None`) at rule build and at load time.
-- The class of `binary` is the strongest among the fields present in the value: Strong if there is a signature-derived field, Medium if there is only `digest`.
-- The class of `path` is decided by the attributes the collection side (procline-macos) obtains per path (the owner and whether the user can write to it, `PathMeta`). Strong / Medium is decided when creating a grant and at evaluation, where there is a process; at rule build and load time, where there is no process, it is Medium (the weaker side). "A location the user can write to" means the user can write to (replace) the file itself or any directory on the path.
+| Item | protected | open with consent | open |
+| --- | --- | --- | --- |
+| `process` | Strong | Medium | Weak |
+| `binary` with a signature-derived field | Strong | Medium | Weak |
+| `path` in a root-owned location the user cannot write to | Strong | Medium | Weak |
+| `digest` (a `binary` with only it), `path` in a location the user can write to | Medium | Medium | Weak |
+| Responsible process | Medium | Medium | Medium |
+| `name`, `cwd`, `argv`, `uid`, `gid`, `tty` | Weak | Weak | Weak |
+
+- An unprotected signed binary lets a process with the same uid launch it itself with a library injected, which makes a process that satisfies the signature-derived conditions of that code (another build with the same identity does too). "Open with consent" is the state where a declared debugger's request reaches the user's authorization, and that authorization shows neither the requester nor the target, so it is not a strong boundary. The entitlements not observed (the 3 other than `get-task-allow`) fall to the open side.
+- The class is decided by the item from the value (`Matcher::class(value, process)`). It also accepts rule values containing placeholders, and decides by which fields they are placed in (`{"binary": {"team_id": true}}` is Strong when protected). `process` is the process being matched; it is passed when creating a grant and at evaluation, and is absent (`None`) at rule build and at load time.
+- At rule build and load time, where there is no process, the constraints are checked with the upper bound (protected, a root-owned location the user cannot write to). When creating a grant and at evaluation, the actual class is decided with the matched process (checking again at evaluation is in "Evaluation").
+- The class of `binary` is the strongest among the fields present in the value.
+- The class of `path` is decided by the attributes the collection side (procline-macos) obtains per path (the owner and whether the user can write to it, `PathMeta`) and by the protection state. "A location the user can write to" means the user can write to (replace) the file itself or any directory on the path.
 - `uid` and `gid` are Weak because every process with the same uid satisfies them, so they identify nothing.
 - The class of a list of values is the weakest among the classes of its elements. A process passes if it matches any one of them, so the class falls to the weaker side (`{"binary": [{"team_id": "AAAAAAAAAA"}, {"digest": "sha256:…"}]}` is Medium). Several definitions of a tag are the same: the strength of a tag used as a condition is the weakest of its definitions ("Rule Creation and Strength Constraints").
 - Which item has which class is held by the vocabulary (the implementations of the registered items). Items in the collection result do not carry a strength.
@@ -443,6 +473,7 @@ The target of evaluation is grants (decision record: [DR-0008](decisions/DR-0008
    - A grant that uses a condition whose observation failed (that key in `EvalContext` is `Err(ObserveError)`) cannot be decided in that evaluation. Its id is put in `Decision.undecidable`, and it is neither allowed nor expired.
    - A grant whose lifetime `check` became false has its expiry settled on the spot in that evaluation, and its id is put in `Decision.expired`. Once settled, an expiry never comes back (it is not revived by the clock going backwards or by an observation recovering).
    - Exclude grants whose targets do not match the target.
+   - For an `allow` grant, decide the class of its own conditions again with the target process (its protection state). If the grant's scopes do not meet the constraint table's condition for that class, the grant is not adopted, and its id is put in `Decision.too_weak` (decision record: [DR-0012](decisions/DR-0012-strength-class-from-protection.md)). This stops an unprotected build with the same identity, brought in by an attacker, from matching a grant made with a protected build.
    - Match each grant's subject and take the state `check`. The subject's `match` and `tags` are matched against the target itself, and `ancestors` is matched against the sequence as a subsequence, greedily from the near side.
    - When the sequence is cut off (`ProcessChain.truncated` is `Some`): the subject's conditions (`match` ∧ `tags` ∧ the `ancestors` subsequence) are all positive conditions, and extending the sequence never turns "matched" into "did not match" (monotone). So a grant that matched on the cut-off sequence also matches on the full sequence, and it is used in deciding the effect. A grant that has conditions on ancestors (`ancestors`, or a tag whose definition has `ancestors`; when a tag refers to another tag, this is followed transitively) whose conditions on the target itself (`match` and the own part of `tags`) matched but whose ancestor conditions were not found within the cut-off sequence is undecidable (a grant whose own conditions failed fails on the full sequence too, so it is not treated as undecidable). Its id is put in `Decision.undecidable`, and it is not used in deciding the effect. A grant whose subject matched but whose state `check` is false is false on the full sequence too, so it is not treated as undecidable.
 2. Decide the effect. The order is deny > allow > ask.
@@ -580,11 +611,11 @@ The constraint table (the scope conditions allowed for `allow` per class, `Allow
 
 - The shape of the constraint table is three entries, `strong` / `medium` / `weak` (all required), each holding either `Unrestricted` (no restriction) or `AnyOf([...])` (satisfying any one of the listed options is enough). An element of `AnyOf` is either `Condition(key)` (contains a condition with that key) or `UntilWithin(duration)` (expires within that duration).
 - Time constraints are expressed with `ScopeOption::UntilWithin`. `Condition("age")` / `Condition("until")` can also be written, but on the grant side `age` has been converted to `until`, so `Condition("age")` is never satisfied by a grant.
-- When it is judged: the length of `age` and the presence of lifetime conditions are judged at rule build (and at load time), and the absolute time of `until` is judged when creating the grant (against now at that moment). The reference time for `UntilWithin` in `Policy::load_grant` is the grant's `created_at`. The class of `path` being decided by the process also happens when creating the grant (at build time it is judged as Medium).
+- When it is judged: the length of `age` and the presence of lifetime conditions are judged at rule build (and at load time), and the absolute time of `until` is judged when creating the grant (against now at that moment). The reference time for `UntilWithin` in `Policy::load_grant` is the grant's `created_at`. Classes decided by the process (`binary`, `path`, `process`) are judged with the upper bound at build and load time, and decided with the matched process when creating the grant and at evaluation (an `allow` grant that does not meet them at evaluation is not adopted; "Evaluation").
 
 | Rule strength (class) | Scopes allowed for `allow` (an example of constraints given by the app) |
 | --- | --- |
-| Strong (signature, `process`, `path` in a root-owned location the user cannot write to) | No restriction |
+| Strong (the signature of a protected process, `process`, `path` in a root-owned location the user cannot write to) | No restriction |
 | Medium (responsible process, `digest`, `path` in a location the user can write to) | `until` within 7 days, or includes an epoch scope |
 | Weak (name, cwd, argv, uid, gid, tty) | Includes an epoch scope (`os.session`, `app.unlock`, etc.) |
 
@@ -616,7 +647,14 @@ Cleanup (deleting grants that are no longer needed) is the app's responsibility,
 
 The entry points are collection, evaluation, rule creation, and grant issuance. Vocabulary extension registers matcher items, scopes, and conditions with the same `register`.
 
-In JSON, byte strings (such as certificate DER) are written as base64url (without padding), and enum values are written in snake\_case. `code_signing` is `{"state": "signed", …}` or `{"state": "unsigned"}`.
+In JSON, byte strings (such as certificate DER) are written as base64url (without padding), and enum values are written in snake\_case. `code_signing` copies the shape of the type, split by `state` (`verified` / `failed` / `unsigned` / `not_checked`), and adds `mark` (the trust mark). Elements that do not apply have no key, and loading decides `mark` again from the facts and fails when it differs ([DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md)).
+
+```json
+{"state": "verified", "mark": "developer_id_notarized", "identifier": "com.example.app", "cdhash": "36e6…",
+ "signer": {"kind": "certificate", "root": {"kind": "apple_issued", "team_id": "ABCDE12345", "certificate_kind": {"kind": "developer_id", "notarized": true}}, "chain": [{"summary": "…", "der": "…"}]},
+ "runtime": {"hardened_runtime": true, "platform_binary": false, "debugged": false}, "entitlements": {…}, "bundle_id": "com.example.app", "verified_from": "disk"}
+{"state": "failed", "mark": "failed", "failure": "replaced"}
+```
 
 ```rust
 // Collection (procline-macos)
@@ -631,10 +669,13 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // chain.processes()[0] is the target, the rest are ancestors
 // chain.truncated: Option<Truncated>. The reason the sequence was cut off: enum Truncated { MaxAncestors, AncestorExited, Unavailable }
 // chain.boot_uuid: String. The collection side obtains kern.bootsessionuuid
-// p.signature_trust(): Platform / AppStore / Notarized / DeveloperId / AdHoc / Unknown / Unsigned / Invalid
+// p.code_signing: Option<CodeSigning> (None: not collected). CodeSigning { Verified(VerifiedSignature), Failed(FailureReason), Unsigned, NotChecked }. FailureReason { Replaced, Missing, Other }
+// VerifiedSignature { identifier, cdhash, signer: Signer, runtime: RuntimeState, entitlements, bundle_id, verified_from: VerifiedFrom }. Signer { AdHoc { linker_signed }, Certificate { chain, root: Root } }. Root { Apple { team_id }, AppleIssued { team_id, kind: CertificateKind }, Other }. CertificateKind { DeveloperId { notarized }, MacAppStore, Development, Other }. RuntimeState { hardened_runtime, platform_binary, debugged } (the kernel's dynamic status). VerifiedFrom { Disk, RunningCode }
+// code_signing.mark(): Apple / DeveloperIdNotarized / DeveloperId / MacAppStore / Development / AppleIssuedOther / OtherCertificate / Adhoc / Failed / Unsigned / NotChecked. VerifiedSignature::team_id() returns a value only when the root is Apple
+// CollectOptions.signature_budget: Option<Duration>. Once the budget is spent, processes whose verification has not started are NotChecked
 // ProcessInfo holds digest: Option<String> and path_meta: Option<PathMeta>. PathMeta { owner_uid: u32, writable_by_user: bool } (used for deciding the class of path)
 // ProcessInfo.responsible: Option<ProcessIdentity>. The responsible process is held as the identification of the individual process rather than a pid
-// Signature.bundle_id: Option<String> (from kSecCodeInfoPList. Used for matching; what BinaryPin.bundle_id is matched against). ProcessInfo.bundle (read by walking up from the executable path to the .app) is for display
+// VerifiedSignature.bundle_id: Option<String> (from kSecCodeInfoPList. Used for matching; what BinaryPin.bundle_id is matched against). ProcessInfo.bundle (read by walking up from the executable path to the .app) is for display
 // ProcessIdentity (the pinned value of process) holds boot_uuid: String. Created with Identity::process_identity(&self, boot_uuid), passing ProcessChain.boot_uuid as boot_uuid
 
 // Strength (shared types in procline-core). Which item has which class is held by Vocabulary, not by ProcessInfo items. depth is a UI concept and has no type
@@ -656,7 +697,7 @@ for item in procline_macos::os_items() {             // os.* items (os.session /
 // matcher items, lifetime, and state items are added with the same register. Duplicate keys and namespace violations are errors
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // items whose class is constant regardless of the value are registered with a closure, stating the class explicitly
 // items whose class changes with the value implement the Matcher trait and are registered with Item::matcher(key, impl)
-//   matches(&self, target: &MatchTarget, value) -> bool (MatchTarget { info: &ProcessInfo, boot_uuid: &str } = one process of the collected snapshot; matching never touches the OS. An item never sees the ancestors, and boot_uuid is the only thing it needs from the chain) / class(&self, value, process: Option<&ProcessInfo>) -> Strength (in build / load where there is no process, items decided by the process are the weaker side) / validate(&self, value: &MatchValue) -> Result<(), String> (validity of the value. Called by loading and the builder). value is never a list of values (AnyOf; the vocabulary hands the elements one by one)
+//   matches(&self, target: &MatchTarget, value) -> bool (MatchTarget { info: &ProcessInfo, boot_uuid: &str } = one process of the collected snapshot; matching never touches the OS. An item never sees the ancestors, and boot_uuid is the only thing it needs from the chain) / class(&self, value, process: Option<&ProcessInfo>) -> Strength (in build / load where there is no process, items decided by the process take the upper bound; creating a grant and evaluation decide again with the matched process) / validate(&self, value: &MatchValue) -> Result<(), String> (validity of the value. Called by loading and the builder). value is never a list of values (AnyOf; the vocabulary hands the elements one by one)
 //   resolve(&self, value: &MatchValue, target: &MatchTarget) -> Result<MatchValue, ResolveError> (placeholder to actual value. ResolveError::ValueUnavailable { field: Option<String> })
 // vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: the class the item decided from the value (and the process). A list of values is the weakest of its elements (None for unregistered keys and condition items)
 vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // a value implementing Condition (lifetime)
@@ -711,6 +752,7 @@ pub struct Decision {
     pub updated_grant: Option<Grant>,    // the new version of a grant changed by advance. Always None for explain
     pub expired: Vec<String>,            // ids of grants whose expiry was settled in this evaluation. The app deletes those from evaluate (those from explain are not used for deletion)
     pub undecidable: Vec<String>,        // ids of undecidable grants (those with conditions on ancestors that did not match on a cut-off sequence, and those using a condition whose observation failed). Not used in deciding the effect
+    pub too_weak: Vec<String>,           // ids of allow grants not adopted because, with the class decided again from the target process's protection state, their scopes do not meet the constraints (DR-0012)
 }
 
 // The shape of a subject (procline-acl)
