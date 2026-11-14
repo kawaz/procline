@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Child, Command, Stdio};
 
-use procline_core::{EnvPolicy, Redaction};
+use procline_core::{CodeSigning, EnvPolicy, Mark, Redaction, VerifiedFrom};
 use procline_macos::{CollectError, CollectOptions, collect_peer, collect_pid};
 
 fn options() -> CollectOptions {
@@ -14,6 +14,7 @@ fn options() -> CollectOptions {
         icon: false,
         digest: false,
         signature: true,
+        signature_budget: None,
         all_names: false,
         max_ancestors: 64,
     }
@@ -91,8 +92,52 @@ fn listener_identifies_child_process() {
     assert_eq!(peer.identity.pid, i32::try_from(child.0.id()).unwrap());
     assert!(peer.identity.audit_token.is_some());
     assert!(peer.identity.asid.is_some());
-    assert!(peer.code_signing.is_some());
+    assert_eq!(
+        peer.code_signing.as_ref().map(CodeSigning::mark),
+        Some(Mark::Adhoc)
+    );
     assert_ne!(peer.identity.pid, own_pid());
+}
+
+// 接続相手の実行ファイルを、接続の後に別のファイル (/usr/bin/true のコピー) で rename して差し替える。通常の方法はディスク上の差し替えた先を見て -67034 で失敗するので、audit token のまま kSecGuestAttributeDynamicCode を足して、カーネルが持つ走っているコードの署名で検証し直す。結果は差し替える前のコード (このテストのバイナリのコピー) の身元で、verified_from は running_code。差し替えた先 (com.apple.true) の身元を接続相手の身元として返さないこと。コピーは一時ディレクトリに置き、テストの終わりに消える。
+#[test]
+fn replaced_peer_is_verified_from_the_running_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("peer.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let copy = dir.path().join("peer-copy");
+    std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    let child = Spawned(
+        Command::new(&copy)
+            .args(["--exact", "connect_helper"])
+            .env_clear()
+            .env(SOCKET_PATH, &socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (mut socket, _) = listener.accept().unwrap();
+    let mut ready = [0];
+    socket.read_exact(&mut ready).unwrap();
+    let replacement = dir.path().join("replacement");
+    std::fs::copy("/usr/bin/true", &replacement).unwrap();
+    std::fs::rename(&replacement, &copy).unwrap();
+
+    let chain = collect_peer(&socket, &options()).unwrap();
+    let peer = &chain.processes()[0];
+    assert_eq!(peer.identity.pid, i32::try_from(child.0.id()).unwrap());
+    let Some(CodeSigning::Verified(signature)) = &peer.code_signing else {
+        panic!("expected a verified signature: {:?}", peer.code_signing);
+    };
+    assert_eq!(signature.verified_from, VerifiedFrom::RunningCode);
+    let own = collect_pid(own_pid(), &options()).unwrap();
+    let Some(CodeSigning::Verified(own)) = &own.processes()[0].code_signing else {
+        panic!("expected the own signature to verify");
+    };
+    assert_eq!(signature.identifier, own.identifier);
+    assert_eq!(signature.cdhash, own.cdhash);
+    assert_ne!(signature.identifier, "com.apple.true");
 }
 
 // A socket that is not connected has no peer audit token and must return Peer instead of returning an unrelated process or an empty chain.

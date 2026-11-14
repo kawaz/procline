@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use procline_acl::{Condition, ItemKind, MatchTarget, Matcher, Vocabulary};
 use procline_core::{
-    CdHash, CodeSigning, Credentials, Identity, NamedId, ProcessChain, ProcessInfo, Signature,
-    SignatureValidity, StartTime,
+    CdHash, CertificateKind, CodeSigning, Credentials, Identity, NamedId, ProcessChain,
+    ProcessInfo, Root, RuntimeState, Signer, StartTime, VerifiedFrom, VerifiedSignature,
 };
 
 /// The boot UUID of every synthetic chain.
@@ -53,28 +53,33 @@ pub fn named(pid: i32, name: &str) -> ProcessInfo {
     }
 }
 
-/// A verified Developer ID style signature with the given Team ID and signing identifier.
-pub fn signature(team_id: &str, signing_id: &str) -> Signature {
-    Signature {
-        validity: SignatureValidity::Valid,
-        signing_id: Some(signing_id.to_owned()),
-        team_id: Some(team_id.to_owned()),
-        bundle_id: None,
-        cdhash: Some(CdHash([0xab; 20])),
-        certificates: Vec::new(),
-        adhoc: false,
-        hardened_runtime: true,
-        platform: false,
+/// A verified, notarized Developer ID signature with the given Team ID and signing identifier, running with the hardened runtime and no entitlement (protected).
+pub fn signature(team_id: &str, signing_id: &str) -> VerifiedSignature {
+    VerifiedSignature {
+        identifier: signing_id.to_owned(),
+        cdhash: CdHash([0xab; 20]),
+        signer: Signer::Certificate {
+            chain: Vec::new(),
+            root: Root::AppleIssued {
+                team_id: Some(team_id.to_owned()),
+                kind: CertificateKind::DeveloperId { notarized: true },
+            },
+        },
+        runtime: RuntimeState {
+            hardened_runtime: true,
+            platform_binary: false,
+            debugged: false,
+        },
         entitlements: None,
-        notarized: Some(true),
-        apple_anchored: Some(true),
+        bundle_id: None,
+        verified_from: VerifiedFrom::Disk,
     }
 }
 
-/// The process signed with the signature.
-pub fn signed(process: ProcessInfo, signature: Signature) -> ProcessInfo {
+/// The process with the verified signature.
+pub fn signed(process: ProcessInfo, signature: VerifiedSignature) -> ProcessInfo {
     ProcessInfo {
-        code_signing: Some(CodeSigning::Signed(signature)),
+        code_signing: Some(CodeSigning::Verified(signature)),
         ..process
     }
 }

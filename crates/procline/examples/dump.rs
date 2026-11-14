@@ -45,6 +45,7 @@ fn main() -> std::process::ExitCode {
         icon: false,
         digest,
         signature: true,
+        signature_budget: None,
         all_names,
         max_ancestors: 64,
     };

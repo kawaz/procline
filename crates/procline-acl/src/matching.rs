@@ -356,8 +356,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use procline_core::{
-        CodeSigning, Identity, Pinnable, ProcessChain, ProcessInfo, Signature, SignatureValidity,
-        Truncated,
+        CdHash, CertificateKind, CodeSigning, Identity, Pinnable, ProcessChain, ProcessInfo, Root,
+        RuntimeState, Signer, Truncated, VerifiedFrom, VerifiedSignature,
     };
 
     use super::{Matching, Placeholders, SubjectMatch, TagLookup, Truth};
@@ -401,19 +401,24 @@ mod tests {
 
     fn signed(pid: i32, name: &str, team_id: &str, signing_id: &str) -> ProcessInfo {
         ProcessInfo {
-            code_signing: Some(CodeSigning::Signed(Signature {
-                validity: SignatureValidity::Valid,
-                signing_id: Some(signing_id.to_owned()),
-                team_id: Some(team_id.to_owned()),
-                bundle_id: None,
-                cdhash: None,
-                certificates: Vec::new(),
-                adhoc: false,
-                hardened_runtime: true,
-                platform: false,
+            code_signing: Some(CodeSigning::Verified(VerifiedSignature {
+                identifier: signing_id.to_owned(),
+                cdhash: CdHash([0; 20]),
+                signer: Signer::Certificate {
+                    chain: Vec::new(),
+                    root: Root::AppleIssued {
+                        team_id: Some(team_id.to_owned()),
+                        kind: CertificateKind::DeveloperId { notarized: true },
+                    },
+                },
+                runtime: RuntimeState {
+                    hardened_runtime: true,
+                    platform_binary: false,
+                    debugged: false,
+                },
                 entitlements: None,
-                notarized: Some(true),
-                apple_anchored: Some(true),
+                bundle_id: None,
+                verified_from: VerifiedFrom::Disk,
             })),
             ..process(pid, name)
         }

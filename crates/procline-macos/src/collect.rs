@@ -5,12 +5,13 @@ use std::io;
 use std::os::fd::BorrowedFd;
 
 use procline_core::{
-    AuditToken, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity, ProcessInfo,
-    StartTime, Truncated,
+    AuditToken, CodeSigning, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity,
+    ProcessInfo, StartTime, Truncated,
 };
 
 use crate::sys::peer;
 use crate::sys::proc::{self as sys, KinfoProc, UniqueIds};
+use crate::sys::security::Guest;
 use crate::{CollectError, CollectOptions, file, path_meta, procargs, signing};
 
 /// The identifiers of one process, recorded before anything else about it is read.
@@ -210,6 +211,7 @@ fn process_info(
     options: &CollectOptions,
     names: &mut Names,
     peer_token: Option<AuditToken>,
+    code_signing: Option<CodeSigning>,
 ) -> ProcessInfo {
     let pid = record.pid;
     let path = sys::pid_path(pid).ok();
@@ -236,14 +238,7 @@ fn process_info(
     ProcessInfo {
         identity,
         credentials: credentials(&record.kinfo, names),
-        code_signing: if options.signature {
-            match peer_token {
-                Some(token) => signing::code_signing_for_peer(token),
-                None => signing::code_signing(pid),
-            }
-        } else {
-            None
-        },
+        code_signing,
         path_meta: path
             .as_deref()
             .and_then(|p| path_meta::path_meta(p, record.kinfo.uid, &record.kinfo.groups)),
@@ -320,16 +315,35 @@ fn collect_recorded(
     let pid = target.pid;
     let (records, mut truncated) = walk(target, options.max_ancestors);
     let mut names = Names::new(options.all_names);
+    // The peer's signature is addressed by its audit token, so a process that took over its pid is not verified in its place.
+    let signatures: Vec<Option<CodeSigning>> = if options.signature {
+        let guests: Vec<Guest> = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| match peer_token {
+                Some(token) if index == 0 => Guest::AuditToken(token),
+                _ => Guest::Pid(record.pid),
+            })
+            .collect();
+        signing::verify_chain(&guests, options.signature_budget)
+            .into_iter()
+            .map(Some)
+            .collect()
+    } else {
+        vec![None; records.len()]
+    };
     let mut processes: Vec<ProcessInfo> = records
         .iter()
+        .zip(signatures)
         .enumerate()
-        .map(|(index, record)| {
+        .map(|(index, (record, code_signing))| {
             process_info(
                 record,
                 boot_uuid,
                 options,
                 &mut names,
                 if index == 0 { peer_token } else { None },
+                code_signing,
             )
         })
         .collect();

@@ -24,8 +24,7 @@ use std::path::Path;
 
 use globset::{GlobBuilder, GlobMatcher};
 use procline_core::{
-    BinaryPin, CodeSigning, Pinnable, ProcessIdentity, ProcessInfo, Signature, SignatureValidity,
-    Strength,
+    BinaryPin, CodeSigning, Pinnable, ProcessIdentity, ProcessInfo, Strength, VerifiedSignature,
 };
 use regex::bytes::Regex;
 
@@ -176,14 +175,17 @@ impl Matcher for BinaryMatcher {
         }
         let process = target.info;
         let signature = verified_signature(process);
-        field_matches(&pin.digest, process.digest.as_ref())
-            && field_matches(&pin.team_id, signature.and_then(|s| s.team_id.as_ref()))
+        field_matches(&pin.digest, process.digest.as_deref())
+            && field_matches(&pin.team_id, signature.and_then(VerifiedSignature::team_id))
             && field_matches(
                 &pin.signing_id,
-                signature.and_then(|s| s.signing_id.as_ref()),
+                signature.map(VerifiedSignature::signing_id),
             )
-            && field_matches(&pin.bundle_id, signature.and_then(|s| s.bundle_id.as_ref()))
-            && field_matches(&pin.cdhash, signature.and_then(|s| s.cdhash.as_ref()))
+            && field_matches(
+                &pin.bundle_id,
+                signature.and_then(VerifiedSignature::bundle_id),
+            )
+            && field_matches(&pin.cdhash, signature.map(VerifiedSignature::cdhash))
     }
 
     fn class(&self, value: &MatchValue, _process: Option<&ProcessInfo>) -> Strength {
@@ -224,59 +226,65 @@ impl Matcher for BinaryMatcher {
         let process = target.info;
         let signature = verified_signature(process);
         Ok(MatchValue::Binary(BinaryPin {
-            digest: fill(&pin.digest, process.digest.as_ref(), "digest")?,
+            digest: fill(&pin.digest, process.digest.as_deref(), "digest")?,
             team_id: fill(
                 &pin.team_id,
-                signature.and_then(|s| s.team_id.as_ref()),
+                signature.and_then(VerifiedSignature::team_id),
                 "team_id",
             )?,
             signing_id: fill(
                 &pin.signing_id,
-                signature.and_then(|s| s.signing_id.as_ref()),
+                signature.map(VerifiedSignature::signing_id),
                 "signing_id",
             )?,
             bundle_id: fill(
                 &pin.bundle_id,
-                signature.and_then(|s| s.bundle_id.as_ref()),
+                signature.and_then(VerifiedSignature::bundle_id),
                 "bundle_id",
             )?,
             cdhash: fill(
                 &pin.cdhash,
-                signature.and_then(|s| s.cdhash.as_ref()),
+                signature.map(VerifiedSignature::cdhash),
                 "cdhash",
             )?,
         }))
     }
 }
 
-/// The signature whose fields can be matched: signed, and verified. The fields of an unverified signature say nothing about the code.
-fn verified_signature(process: &ProcessInfo) -> Option<&Signature> {
+/// The signature whose fields can be matched: one that verified. A signature that failed, or was not verified, has no identity.
+fn verified_signature(process: &ProcessInfo) -> Option<&VerifiedSignature> {
     match &process.code_signing {
-        Some(CodeSigning::Signed(signature)) if signature.validity == SignatureValidity::Valid => {
-            Some(signature)
-        }
+        Some(CodeSigning::Verified(signature)) => Some(signature),
         _ => None,
     }
 }
 
 /// An absent field asks nothing; a concrete field must equal the actual value; a placeholder never matches (it is resolved before matching).
-fn field_matches<T: PartialEq>(field: &Option<Pinnable<T>>, actual: Option<&T>) -> bool {
+fn field_matches<T, A>(field: &Option<Pinnable<T>>, actual: Option<&A>) -> bool
+where
+    T: std::borrow::Borrow<A>,
+    A: PartialEq + ?Sized,
+{
     match field {
         None => true,
         Some(Pinnable::Pin) => false,
-        Some(Pinnable::Value(expected)) => actual == Some(expected),
+        Some(Pinnable::Value(expected)) => actual == Some(expected.borrow()),
     }
 }
 
 /// Replaces a placeholder field with the actual value, failing when the process has none.
-fn fill<T: Clone>(
+fn fill<T, A>(
     field: &Option<Pinnable<T>>,
-    actual: Option<&T>,
+    actual: Option<&A>,
     name: &str,
-) -> Result<Option<Pinnable<T>>, ResolveError> {
+) -> Result<Option<Pinnable<T>>, ResolveError>
+where
+    T: Clone,
+    A: ToOwned<Owned = T> + ?Sized,
+{
     match field {
         Some(Pinnable::Pin) => actual
-            .map(|value| Some(Pinnable::Value(value.clone())))
+            .map(|value| Some(Pinnable::Value(value.to_owned())))
             .ok_or_else(|| ResolveError::ValueUnavailable {
                 field: Some(name.to_owned()),
             }),

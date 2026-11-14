@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use common::{BOOT, at_path, matcher, named, process, signature, signed, target, with_ids};
 use procline_acl::{Literal, MatchTarget, MatchValue, ResolveError, Vocabulary};
 use procline_core::{
-    BinaryPin, CdHash, CodeSigning, PathMeta, Pinnable, ProcessIdentity, ProcessInfo,
-    SignatureValidity, StartTime, Strength,
+    BinaryPin, CdHash, CodeSigning, FailureReason, PathMeta, Pinnable, ProcessIdentity,
+    ProcessInfo, Root, Signer, StartTime, Strength,
 };
 
 fn text(value: &str) -> MatchValue {
@@ -253,7 +253,7 @@ fn binary_matches_every_field_present() {
     assert!(!m.matches(target(&claude()), &other_team));
 }
 
-// 署名の検証が通らない (改ざん等) プロセスは、field の値が同じでも当たらない。未署名も同じ。
+// 署名の検証に成功していないプロセス (失敗の理由によらず、未署名、時間の予算で検証しなかった、収集しなかった) は身元を持たないので、署名由来の field には当たらない。検証に失敗した時に取れるのは差し替えた先のファイルの情報でありうるため、失敗した署名には身元の値そのものが無い。
 #[test]
 fn binary_signature_fields_need_a_verified_signature() {
     let vocab = Vocabulary::builtin();
@@ -262,37 +262,47 @@ fn binary_signature_fields_need_a_verified_signature() {
         team_id: field("VWXYZ67890"),
         ..no_fields()
     });
-    let mut broken = signature("VWXYZ67890", "com.anthropic.claude-code");
-    broken.validity = SignatureValidity::Invalid {
-        reason: "modified".to_owned(),
-    };
-    assert!(!m.matches(target(&signed(process(600), broken)), &value));
-    let unsigned = ProcessInfo {
-        code_signing: Some(CodeSigning::Unsigned),
-        ..process(600)
-    };
-    assert!(!m.matches(target(&unsigned), &value));
-    assert!(!m.matches(target(&process(600)), &value));
-}
-
-// ad-hoc 署名は Team ID を持たない (None) ので、Team ID の条件には決して当たらない。
-#[test]
-fn binary_team_id_never_matches_adhoc() {
-    let vocab = Vocabulary::builtin();
-    let mut adhoc = signature("unused", "a.out");
-    adhoc.team_id = None;
-    adhoc.adhoc = true;
-    let adhoc = signed(process(1), adhoc);
-    for team_id in ["VWXYZ67890", ""] {
-        let value = binary(BinaryPin {
-            team_id: field(team_id),
-            ..no_fields()
-        });
-        assert!(!matcher(&vocab, "binary").matches(target(&adhoc), &value));
+    for code_signing in [
+        Some(CodeSigning::Failed(FailureReason::Replaced)),
+        Some(CodeSigning::Failed(FailureReason::Missing)),
+        Some(CodeSigning::Failed(FailureReason::Other)),
+        Some(CodeSigning::Unsigned),
+        Some(CodeSigning::NotChecked),
+        None,
+    ] {
+        let unverified = ProcessInfo {
+            code_signing: code_signing.clone(),
+            ..process(600)
+        };
+        assert!(!m.matches(target(&unverified), &value), "{code_signing:?}");
     }
 }
 
-// bundle_id の照合元は署名で封印された Info.plist の値 (Signature.bundle_id) で、実行パスから遡って読む ProcessInfo.bundle (表示用、誰でも書ける) ではない。
+// Team ID は根が Apple の証明書の時だけ照合元になる。ad-hoc 署名と、根が Apple でない証明書 (自己署名、独自の認証局) は、CodeDirectory に Team ID を書いていても Team ID の条件には決して当たらない (Team ID は署名する側が書く値で、根の検証が無ければ何も示さない)。signing_id は検証に成功していれば根によらず照合元になる (Team ID と組でしか書けないので、単独では当たらない)。
+#[test]
+fn binary_team_id_never_matches_without_an_apple_root() {
+    let vocab = Vocabulary::builtin();
+    let mut adhoc = signature("unused", "a.out");
+    adhoc.signer = Signer::AdHoc {
+        linker_signed: true,
+    };
+    let mut self_signed = signature("VWXYZ67890", "a.out");
+    self_signed.signer = Signer::Certificate {
+        chain: Vec::new(),
+        root: Root::Other,
+    };
+    for process in [signed(process(1), adhoc), signed(process(2), self_signed)] {
+        for team_id in ["VWXYZ67890", "unused", ""] {
+            let value = binary(BinaryPin {
+                team_id: field(team_id),
+                ..no_fields()
+            });
+            assert!(!matcher(&vocab, "binary").matches(target(&process), &value));
+        }
+    }
+}
+
+// bundle_id の照合元は署名で封印された Info.plist の値 (VerifiedSignature.bundle_id) で、実行パスから遡って読む ProcessInfo.bundle (表示用、誰でも書ける) ではない。
 #[test]
 fn binary_bundle_id_is_the_sealed_one() {
     let vocab = Vocabulary::builtin();
@@ -496,12 +506,12 @@ fn binary_resolve_fails_without_the_value() {
             field: Some("team_id".to_owned())
         })
     );
-    let mut broken = signature("VWXYZ67890", "x");
-    broken.validity = SignatureValidity::Invalid {
-        reason: "modified".to_owned(),
+    let failed = ProcessInfo {
+        code_signing: Some(CodeSigning::Failed(FailureReason::Replaced)),
+        ..process(1)
     };
     assert_eq!(
-        m.resolve(&team, target(&signed(process(1), broken))),
+        m.resolve(&team, target(&failed)),
         Err(ResolveError::ValueUnavailable {
             field: Some("team_id".to_owned())
         })

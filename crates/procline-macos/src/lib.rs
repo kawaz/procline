@@ -11,6 +11,7 @@ mod sys;
 use std::fmt;
 use std::io;
 use std::os::fd::AsFd;
+use std::time::Duration;
 
 use procline_core::{EnvPolicy, ProcessChain, Redaction};
 
@@ -24,6 +25,8 @@ pub struct CollectOptions {
     pub digest: bool,
     /// Verify the code signature of every process (`ProcessInfo.code_signing`). Off leaves it `None` and makes the chain unusable for `binary` conditions, but cuts the time to well under a millisecond for a first, light pass (a Touch ID prompt that only needs names and paths).
     pub signature: bool,
+    /// The time the verification of the signatures of one collection may take. Once it runs out, the processes whose verification has not started are `CodeSigning::NotChecked`; a verification under way is not cut short. `None` verifies every process.
+    pub signature_budget: Option<Duration>,
     /// Fill `NamedId.names` with every name that resolves to each uid / gid by enumerating the user and group databases once per collection (about 16 ms on a Mac with a few hundred system accounts; a resident daemon can cache the result). Off keeps only the representative name.
     pub all_names: bool,
     pub max_ancestors: usize,
@@ -37,6 +40,7 @@ impl fmt::Debug for CollectOptions {
             .field("icon", &self.icon)
             .field("digest", &self.digest)
             .field("signature", &self.signature)
+            .field("signature_budget", &self.signature_budget)
             .field("all_names", &self.all_names)
             .field("max_ancestors", &self.max_ancestors)
             .finish_non_exhaustive()
@@ -51,6 +55,8 @@ pub fn os_items() -> Vec<procline_acl::Item> {
 }
 
 /// Collects the peer of a connected UNIX domain socket and its ancestors. The peer's audit token identifies its process and addresses its code signature; the other processes' signatures are looked up by pid.
+///
+/// Signatures are verified with requirements and without the network (`procline_core::verify`); when the executable cannot be read or was replaced, the signature the kernel keeps for the running code is verified instead. The results are not cached.
 pub fn collect_peer<S: AsFd>(
     stream: &S,
     options: &CollectOptions,

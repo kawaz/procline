@@ -8,6 +8,7 @@ mod sanitize;
 mod session;
 mod signature;
 mod strength;
+pub mod verify;
 
 pub use binary::{BinaryField, BinaryPin, BinaryPinError};
 pub use env::{EnvPolicy, IsSecretFn, RedactFn, Redaction, default_is_secret, default_redact};
@@ -19,6 +20,7 @@ pub use process::{
 pub use sanitize::sanitize_for_display;
 pub use session::SessionLevel;
 pub use signature::{
-    Bundle, CdHash, Certificate, CodeSigning, Signature, SignatureTrust, SignatureValidity,
+    Bundle, CdHash, Certificate, CertificateKind, CodeSigning, FailureReason, Mark, Root,
+    RuntimeState, Signer, VerifiedFrom, VerifiedSignature,
 };
 pub use strength::Strength;

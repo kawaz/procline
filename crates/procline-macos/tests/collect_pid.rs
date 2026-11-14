@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use procline_core::{
-    CodeSigning, EnvPolicy, ProcessChain, ProcessInfo, Redaction, SignatureTrust, Truncated,
+    CodeSigning, EnvPolicy, FailureReason, Mark, ProcessChain, ProcessInfo, Redaction, Signer,
+    Truncated, VerifiedFrom,
 };
 use procline_macos::{CollectError, CollectOptions, collect_pid};
 
@@ -15,6 +16,7 @@ fn options() -> CollectOptions {
         icon: false,
         digest: false,
         signature: true,
+        signature_budget: None,
         all_names: true,
         max_ancestors: 64,
     }
@@ -147,7 +149,7 @@ fn chain_reaches_launchd_or_ends_where_the_lineage_breaks() {
     }
 }
 
-// launchd 自身を集めると、列は launchd 1 つだけで、根に届いている (truncated は None)。root のプロセスでも識別子と実行パスは読める (argv と cwd は同じ uid でないので読めない)。
+// launchd 自身を集めると、列は launchd 1 つだけで、根に届いている (truncated は None)。root のプロセスでも識別子と実行パスは読める (argv と cwd は同じ uid でないので読めない)。署名は別 uid でもユーザ権限から検証でき、根が Apple 自身 (anchor apple) なので印は apple。hardened runtime と platform binary はカーネルの動的な status にある。
 #[test]
 fn launchd_is_the_root() {
     let chain = collect_pid(1, &options()).unwrap();
@@ -156,7 +158,17 @@ fn launchd_is_the_root() {
     let launchd = target(&chain);
     assert!(launchd.identity.unique_id.is_some());
     assert_eq!(launchd.path.as_deref(), Some(Path::new("/sbin/launchd")));
-    assert_eq!(launchd.signature_trust(), Some(SignatureTrust::Platform));
+    assert_eq!(
+        launchd.code_signing.as_ref().map(CodeSigning::mark),
+        Some(Mark::Apple)
+    );
+    let Some(CodeSigning::Verified(signature)) = &launchd.code_signing else {
+        unreachable!()
+    };
+    assert_eq!(signature.identifier, "com.apple.xpc.launchd");
+    assert!(signature.runtime.hardened_runtime);
+    assert!(signature.runtime.platform_binary);
+    assert!(!signature.runtime.debugged);
 }
 
 // macOS の pid は PID_MAX (99999) より小さいので、i32::MAX のプロセスは存在しない。収集全体が NoSuchProcess で失敗し、空の列を返さない。
@@ -180,38 +192,141 @@ fn max_ancestors_bounds_the_ancestors() {
     }
 }
 
-// /bin/sleep は Apple の platform binary: 署名が検証に通り、Apple のルートに連鎖し (`anchor apple generic` を満たす)、信頼度は Platform、署名の識別子は com.apple.sleep。実行パスは root 所有で、利用者は (ファイルにも途中のディレクトリにも) 書けない。親はこのテストのプロセス。
+// /bin/sleep は Apple の platform binary: 署名が検証に通り、根は Apple 自身 (anchor apple) で印は apple、署名の識別子は com.apple.sleep。ディスク上の実行ファイルを検証できるので verified_from は disk。hardened runtime と platform binary はカーネルの動的な status から取る (CodeDirectory の flags でなく)。実行パスは root 所有で、利用者は (ファイルにも途中のディレクトリにも) 書けない。親はこのテストのプロセス。
 #[test]
 fn sleep_is_a_platform_binary_the_user_cannot_replace() {
     let sleep = Spawned::spawn(Command::new("/bin/sleep").arg("30"));
     let chain = collect_pid(sleep.pid(), &options()).unwrap();
     let info = target(&chain);
     assert_eq!(info.path.as_deref(), Some(Path::new("/bin/sleep")));
-    let Some(CodeSigning::Signed(signature)) = &info.code_signing else {
-        panic!("expected a signature: {:?}", info.code_signing);
+    let Some(CodeSigning::Verified(signature)) = &info.code_signing else {
+        panic!("expected a verified signature: {:?}", info.code_signing);
     };
-    assert_eq!(signature.signing_id.as_deref(), Some("com.apple.sleep"));
-    assert!(signature.platform);
-    assert_eq!(signature.apple_anchored, Some(true));
-    assert_eq!(info.signature_trust(), Some(SignatureTrust::Platform));
+    assert_eq!(signature.identifier, "com.apple.sleep");
+    assert_eq!(signature.verified_from, VerifiedFrom::Disk);
+    assert!(signature.runtime.platform_binary);
+    assert!(signature.runtime.hardened_runtime);
+    assert_eq!(signature.team_id(), None);
+    assert_eq!(
+        info.code_signing.as_ref().map(CodeSigning::mark),
+        Some(Mark::Apple)
+    );
     let meta = info.path_meta.unwrap();
     assert_eq!(meta.owner_uid, 0);
     assert!(!meta.writable_by_user);
     assert_eq!(chain.processes()[1].identity.pid, own_pid());
 }
 
-// このテストのバイナリはリンカが付けた ad-hoc 署名なので、検証には通るが `anchor apple generic` を満たさない。満たさないこと (errSecCSReqFailed) は「評価できなかった」(None) でなく false として記録され、信頼度は AdHoc になる。
+// このテストのバイナリはリンカが付けた ad-hoc 署名 (証明書なし、kSecCodeSignatureLinkerSigned) なので、検証には通るが印は adhoc で、根の requirement は問わない。Team ID は持たない。hardened runtime なしでリンクされているので、カーネルの status にも CS_RUNTIME は無い。
 #[test]
-fn linker_signed_test_binary_is_adhoc_and_not_apple_anchored() {
+fn linker_signed_test_binary_is_adhoc() {
     let chain = collect_pid(own_pid(), &options()).unwrap();
-    let Some(CodeSigning::Signed(signature)) = &target(&chain).code_signing else {
-        panic!("expected a signature: {:?}", target(&chain).code_signing);
+    let Some(CodeSigning::Verified(signature)) = &target(&chain).code_signing else {
+        panic!(
+            "expected a verified signature: {:?}",
+            target(&chain).code_signing
+        );
     };
-    assert!(signature.adhoc);
-    assert_eq!(signature.apple_anchored, Some(false));
     assert_eq!(
-        target(&chain).signature_trust(),
-        Some(SignatureTrust::AdHoc)
+        signature.signer,
+        Signer::AdHoc {
+            linker_signed: true
+        }
+    );
+    assert_eq!(signature.team_id(), None);
+    assert!(!signature.runtime.hardened_runtime);
+    assert!(!signature.runtime.platform_binary);
+    assert_eq!(
+        target(&chain).code_signing.as_ref().map(CodeSigning::mark),
+        Some(Mark::Adhoc)
+    );
+}
+
+/// A copy of this test binary in a temporary directory, running the `stay_alive_helper` test; the directory and the process go away with the value.
+struct RunningCopy {
+    dir: tempfile::TempDir,
+    child: Spawned,
+}
+
+impl RunningCopy {
+    fn start() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy");
+        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        let child = Spawned::spawn(
+            Command::new(&path)
+                .args(["--exact", "stay_alive_helper"])
+                .env_clear()
+                .env(STAY_ALIVE, "1"),
+        );
+        Self { dir, child }
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.dir.path().join("copy")
+    }
+}
+
+// 走っているプロセスの実行ファイルを rename で差し替える (/usr/bin/true のコピーを置く)。通常の方法はディスク上の差し替えた先を見て -67034 で失敗するので、pid に kSecGuestAttributeDynamicCode を足して、カーネルが持つ走っているコードの署名で検証し直す。身元は差し替える前のコード (このテストのバイナリ) のもので、差し替えた先 (com.apple.true、印は apple) を返さない。
+#[test]
+fn replaced_executable_is_verified_from_the_running_code() {
+    let own = collect_pid(own_pid(), &options()).unwrap();
+    let Some(CodeSigning::Verified(own)) = &target(&own).code_signing else {
+        panic!("expected the own signature to verify");
+    };
+    let copy = RunningCopy::start();
+    let replacement = copy.dir.path().join("replacement");
+    std::fs::copy("/usr/bin/true", &replacement).unwrap();
+    std::fs::rename(&replacement, copy.path()).unwrap();
+
+    let chain = collect_pid(copy.child.pid(), &options()).unwrap();
+    let Some(CodeSigning::Verified(signature)) = &target(&chain).code_signing else {
+        panic!(
+            "expected a verified signature: {:?}",
+            target(&chain).code_signing
+        );
+    };
+    assert_eq!(signature.verified_from, VerifiedFrom::RunningCode);
+    assert_eq!(signature.identifier, own.identifier);
+    assert_eq!(signature.cdhash, own.cdhash);
+    assert_eq!(
+        target(&chain).code_signing.as_ref().map(CodeSigning::mark),
+        Some(Mark::Adhoc)
+    );
+}
+
+// 走っているプロセスの実行ファイルを削除すると、通常の方法では SecCode が得られず (100002)、pid ベースでも身元が取れないので、検証の結果は Failed(Missing)。身元 (identifier 等) は持たない。走っているコードが改ざんされたわけではないが、確かめられないものは確かめたと言わない。
+#[test]
+fn deleted_executable_is_failed_missing() {
+    let copy = RunningCopy::start();
+    std::fs::remove_file(copy.path()).unwrap();
+    let chain = collect_pid(copy.child.pid(), &options()).unwrap();
+    assert_eq!(
+        target(&chain).code_signing,
+        Some(CodeSigning::Failed(FailureReason::Missing))
+    );
+}
+
+// 収集に検証の時間の予算を与え、それが 0 なら、どのプロセスも検証を始める前に予算を超えているので全部 not_checked (検証しなかったことを、検証に失敗したことや未署名と区別して返す)。予算を与えなければ全部検証する。
+#[test]
+fn zero_budget_checks_nothing() {
+    let mut opts = options();
+    opts.signature_budget = Some(std::time::Duration::ZERO);
+    let chain = collect_pid(own_pid(), &opts).unwrap();
+    assert!(
+        chain
+            .processes()
+            .iter()
+            .all(|p| p.code_signing == Some(CodeSigning::NotChecked)),
+        "{:?}",
+        pids(&chain)
+    );
+    let chain = collect_pid(own_pid(), &options()).unwrap();
+    assert!(
+        chain
+            .processes()
+            .iter()
+            .all(|p| !matches!(p.code_signing, Some(CodeSigning::NotChecked) | None))
     );
 }
 

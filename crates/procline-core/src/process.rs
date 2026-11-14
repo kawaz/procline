@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::signature::{Bundle, CodeSigning, SignatureTrust};
+use crate::signature::{Bundle, CodeSigning};
 
 /// The target process first, followed by its ancestors up to launchd.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +58,7 @@ pub struct ProcessInfo {
     pub path_meta: Option<PathMeta>,
     /// Hash of the contents of the file at `path` (`sha256:…`); collected only when `digest` of the collect options is set.
     pub digest: Option<String>,
-    /// The app bundle found by walking up from `path`; for display only. Matching on `bundle_id` uses `Signature.bundle_id`.
+    /// The app bundle found by walking up from `path`; for display only. Matching on `bundle_id` uses `VerifiedSignature.bundle_id`.
     pub bundle: Option<Bundle>,
     /// The individual responsible process, identified like the `process` matcher item.
     pub responsible: Option<ProcessIdentity>,
@@ -70,13 +70,6 @@ pub struct ProcessInfo {
     pub env: Option<BTreeMap<String, String>>,
     /// Display-only icon, PNG bytes.
     pub icon_png: Option<Vec<u8>>,
-}
-
-impl ProcessInfo {
-    /// Trust level of the code signature, if the signing state was collected.
-    pub fn signature_trust(&self) -> Option<SignatureTrust> {
-        self.code_signing.as_ref().map(CodeSigning::trust)
-    }
 }
 
 /// Attributes of the file at the executable path that decide how much the path pins down the code.

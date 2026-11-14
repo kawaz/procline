@@ -1,10 +1,11 @@
-//! Security framework: the dynamic code object of a process, its validity, and its signing information.
+//! Security framework: the dynamic code object of a process, its validity against a requirement, and its signing information. Each call passes the raw OSStatus back; what it means is decided in `procline_core::verify`.
 
 use std::ptr;
 
 use core_foundation::array::CFArray;
 use core_foundation::base::OSStatus;
 use core_foundation::base::{CFType, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::data::CFData;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::number::CFNumber;
@@ -13,7 +14,7 @@ use security_framework::certificate::SecCertificate;
 use security_framework::os::macos::code_signing::{
     Flags, GuestAttributes, SecCode, SecRequirement,
 };
-use security_framework_sys::code_signing::SecCodeRef;
+use security_framework_sys::code_signing::{SecCodeRef, SecRequirementRef};
 
 use procline_core::AuditToken;
 
@@ -23,17 +24,21 @@ use super::cf;
 const K_SEC_CS_SIGNING_INFORMATION: u32 = 1 << 1;
 /// `kSecCSRequirementInformation` (`<Security/SecCode.h>`, `1 << 2`).
 const K_SEC_CS_REQUIREMENT_INFORMATION: u32 = 1 << 2;
-/// `kSecCSDefaultFlags` (`<Security/CSCommon.h>`).
-const K_SEC_CS_DEFAULT_FLAGS: u32 = 0;
+/// `kSecCSDynamicInformation` (`<Security/SecCode.h>`, `1 << 3`): the dynamic status of the running code.
+const K_SEC_CS_DYNAMIC_INFORMATION: u32 = 1 << 3;
+/// `kSecCSNoNetworkAccess` (`<Security/CSCommon.h>`, `1 << 29`): no online revocation checks, so the wait does not depend on the network.
+const K_SEC_CS_NO_NETWORK_ACCESS: u32 = 1 << 29;
 
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
+    static kSecGuestAttributeDynamicCode: CFStringRef;
     static kSecCodeInfoIdentifier: CFStringRef;
     static kSecCodeInfoTeamIdentifier: CFStringRef;
     static kSecCodeInfoUnique: CFStringRef;
     static kSecCodeInfoCertificates: CFStringRef;
     static kSecCodeInfoFlags: CFStringRef;
-    static kSecCodeInfoPlatformIdentifier: CFStringRef;
+    static kSecCodeInfoStatus: CFStringRef;
+    static kSecCodeInfoEntitlements: CFStringRef;
     static kSecCodeInfoEntitlementsDict: CFStringRef;
     static kSecCodeInfoPList: CFStringRef;
 
@@ -45,60 +50,66 @@ unsafe extern "C" {
     ) -> OSStatus;
 }
 
-/// The code object of the running process `pid` (`SecCodeCopyGuestWithAttributes` with `kSecGuestAttributePid`, the kernel as host).
-pub(crate) fn guest_for_pid(pid: i32) -> Result<SecCode, OSStatus> {
+/// How a process is addressed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Guest {
+    Pid(i32),
+    /// A socket peer, by its audit token, never by its reusable pid.
+    AuditToken(AuditToken),
+}
+
+/// The code object of the running process (`SecCodeCopyGuestWithAttributes` with the kernel as host). `running_code` adds `kSecGuestAttributeDynamicCode`, so the static code is the signature the kernel keeps for the running code instead of the executable on disk.
+pub(crate) fn guest(guest: Guest, running_code: bool) -> Result<SecCode, OSStatus> {
     let mut attributes = GuestAttributes::new();
-    attributes.set_pid(pid);
+    match guest {
+        Guest::Pid(pid) => attributes.set_pid(pid),
+        Guest::AuditToken(token) => {
+            let bytes = token.0.map(u32::to_ne_bytes);
+            let data = CFData::from_buffer(bytes.as_flattened());
+            attributes.set_audit_token(data.as_concrete_TypeRef());
+        }
+    }
+    if running_code {
+        // SAFETY: the static is a constant string of the Security framework, initialized at load time and valid for the life of the process. The host only checks that the key is present, so the value is `true`.
+        let key = unsafe { kSecGuestAttributeDynamicCode };
+        attributes.set_other(key, CFBoolean::true_value().as_CFType());
+    }
     SecCode::copy_guest_with_attribues(None, &attributes, Flags::empty()).map_err(|e| e.code())
 }
 
-/// The code object addressed by a socket peer's audit token (`kSecGuestAttributeAudit` in `<Security/SecCode.h>`), never by its reusable pid.
-pub(crate) fn guest_for_audit_token(token: AuditToken) -> Result<SecCode, OSStatus> {
-    let bytes = token.0.map(u32::to_ne_bytes);
-    let data = CFData::from_buffer(bytes.as_flattened());
-    let mut attributes = GuestAttributes::new();
-    attributes.set_audit_token(data.as_concrete_TypeRef());
-    SecCode::copy_guest_with_attribues(None, &attributes, Flags::empty()).map_err(|e| e.code())
+/// A requirement compiled from the requirement language.
+pub(crate) fn requirement(text: &str) -> Result<SecRequirement, OSStatus> {
+    text.parse()
+        .map_err(|e: security_framework::base::Error| e.code())
 }
 
-/// `SecCodeCheckValidity(code, kSecCSDefaultFlags, NULL)`: the signature is intact, without any requirement on the signer.
-pub(crate) fn check_validity(code: &SecCode) -> Result<(), OSStatus> {
-    // SAFETY: `code` is a live SecCode, and a NULL requirement is allowed (`__nullable`).
-    let status = unsafe {
+/// `SecCodeCheckValidity(code, kSecCSNoNetworkAccess, requirement)`, with no requirement for `None`.
+pub(crate) fn check(code: &SecCode, requirement: Option<&SecRequirement>) -> OSStatus {
+    let requirement: SecRequirementRef =
+        requirement.map_or(ptr::null_mut(), |r| r.as_concrete_TypeRef());
+    // SAFETY: `code` is a live SecCode, and the requirement is a live SecRequirement or NULL (`__nullable`).
+    unsafe {
         security_framework_sys::code_signing::SecCodeCheckValidity(
             code.as_concrete_TypeRef(),
-            K_SEC_CS_DEFAULT_FLAGS,
-            ptr::null_mut(),
+            K_SEC_CS_NO_NETWORK_ACCESS,
+            requirement,
         )
-    };
-    if status == 0 { Ok(()) } else { Err(status) }
-}
-
-/// `SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement)` with the requirement compiled from `text`. `Err` carries the status, `errSecCSReqFailed` when the code does not satisfy the requirement.
-pub(crate) fn check_requirement(code: &SecCode, text: &str) -> Result<(), OSStatus> {
-    let requirement: SecRequirement = text
-        .parse()
-        .map_err(|e: security_framework::base::Error| e.code())?;
-    code.check_validity(Flags::empty(), &requirement)
-        .map_err(|e| e.code())
-}
-
-/// The message of a Security framework status code.
-pub(crate) fn error_message(status: OSStatus) -> Option<String> {
-    security_framework::base::Error::from_code(status).message()
+    }
 }
 
 /// The dictionary `SecCodeCopySigningInformation` returns.
 pub(crate) struct SigningInfo(CFDictionary);
 
-/// `SecCodeCopySigningInformation(code, kSecCSSigningInformation | kSecCSRequirementInformation)`.
+/// `SecCodeCopySigningInformation(code, kSecCSSigningInformation | kSecCSRequirementInformation | kSecCSDynamicInformation)`.
 pub(crate) fn signing_information(code: &SecCode) -> Result<SigningInfo, OSStatus> {
     let mut info: CFDictionaryRef = ptr::null();
     // SAFETY: `code` is a live SecCode, which the function accepts in place of a SecStaticCode, and `info` receives a retained dictionary on success.
     let status = unsafe {
         SecCodeCopySigningInformation(
             code.as_concrete_TypeRef(),
-            K_SEC_CS_SIGNING_INFORMATION | K_SEC_CS_REQUIREMENT_INFORMATION,
+            K_SEC_CS_SIGNING_INFORMATION
+                | K_SEC_CS_REQUIREMENT_INFORMATION
+                | K_SEC_CS_DYNAMIC_INFORMATION,
             &mut info,
         )
     };
@@ -122,7 +133,8 @@ enum InfoKey {
     Unique,
     Certificates,
     Flags,
-    PlatformIdentifier,
+    Status,
+    Entitlements,
     EntitlementsDict,
     PList,
 }
@@ -137,7 +149,8 @@ impl InfoKey {
                 Self::Unique => kSecCodeInfoUnique,
                 Self::Certificates => kSecCodeInfoCertificates,
                 Self::Flags => kSecCodeInfoFlags,
-                Self::PlatformIdentifier => kSecCodeInfoPlatformIdentifier,
+                Self::Status => kSecCodeInfoStatus,
+                Self::Entitlements => kSecCodeInfoEntitlements,
                 Self::EntitlementsDict => kSecCodeInfoEntitlementsDict,
                 Self::PList => kSecCodeInfoPList,
             }
@@ -162,6 +175,11 @@ impl SigningInfo {
         self.get(key)?.downcast::<CFString>().map(|s| s.to_string())
     }
 
+    fn number(&self, key: InfoKey) -> Option<u32> {
+        let n = self.get(key)?.downcast::<CFNumber>()?.to_i64()?;
+        u32::try_from(n).ok()
+    }
+
     /// `kSecCodeInfoIdentifier`.
     pub(crate) fn identifier(&self) -> Option<String> {
         self.string(InfoKey::Identifier)
@@ -179,15 +197,14 @@ impl SigningInfo {
             .map(|d| d.bytes().to_vec())
     }
 
-    /// `kSecCodeInfoFlags`: the `SecCodeSignatureFlags`.
+    /// `kSecCodeInfoFlags`: the `SecCodeSignatureFlags` of the code directory.
     pub(crate) fn flags(&self) -> Option<u32> {
-        let n = self.get(InfoKey::Flags)?.downcast::<CFNumber>()?.to_i64()?;
-        u32::try_from(n).ok()
+        self.number(InfoKey::Flags)
     }
 
-    /// `kSecCodeInfoPlatformIdentifier` is present: the code is a platform binary.
-    pub(crate) fn has_platform_identifier(&self) -> bool {
-        self.get(InfoKey::PlatformIdentifier).is_some()
+    /// `kSecCodeInfoStatus`: the kernel's dynamic status word of the running code.
+    pub(crate) fn status(&self) -> Option<u32> {
+        self.number(InfoKey::Status)
     }
 
     /// `kSecCodeInfoCertificates`, leaf first: (subject summary, DER).
@@ -211,6 +228,11 @@ impl SigningInfo {
             .get(InfoKey::EntitlementsDict)?
             .downcast::<CFDictionary>()?;
         Some(cf::dictionary_to_json(&dict))
+    }
+
+    /// `kSecCodeInfoEntitlements` (the entitlements blob) is present.
+    pub(crate) fn has_entitlements_blob(&self) -> bool {
+        self.get(InfoKey::Entitlements).is_some()
     }
 
     /// A string of the sealed Info.plist (`kSecCodeInfoPList`).
