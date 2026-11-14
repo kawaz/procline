@@ -246,20 +246,38 @@ fn linker_signed_test_binary_is_adhoc() {
 struct RunningCopy {
     dir: tempfile::TempDir,
     child: Spawned,
+    /// Kept open so that the copy does not get `SIGPIPE` if it writes again.
+    _stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl RunningCopy {
+    /// Returns once the copy's test harness has started (it printed `running 1 test`), not merely once it was spawned: a copy deleted right after it was spawned made the Security framework answer ESRCH (100003) instead of ENOENT (100002) for the lookup by pid, observed on macOS 26.5.2.
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("copy");
         std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
-        let child = Spawned::spawn(
-            Command::new(&path)
-                .args(["--exact", "stay_alive_helper"])
-                .env_clear()
-                .env(STAY_ALIVE, "1"),
-        );
-        Self { dir, child }
+        let mut child = Command::new(&path)
+            .args(["--exact", "stay_alive_helper"])
+            .env_clear()
+            .env(STAY_ALIVE, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let child = Spawned(child);
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        while !line.starts_with("running ") {
+            line.clear();
+            let read = std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+            assert_ne!(read, 0, "the copy ended before starting its tests");
+        }
+        Self {
+            dir,
+            child,
+            _stdout: stdout,
+        }
     }
 
     fn path(&self) -> std::path::PathBuf {
