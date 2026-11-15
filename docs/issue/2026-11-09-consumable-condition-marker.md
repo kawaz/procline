@@ -3,17 +3,6 @@ title: 消費型 condition を表す印を Condition trait に足すか決める
 status: open
 category: design
 created: 2026-11-09T04:32:23+09:00
-last_read:
-open_entered: 2026-11-09T04:32:23+09:00
-wip_entered:
-blocked_entered:
-pending_entered:
-discarded_entered:
-resolved_entered:
-discard_reason:
-pending_reason:
-close_reason:
-blocked_by:
 origin: 自リポ TODO
 ---
 

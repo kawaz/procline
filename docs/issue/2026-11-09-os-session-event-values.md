@@ -3,17 +3,6 @@ title: os.session の各段階の事象固有の値を macOS 実機で確かめ�
 status: open
 category: tech-memo
 created: 2026-11-09T00:57:57+09:00
-last_read:
-open_entered: 2026-11-09T00:57:57+09:00
-wip_entered:
-blocked_entered:
-pending_entered:
-discarded_entered:
-resolved_entered:
-discard_reason:
-pending_reason:
-close_reason:
-blocked_by:
 origin: 自リポ TODO
 ---
 

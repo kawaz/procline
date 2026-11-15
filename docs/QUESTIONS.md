@@ -18,8 +18,45 @@
 
 ## 裁定待ち
 
-(なし)
+HO-Q1〜Q4 は、pam-passkey のセッションが起票した PL-Q1〜Q4 (収集と署名の検証を helper に移して procline に載せ替える作業の前提) をこのリポに移したもの。推奨は起票側のもので、統括の評価は各項の末尾に書く。
+
+### 👺HO-Q1: 収集した事実の型 (1 プロセス分の型、署名の型など 18 型) から、JSON の読み込み (`Deserialize`) を外すか
+
+提案中の [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md) の「`Deserialize` を外す範囲」に 2 案の比較表がある。同じ uid の別プロセスに対する守りは 2 案で変わらない。決め手は「他のプロセスが収集した結果を、Rust で procline の型として読んで表示する使い方を、procline が支えるか」。
+
+- [ ] a (起票側の推奨): 支えない。収集した事実の型すべてから外す (DR の案 2)。「検証済み」の型を持つのは検証したプロセスの値だけになり、JSON から読んだ値を評価に渡す取り違えの経路が無くなる。DR-0011 の「読み込みで印と事実の食い違いを拒む」規則は無くなる (今呼んでいるのはテスト 4 つだけ)。後で Rust の表示側が要るなら、表示用の型を別に足す
+- [ ] b: 支える。列の型 (`ProcessChain`) だけから外し、中身の型は JSON から読めるままにする (DR の案 1)。別プロセスの表示側が照合と同じ型で読めるが、JSON から読んだ値も「検証済み」の型になる
+
+### 👺HO-Q2: DR-0014 の共通の決定 (HO-Q1 のどちらでも同じ部分) を採るか
+
+- 評価に渡せる列は、自分で収集したものか、アプリのコードが `from_collected` (名前で表明が読める関数) で組んだものだけ。列の型は JSON から読めず、field は非公開。タグ付きの列は `Policy::tag` だけが作れる
+- PAM が helper に渡す argv / cwd は procline の列に入れず、アプリ (pam-passkey) が表示用に持つ。procline に新しい入口は足さない
+
+- [ ] a (起票側の推奨): 採る
+- [ ] b: 採らない
+
+### 👺HO-Q3: `os.*` の語彙を feature `acl` (既定で無効) の後ろに置くか
+
+提案中の [DR-0013](decisions/DR-0013-collect-only-dependencies.md)。[DR-0001](decisions/DR-0001-crate-naming.md) の「procline-macos は procline-acl に常に依存する」を置き換える。収集だけのアプリのビルドに入る crate が 53 → 42、release ビルドが約 10 秒 → 約 6.5 秒 (worker の計測)。
+
+- [ ] a (起票側の推奨): feature にして既定は無効。収集だけのアプリ (pam-passkey の helper) のビルドに ACL の crate が入らない。ACL を使うアプリは feature を有効にする
+- [ ] b: 今のまま (常に依存)
+
+### 👺HO-Q4: アイコンを収集の型から外すか
+
+同じ DR-0013。今は収集の型にアイコンの field があるが未実装。
+
+- [ ] a (起票側の推奨): 収集の型と収集のオプションからアイコンを消し、実行パスから PNG を返す別の関数 (feature `icon`、ImageIO で取り AppKit を読み込まない) にする。アプリは自分のキャッシュに無い時だけ呼ぶ。アセットカタログだけの app のアイコンは取れない
+- [ ] b: 収集の中に残す
 
 ## 確認待ち
 
-(なし)
+### 👺HO-C1: DR-0011 (署名の型と信頼の印) と DR-0012 (クラスを保護の状態で決める) は kawaz の裁定か
+
+どちらも 2026-11-15 に pam-passkey の前任セッションが設計・実装して `Active` / 実装済にしたもの。引き継いだセッションは、kawaz の裁定だったかを持っていない。[DR-0012](decisions/DR-0012-strength-class-from-protection.md) は、このリポで 2026-11-09 に統括が置いた扱い (hardened runtime の有無はクラスの判定に使わず、脅威モデルの前提に書くだけ) を、観測 (保護の無い署名済みバイナリは、同じ uid が `DYLD_INSERT_LIBRARIES` を付けて起動するだけで署名由来の条件を満たす) を根拠に改めている。
+
+実機での帰結 (2026-11-15、この Mac): Claude Code は公証済みで hardened runtime だが entitlement `com.apple.security.cs.disable-library-validation` を持つので「開いている」になり、`binary` の署名由来の field も `process` も弱になる。zsh (Apple) は保護ありで強、ad-hoc の自作バイナリは弱。
+
+- [ ] a: 両方このまま (kawaz の裁定済み、または今この内容で採る)
+- [ ] b: DR-0012 は採るが、扱いを変えたい点がある (内容を教えてください)
+- [ ] c: DR-0012 を提案に戻し、クラスは保護の状態で変えない

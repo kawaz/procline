@@ -3,17 +3,6 @@ title: grant 永続化のベンチ (advance ごとの署名 + 書き込みコス
 status: open
 category: task
 created: 2026-11-08T21:34:35+09:00
-last_read:
-open_entered: 2026-11-08T21:34:35+09:00
-wip_entered:
-blocked_entered:
-pending_entered:
-discarded_entered:
-resolved_entered:
-discard_reason:
-pending_reason:
-close_reason:
-blocked_by:
 origin: 自リポ TODO
 ---
 
