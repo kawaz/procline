@@ -22,7 +22,14 @@
 
 - 本体のコードには無い。JSON から読むのは `os.session` の引数 (`SessionLevel`) だけ。procline-acl は serde の `Deserialize` を使わない (grant と一覧の読み込みは未実装)
 - テスト: `CodeSigning` の往復 (`json_round_trips_every_shape` と、書き出しの形のテストの最後の読み戻し)、読み込みが事実と違う印を拒むこと (`reading_rejects_a_mark_the_facts_do_not_give`)、`collect_pid` の列の往復 (`chain_round_trips_through_json`)
-- pam-passkey は procline に依存していない。cw は接続相手を自分で収集して評価する (DESIGN-ja「概要」)。cw のリポは手元に無く、承認画面が評価するデーモンと別のプロセスで chain を JSON で受け取るかは確かめていない
+- pam-passkey は procline に依存していない。cw もまだ procline を使っていない
+
+cw の評価と承認画面の構成 ([findings](../findings/2026-11-15-cw-evaluation-and-approval-processes.md)):
+
+- 照合 (guard の評価) は daemon が行い、承認のダイアログは daemon が起動する別のプロセス (GUI の helper) が出す。設計 (cw の draft-DR-0031 の「2 プロセス構成」) と実装 (helper は別の crate) の両方でそうなっている
+- 間は 1 行 1 つの JSON で、daemon が収集した要求元の列と guard の評価の結果を helper に渡し、helper は承認の結果 (approved / denied 等) だけを返す。helper は受け取った値を表示するだけで、評価はしない。今の wire は cw 自身の表示用の型 (pid、ppid、path、start_time 等) で、収集の型そのものではない
+- 承認画面からルールを作る (承認を記憶する) 操作は、まだ設計にも実装にも無い (検討は始まっている)
+- DESIGN-ja の柱 2「表示と照合を同じ型の上に置く。画面で見ている情報から、そのままルールを作れる」は、cw では照合するプロセスと表示するプロセスが分かれた形で満たすことになる。表示するプロセスは収集の結果を JSON で受け取って読み、ルールを作る (chain を使って pin する) のは chain を持つ daemon になる
 
 もう 1 つ、ユーザ権限で収集する時に取れない値の扱いが要る。pam-passkey は、祖先の収集と署名の検証を root の PAM モジュールからユーザ権限の helper に移す (pam-passkey の issue `2026-11-15-collect-in-helper-with-procline`)。
 
@@ -52,6 +59,7 @@ Rust の可視性では、ある crate の型の構築を別の特定の crate (
 - この DR が保証するのは chain の出どころ: 評価の入口に渡る `ProcessChain` は、収集の入口 (`collect_peer`、`collect_pid`) か、アプリのコードが呼ぶ `ProcessChain::from_collected` からしか作れない。`TaggedChain` は `Policy::tag` からしか作れない
 - 止めるのは、外から受け取ったバイト列を読み込むだけで chain ができること (アプリの書き手の取り違え)。アプリのコードが `ProcessInfo` を読み込みや手書きで用意して `from_collected` に渡すことは止めない。`from_collected` を呼ぶのはアプリ自身のコードで、評価するアプリ自身は脅威モデルの範囲外。呼び出し箇所は名前で探せる
 - 範囲外の入口 (アプリのコードが自分で値を選んで渡すもので、設計どおり): `EvalContext::new` / `with_observed` で与える観測値、`MatchTarget` と `Matcher` / `Vocabulary::class` に直接渡す `ProcessInfo`。どの観測値を渡すかはアプリの責務 (本番は `EvalContext::capture`)
+- 脅威モデルの上での位置づけ: 同じ uid の別プロセスに対する守りは、型をどう切っても変わらない。アプリが外から受け取った値を評価に渡さない限り安全で、渡せばどの案でも危ない。型の切り方で変わるのは、アプリの書き手が受け取った値と収集した値を取り違えにくいかどうかだけ。この DR の型の決定 (下) と不採用案の比較は、その取り違えにくさと、それで失うもの (表示する側の読み込みの規則、柱 2) の釣り合いで決めている
 
 ### 型
 
@@ -93,7 +101,7 @@ impl<'a> TaggedChain<'a> {
 
 - `ProcessChain` から `Deserialize` を外し、field を全部非公開にする。`ProcessChain` 型の値を JSON から読むコードはコンパイルが通らない
 - `ProcessChain::new` は `from_collected` にする。名前で、呼び出す側が収集した値だと表明していることが読める
-- `ProcessInfo`、`CodeSigning` などの `Deserialize` は残す。DR-0011 の JSON の読み込みの規則 (`mark` を事実から決め直し、一致しなければエラー) は、他のプロセスから受け取った収集の結果を表示する側を守る規則として変えない
+- `ProcessInfo`、`CodeSigning` などの `Deserialize` は残す。DR-0011 の JSON の読み込みの規則 (`mark` を事実から決め直し、一致しなければエラー) は、他のプロセスから受け取った収集の結果を表示する側を守る規則として変えない。cw のように照合するプロセスと表示するプロセスが分かれるアプリで、表示する側が照合と同じ型 (`ProcessInfo`) で読めるようにする (柱 2)
 - JSON から読んだ chain を評価に使う入口は持たない
 
 ### 呼び出し元が渡す値
@@ -108,7 +116,11 @@ procline が保証すること / しないこと:
   - 識別子が取れなかった時の繋がりは、付け替えを途切れとして出さない (起動時刻の順は付け替え先の launchd でも満たす)
   - 識別子が取れた時も、親が終わった後に exec したプロセスは launchd の子に見え、途切れの印 (`truncated`) は付かない。印が無いことは、どの行が期待する親であるかを示さない
   - 渡された値がどの行のものか、送り手が誰か
-- アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出し、`collect_peer` (ソケットの相手を audit token で決めて集める入口) を持つ。socketpair の相手は作ったプロセスを指した ([findings](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)、同じ uid で 1 回)
+- アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出し、`collect_peer` (ソケットの相手を audit token で決めて集める入口) を持つ
+- 送り手と受け渡しの経路について言えること ([findings](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)):
+  - pipe でも socketpair でも、書き込み側の端を持てるのは、作ったプロセスと、それが fork で引き継がせたか fd を渡したプロセスだけ (fd の性質。観測はしていない)
+  - pipe の読み側からは、書き込み側のプロセスをカーネルに問えない (`LOCAL_PEERPID` が `ENOTSOCK`、観測)。送り手が誰かは、起動の手順から言うことになる
+  - socketpair の読み側からは、作ったプロセスの pid と pidversion をカーネルの値で読める (fork と exec の後も、同じ uid で 1 回観測)。親子の繋がりとは別に送り手の候補を決められるので、付け替えの後の exec で列が launchd に繋がった場合も、作ったプロセスを名指せる。作ったプロセスが終わった後と、root が作って降格した子が読む組は観測していない
 
 ### DESIGN に書くこと
 
@@ -121,7 +133,7 @@ procline が保証すること / しないこと:
 
 | 案 | 不採用理由 |
 |---|---|
-| 収集した事実の型 (`ProcessInfo`、`CodeSigning`、`Signer`、`Root`、`RuntimeState` 等) からも `Deserialize` を外し、外から読む先を表示用の別の型にする | 追加で止まるのは、アプリの書き手が `ProcessInfo` を JSON から読み、`from_collected` の名前と文書に反してそれを渡す取り違えだけで、同じ uid の別プロセスにできることは増えも減りもしない (`from_collected` を呼ぶのはアプリのコード)。代わりに DR-0011 の読み込みの規則を失う。その規則は、他のプロセスから受け取った収集の結果を表示する側で、印と事実が食い違う値を通さないためのもの。表示する利用者 (cw の承認画面が別のプロセスなら) が現れると、`ProcessInfo` から証明書までの約 18 の型を写した表示用の型の組が要り、型の数が倍になる。`MatchTarget` と `Vocabulary::class` は `ProcessInfo` を直接受けるが、`Decision` を返さず、アプリのコードが値を選んで渡す範囲外の入口なので、この差を広げない |
+| 収集した事実の型 (`ProcessInfo`、`CodeSigning`、`Signer`、`Root`、`RuntimeState` 等) からも `Deserialize` を外し、外から読む先を表示用の別の型にする | 同じ uid の別プロセスに対する守りは、この DR の案と同じ (どちらも、アプリが外から受け取った値を評価に渡さない限り安全)。追加で減るのは、アプリの書き手が `ProcessInfo` を JSON から読み、`from_collected` の名前と文書に反してそれを渡す取り違えだけ。代わりに失うものが 2 つある。1 つは DR-0011 の読み込みの規則で、他のプロセスから受け取った収集の結果を表示する側で、印と事実が食い違う値を通さないためのもの。もう 1 つは柱 2 (表示と照合を同じ型の上に置く) で、cw は照合する daemon と表示する承認画面が別のプロセス (観測) なので、表示する側は `ProcessInfo` を読めないと、`ProcessInfo` から証明書までの約 18 の型を写した表示用の型の組を別に持つことになる。`MatchTarget` と `Vocabulary::class` は `ProcessInfo` を直接受けるが、`Decision` を返さず、アプリのコードが値を選んで渡す範囲外の入口なので、この差を広げない |
 | 収集の入口が、対象の識別子と渡された argv・cwd を受け、識別子が一致すれば列の先頭に入れる (issue の案) | 収集した事実と呼び出し元の主張が同じ field に入り、`argv` と `cwd` の照合が主張をそのまま照合する。値を使うアプリ (pam-passkey) は、その値を自分で持っている |
 | `ProcessInfo` に渡された値の別の field (`supplied: Option<Supplied>`) を足す | 照合とは混ざらないが、chain が主張を運ぶ型になる。使うアプリは 1 つで、そのアプリが値を持っている |
 | `argv` と `cwd` を出どころ付きの型 (`Collected(T)` / `Supplied(T)`) にする | 組み込みの項目とアプリの項目の全部が出どころを扱うことになり、扱い忘れた項目が主張を照合する |
@@ -143,12 +155,13 @@ procline が保証すること / しないこと:
 - 収集の入口は今のまま (`collect_peer`、`collect_pid`) で、足す入口は無い
 - 付け替えの後の exec で列が途切れずに launchd へ繋がること (issue `2026-11-15-ancestry-reset-by-exec-after-reparent`) は、列のどの行の間にも起き、この DR では変わらない。識別子が取れない環境では、付け替えだけでも同じことが起きる
 - pam-passkey の helper が渡された値をどの行に添え、どう照合し、合わない時にどうするかは、pam-passkey の設計文書で決める
+- cw が procline に載せ替えると、承認画面のプロセスは daemon から受け取った `ProcessInfo` を照合と同じ型で読んで表示でき、読み込みは印と事実の食い違いを拒む。承認画面からルールを作る操作を足す時は、chain を持つ daemon が `resolve_subject` と `Policy::grant` を呼び、承認画面は利用者が選んだもの (どの項目を pin するか) を返す。表示用の型は今は要らない
 - 未観測の点:
   - 識別子 (SPI) が取れない macOS での walk (今の macOS では uid を問わず取れた)
   - helper (hardened runtime、Developer ID 署名) が自分の pid で集めた時の所要時間と、列の先頭 (自分) の署名の検証の結果
   - 走っている `sudo` の子として起動された helper から集めた列で、2 番目が `sudo` になること (同じ uid の親子では観測した。親が実効 uid 0 の組は、walk が使う値が uid を問わず読めることだけ観測済み)
   - socketpair を root のプロセスが作り、降格して exec した子が読む組と、その audit token での `collect_peer`
-  - cw の実装での chain の使い方 (cw のリポは手元に無い)
+  - cw が procline に載せ替えた後に、承認画面のプロセスへ procline の収集の結果 (`ProcessInfo`) をそのまま渡すか、今のように自前の表示用の型に写して渡すか (cw の設計にまだ無い)
 
 ## 関連
 
@@ -158,5 +171,5 @@ procline が保証すること / しないこと:
 - [DR-0013](DR-0013-collect-only-dependencies.md): 収集だけのアプリの依存
 - [DESIGN-ja の「脅威モデルの前提」「識別子」「収集する情報」「収集の整合性」「API の骨格」](../DESIGN-ja.md)
 - issue: [JSON から読み込んだ ProcessChain を評価が信用する](../issue/2026-11-15-deserialized-chain-is-trusted-by-evaluate.md)、[呼び出し元が渡して補う入口](../issue/2026-11-15-caller-supplied-own-info.md)、[付け替えの後の exec](../issue/2026-11-15-ancestry-reset-by-exec-after-reparent.md)
-- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: socketpair の相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
+- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: socketpair の相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)、[findings: cw の評価と承認画面のプロセス](../findings/2026-11-15-cw-evaluation-and-approval-processes.md)
 - pam-passkey (別リポ): DR-0003 (helper の起動)、`crates/protocol` の `HelperInput` (helper の起動時の入力)、issue `2026-11-15-collect-in-helper-with-procline`

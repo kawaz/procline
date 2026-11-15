@@ -8,11 +8,13 @@
 
 - 親が `socketpair(AF_UNIX, SOCK_STREAM)` を作って fork し、子が片方の端だけを持って自分自身を exec した後、子の端の `LOCAL_PEERPID` と `LOCAL_PEERTOKEN` (の pid) は、socketpair を作った親の pid を返した。pidversion は、親が自分の端で読んだ値と同じだった
 - 親が作った直後に自分の端 (`sv[0]`) で読んでも、相手の pid は親自身だった。socketpair の相手の資格情報は、作ったプロセスのもので、その時に相手の端を持っているプロセスではない
+- pipe の読み側の fd に `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` を呼ぶと、`ENOTSOCK` (errno 38、Socket operation on non-socket) で失敗した。pipe からは、書き込み側を持つプロセスをカーネルに問えない
 
 ## 実用的な示唆
 
 - 呼び出し元が socketpair を作って片方の端を子 (helper) に渡せば、子はその端の audit token から、作ったプロセスをカーネルの値で知れる。procline の `collect_peer` はこの audit token で対象を決める
 - 指すのは「作ったプロセス」で、「今、相手の端に書いているプロセス」ではない。端を別のプロセスに渡す (fd を渡す、作った後に fork した別の子が書く) と食い違う
+- pipe でも socketpair でも、書き込み側の端を持てるのは、作ったプロセスと、それが fork で引き継がせたか fd を渡したプロセスだけ (fd の性質で、ここでは観測していない)。socketpair で増えるのは、作ったプロセスの pid と pidversion を、子の側からカーネルの値で読めること。pipe ではそれを問えず、「書いたのは自分を起動した側」は起動の手順から言うことになる
 
 ## 検証の詳細
 
