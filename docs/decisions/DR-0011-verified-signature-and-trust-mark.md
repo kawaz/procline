@@ -11,7 +11,7 @@
 - 証明書の拡張の OID (Developer ID、Mac App Store 等の印) も名乗れる。`anchor apple generic` を付けない OID / OU の条件は、偽の Developer ID の自己署名が満たした。OID の条件は `anchor apple generic` と組の時だけ意味を持つ (Apple の TN3127 の注意と同じ)
 - 証明書の種類: Developer ID は中間の 1.2.840.113635.100.6.2.6 と leaf の 6.1.13、Mac App Store は leaf の 6.1.9、開発用 (Apple Development) は leaf の 6.1.12 (取り出した証明書での観測。一次資料での裏取りは未)。TN3127 の開発用の条件 `certificate 1[field.1.2.840.113635.100.6.2.1]` は Mac App Store の中間も満たす
 - 公証 (requirement `notarized`) は Developer ID の時だけ成り立つ。Apple 自身、Mac App Store、開発用、ad-hoc では常に不成立。1 本 0.1〜0.5 ms で、`kSecCSNoNetworkAccess` を付けても観測した全部で結果は同じ
-- Team ID (`kSecCodeInfoTeamIdentifier`) は CodeDirectory の値で、意味を持つのは根が Apple の時だけ。Apple 自身のコードにも Team ID を持つものがある (Xcode の CoreSimulator)
+- Team ID (`kSecCodeInfoTeamIdentifier`) は CodeDirectory の値で、意味を持つのは根が Apple の時だけ。開発者が持つ証明書 (Developer ID、開発用、配布用) では、Security framework の検証 (`SecCodeCheckValidity` が通る `SecStaticCode::verifySignature`) が CodeDirectory の Team ID と leaf 証明書の OU の一致を強制する。Mac App Store で配られたものと Apple 自身のコードは照らされないが、署名するのが Apple (findings `2026-11-15-team-id-and-leaf-certificate-ou.md`)。Apple 自身のコードにも Team ID を持つものがある (Xcode の CoreSimulator)
 - 検証の失敗には種類がある: 走っている間に実行ファイルが更新・差し替えされた (`errSecCSStaticCodeChanged`、-67034)、実行ファイルが消えている (SecCode が得られず 100002)、それ以外。差し替えられた時に `SecCodeCopySigningInformation` が返すのは差し替えた先のディスク上のファイルの情報で、走っているコードの情報ではない
 - カーネルは exec した vnode に紐づけて、起動した時のコードの署名を持ち続ける。Security.framework は `kSecGuestAttributeDynamicCode` を足した `SecCodeCopyGuestWithAttributes` (以下 pid ベース) で、ディスクの代わりにカーネルの署名の blob を検証する。単体の実行ファイルの差し替え (-67034) と、ユーザ権限から読めない setuid の実行ファイル (走っている `sudo`。通常の方法は SecCode すら得られず 100013) は、pid ベースなら検証でき、`anchor apple` / Developer ID の requirement も評価できた。通常の方法で通る対象 (9 つ) では、pid ベースも同じ結果を返した。実行中に更新された app bundle (-67030) と、実行ファイルが消えたもの (-67065) は pid ベースでも失敗する (Info.plist とバンドルの場所をディスクから取るため)。この属性は公開ヘッダに宣言があるだけで、意味の説明が無い
 - 検証に成功した時の `kSecCodeInfoUnique` (cdhash) はカーネルの cdhash と一致した。Security.framework は検証の中でカーネルの cdhash と照合している (公開ソースの `cskernel.cpp`)
@@ -215,5 +215,6 @@ pub enum Mark {
 - [findings: audit token と kSecGuestAttributeDynamicCode](../findings/2026-11-15-audit-token-dynamic-code.md): 接続相手を audit token で参照した時の pid ベースの検証
 - [findings: 実行ファイルを消したプロセスの参照の時機](../findings/2026-11-15-deleted-executable-lookup-timing.md): 起動の直後に実行ファイルを消したプロセスの検証の失敗
 - [findings: ad-hoc の bit と証明書の列](../findings/2026-11-15-adhoc-flag-and-certificate-list.md): 証明書の列が空かどうかと CodeDirectory の ad-hoc の bit の一致
+- [findings: Team ID と leaf 証明書の OU](../findings/2026-11-15-team-id-and-leaf-certificate-ou.md)
 - pam-passkey (別リポ kawaz/pam-passkey): DR-0014、findings `2026-11-15-process-signing-elements.md`、`2026-11-15-running-code-identity.md`
 - TN3127: Inside Code Signing: Requirements (https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
