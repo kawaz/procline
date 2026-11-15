@@ -22,8 +22,6 @@ use super::cf;
 
 /// `kSecCSSigningInformation` (`<Security/SecCode.h>`, `1 << 1`).
 const K_SEC_CS_SIGNING_INFORMATION: u32 = 1 << 1;
-/// `kSecCSRequirementInformation` (`<Security/SecCode.h>`, `1 << 2`).
-const K_SEC_CS_REQUIREMENT_INFORMATION: u32 = 1 << 2;
 /// `kSecCSDynamicInformation` (`<Security/SecCode.h>`, `1 << 3`): the dynamic status of the running code.
 const K_SEC_CS_DYNAMIC_INFORMATION: u32 = 1 << 3;
 /// `kSecCSNoNetworkAccess` (`<Security/CSCommon.h>`, `1 << 29`): no online revocation checks, so the wait does not depend on the network.
@@ -112,16 +110,14 @@ pub(crate) fn subject_summary(certificate: &SecCertificate) -> Option<String> {
 /// The dictionary `SecCodeCopySigningInformation` returns.
 pub(crate) struct SigningInfo(CFDictionary);
 
-/// `SecCodeCopySigningInformation(code, kSecCSSigningInformation | kSecCSRequirementInformation | kSecCSDynamicInformation)`.
+/// `SecCodeCopySigningInformation(code, kSecCSSigningInformation | kSecCSDynamicInformation)`: every key read from the dictionary comes with these two flags; the embedded requirements are not read (the requirements are evaluated with `SecCodeCheckValidity`).
 pub(crate) fn signing_information(code: &SecCode) -> Result<SigningInfo, OSStatus> {
     let mut info: CFDictionaryRef = ptr::null();
     // SAFETY: `code` is a live SecCode, which the function accepts in place of a SecStaticCode, and `info` receives a retained dictionary on success.
     let status = unsafe {
         SecCodeCopySigningInformation(
             code.as_concrete_TypeRef(),
-            K_SEC_CS_SIGNING_INFORMATION
-                | K_SEC_CS_REQUIREMENT_INFORMATION
-                | K_SEC_CS_DYNAMIC_INFORMATION,
+            K_SEC_CS_SIGNING_INFORMATION | K_SEC_CS_DYNAMIC_INFORMATION,
             &mut info,
         )
     };

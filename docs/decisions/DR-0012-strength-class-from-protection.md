@@ -86,6 +86,7 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 | クラスを grant を作った時のプロセスだけで決める | `team_id` と `signing_id` は同じ身元の別のビルドでも満たせる。保護のあるビルドで作った grant に、持ち込んだ保護の無いビルドが当たる。評価の時に照合したプロセスで確かめ直す必要がある |
 | 保護の無いプロセスには署名由来の field を当てない (照合の側で外す) | `deny` が当たらなくなり、攻撃者が保護の無いビルドを使うだけで `deny` を外せる。照合は事実のまま行い、クラス (`allow` の制約) で扱う |
 | 保護の状態を CodeDirectory の flags (`kSecCodeSignatureRuntime`) から取る | カーネル (AMFI) は flags に hardened runtime の無い Apple のコードも hardened と扱い、走っている sudo は flags に無いのに status にはあった (観測)。保護を決めているのは動的な status |
+| 保護を緩める entitlement を、署名の entitlements の辞書に加えて status の bit (`CS_GET_TASK_ALLOW` の有無、`CS_FORCED_LV`・`CS_REQUIRE_LV` や `CS_HARD`・`CS_ENFORCEMENT` の不在) でも判定する | status の bit は辞書の逆写像でない。4 つのうち bit を持つのは `get-task-allow` だけで、それも観測した全部で辞書と一致した。library validation と実行ページの保護は、bit の不在を使うと entitlement を持たないプロセス (hardened runtime の無い ad-hoc の署名、`/bin/zsh`) を誤って拾い、`allow-dyld-environment-variables` には bit が無い (観測。findings [`2026-11-15-cs-status-bits-and-entitlements.md`](../findings/2026-11-15-cs-status-bits-and-entitlements.md))。辞書を読めない時は検証の失敗にする ([DR-0011](DR-0011-verified-signature-and-trust-mark.md)) |
 | 認可で開く状態を強にする | 利用者の認可のダイアログは要求元も対象も示さず、1 度下りると共有される (観測)。強い境界ではない |
 | build と読み込みの時は弱い側 (開いている) で制約を検査する | 署名由来の field を持つ rule が全部弱になり、手書きの「このアプリは常に allow」が書けなくなる。評価の時に確かめ直すので、上限で検査しても弱い条件の grant は採用されない |
 
