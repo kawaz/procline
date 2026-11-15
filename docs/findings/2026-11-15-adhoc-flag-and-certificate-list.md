@@ -21,6 +21,7 @@ procline の検証 (DR-0011 の手順 5) は、署名の情報に証明書が無
 | running code | はい | あり | 2 |
 
 - 食い違う組 (証明書の列が空で bit なし、証明書があって bit あり) は 0 件だった
+- 別の時刻に、確認の専任が同じ手順で測り直した: 全プロセス 998 個、検証に成功した 984 個で、disk で証明書あり (bit なし) 930、disk で ad-hoc (証明書なし、bit あり) 52、running code で ad-hoc 2。食い違いは 0 件
 - running code で検証したものは 2 個とも ad-hoc で、証明書のある署名を running code で検証したプロセスは無かった。この組合せは観測していない
 - 印の内訳: `apple` 798、`developer_id_notarized` 140、`mac_app_store` 2、`development` 1、`adhoc` 58
 - 検証に成功しなかった 14 個 (`failed` 13、`unsigned` 1) は、署名の情報を読む段に達していないので数えていない

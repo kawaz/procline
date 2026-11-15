@@ -43,7 +43,7 @@ procline の収集のテストの足場 (sh とその子のサブシェル。sh 
 
 ### 推奨 (採用): `kinfo_proc` の `p_stat` が `SZOMB` なら、`Recorded::read` を「そのプロセスは無い」(`ESRCH`) で失敗させる
 
-- `KinfoProc` に、`p_stat == SZOMB` を表す値を足す (crate の中の型)。`Recorded::read` は zombie を `ESRCH` の失敗として返す
+- `kinfo_proc` が zombie を `ESRCH` の失敗として返し、`Recorded::read` はそれをそのまま返す (呼び出し元は `Recorded::read` だけなので、`KinfoProc` の型は変えない)
 - 既存の分岐がそのまま当てはまる:
   - walk: 親の読み込みが `ESRCH` なら `AncestorExited` で列を終える
   - 最後の確かめ直し: 祖先なら列をその手前で `AncestorExited` で終える。対象なら `NoSuchProcess` (pid で集めた時) か `IdentityChanged` (接続相手)
@@ -60,7 +60,15 @@ procline の収集のテストの足場 (sh とその子のサブシェル。sh 
 ## 結果
 
 - `kinfo_proc` (呼び出し元は `Recorded::read` だけ) が、`p_stat` が `SZOMB` の時に、既存の「無い」と同じ `no_such_process()` (`ESRCH`) を返す。`KinfoProc` の型は変えていない。`p_stat` の offset 36 (`char`) と `SZOMB` 5 は、SDK (MacOSX 26.5、arm64) のヘッダを `offsetof` でコンパイルして測った (同じプログラムで既存の `p_comm` 243、`e_ppid` 560 も一致)
-- 対象が zombie の時: pid の経路は `NoSuchProcess`、接続相手の経路は `IdentityChanged` (開始時に zombie ならどちらも `NoSuchProcess`)。どれも回収済みで消えたプロセスの時と同じ
+- 対象が終わっている時 (zombie でも回収済みでも同じ) の返り値。どれも回収済みで消えたプロセスの時と同じ:
+
+  | 経路 | 終わった時機 | 返り値 | 根拠 |
+  | --- | --- | --- | --- |
+  | pid (`collect_pid`) | 収集の開始の前 | `NoSuchProcess` | 観測 (zombie と回収済み) |
+  | pid | 対象を記録した後 (収集の途中) | `NoSuchProcess` | テスト (zombie) |
+  | 接続相手 (`collect_peer`) | audit token を読む前 | `Peer` (`ENOTCONN`、Socket is not connected) | 観測 (zombie と回収済み) |
+  | 接続相手 | audit token を読んだ後・対象を記録する前 | `NoSuchProcess` | コードを読んだだけ (時機は作っていない) |
+  | 接続相手 | 対象を記録した後 (収集の途中) | `IdentityChanged` | テスト (zombie) |
 - テスト (`collect::tests`): `a_zombie_ancestor_before_the_walk_ends_the_chain`、`a_zombie_ancestor_after_the_signatures_ends_the_chain`、`a_target_that_became_a_zombie_is_gone` (pid と接続相手)。zombie は kill と `waitid(WEXITED | WNOWAIT)` で作り、時間待ちなし。修正を外すと 3 つとも落ちる (祖先は列が 2 つ残る、対象は `Ok`)。失敗しても子は残らない (Drop で回収)
 - DESIGN (ja/en) の「収集の整合性」の 4 に、回収されていない終了済みのプロセスも終了として扱うことを足した
 
