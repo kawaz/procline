@@ -18,7 +18,7 @@ origin: 自リポ TODO (pam-passkey のセッションからの起票)
 - XNU の公開ソースでも、exec は `pinsertchild(…, in_exec = true)` を通り、`p_puniqueid` をその時の親の `p_uniqueid` で書き直す
 - fork して親が終わってから exec するのは、同じ uid のプロセスが自分でできる (デーモン化の普通の形)
 - 祖先への条件は肯定の条件で、系譜を消すと allow は当たらなくなるだけ (単調。DR-0008)。一方、祖先を条件にした deny は、系譜を消すことで当たらなくできる。途切れた列なら `undecidable` に出るが、この場合は途切れないので出ない
-- 統括の観測 (2026-11-15、1 例): 親 (サブシェル) が普通に終了した後の走っている `sudo` を `dump` で集めたら、`parent_unique_id` が 1 で、列は launchd に繋がり `truncated` は無かった。sudo の exec がサブシェルの終了より後だった場合と合う (推定)
+- 観測 (2026-11-15、1 例): 親 (サブシェル) が普通に終了した後の走っている `sudo` を `dump` で集めたら、`parent_unique_id` が 1 で、列は launchd に繋がり `truncated` は無かった。sudo の exec がサブシェルの終了より後だった場合と合う (推定)
 
 ## 確かめること
 

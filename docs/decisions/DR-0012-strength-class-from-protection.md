@@ -92,6 +92,8 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 ## Consequences
 
 - hardened runtime の無い署名済みのアプリを `binary` で書いた `allow` には、制約の表が弱に課す scope が要る。保護のあるアプリ (公証済みの Developer ID は hardened runtime が要件) は今と同じく強
+- 公証済みで hardened runtime のアプリでも、保護を緩める 4 つの entitlement のどれかを持てば、署名由来の field も `process` も強にならない (`get-task-allow` だけなら中、他の 3 つのどれかがあれば弱)。JIT やプラグインのために `disable-library-validation` を持つアプリ (2026-11-15 に観測した Claude Code がそう) は弱になり、制約の表が弱に課す scope が要る
+- platform binary でも status に `CS_RUNTIME` を持たないものがある (2026-11-15 にこの Mac の走っているプロセスを `csops(CS_OPS_STATUS)` で 2 回数え、platform の印を持つ 796 個のうち 3 個、804 個のうち 2 個。CoreSimulatorService、CoreDeviceService、Xcode 同梱の Python)。そうした Apple のコードは root 所有の `path` で書いても強にならない。`csops` の値が `kSecCodeInfoStatus` と同じかは確かめていない
 - 保護のあるビルドで作った grant に、同じ身元の保護の無いビルドが当たった時は、評価で採用されず `Decision.too_weak` に出る
 - `path` の build と読み込みの時のクラスが中から強 (上限) に変わる。実際のクラスは grant と評価で決まる
 - 評価のたびに、`allow` の grant の自身への条件のクラスを照合したプロセスで算出する。収集した署名の情報から決めるので、評価中に OS を呼ばない
@@ -101,6 +103,7 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
   - `disable-library-validation` の対象が実行時に `dlopen` するプラグインや `@rpath` の探す先が利用者に書ける場合、`/Applications` の app bundle の中のライブラリを置き換えた場合
   - `allow-dyld-environment-variables` の対象のライブラリを、同じ Team ID で署名された別のライブラリに環境変数で差し替えること
   - `disable-executable-page-protection` の対象で、実際に書き換えた実行ページを持つプロセスの振る舞い
+  - hardened runtime の他の例外の entitlement (`com.apple.security.cs.allow-jit`、`com.apple.security.cs.allow-unsigned-executable-memory`) が、同じ uid からの経路を開くか。保護を緩める entitlement を 4 つに限るのは、同じ uid からの経路を観測か一次資料で確かめたものだけを数えるため
   - 宣言済みのデバッガと認可が、root が降格して起動した対象にどう働くか (認可がある時)
   - 開発者モード (`DevToolsSecurity -enable`) の Mac での、認可の段の振る舞い
   - SIP を無効にした Mac
@@ -113,5 +116,6 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 - [DR-0011](DR-0011-verified-signature-and-trust-mark.md): 検証した署名の型 (`RuntimeState`、entitlements)
 - [DR-0003](DR-0003-rule-strength-from-own-match.md): ルールの強さは自身への条件で決める
 - [DR-0008](DR-0008-evaluation-semantics.md): 評価の手順 (この DR が `allow` の採否の確かめ直しを足す)
+- [DR-0005](DR-0005-process-identity-as-one-item.md): プロセスの個体識別の `process` (この DR がクラスの決め方を置く)
 - [DESIGN-ja の「脅威モデルの前提」「強さ: クラスと深さ」「評価」](../DESIGN-ja.md)
-- pam-passkey (`~/.local/share/repos/github.com/kawaz/pam-passkey/main`): findings `2026-11-15-process-memory-probe.md`、`2026-11-15-add-setup-process-protection.md`
+- pam-passkey (別リポ kawaz/pam-passkey): findings `2026-11-15-process-memory-probe.md`、`2026-11-15-add-setup-process-protection.md`

@@ -63,7 +63,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | uid、gid、所属グループ(照合は数値。表示用に名前も持つ。代表名 `name` (`getpwuid_r` / `getgrgid_r` の結果) と、その ID に解決される全部の名前 `names` を持つ。全部の名前は passwd / group の全走査が要り 1 回の収集で約 16 ms かかるので `CollectOptions.all_names` で選ぶ。1 つの ID に名前が複数あるのは Open Directory で uid が重複している場合) | `LOCAL_PEERCRED`、audit token(接続相手)、`kinfo_proc`(祖先。所属グループは `cr_groups` の最大 16 件で、先頭が実効 gid) | 弱 |
 | コード署名(検証の結果。成功した時だけ識別子、cdhash、署名者の証明書チェーン、証明書の根と種類、Team ID、公証、entitlements、カーネルの動的な status の hardened runtime・platform binary・debugged) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid。読めないか差し替えられた時は `kSecGuestAttributeDynamicCode` を足して検証し直す)、`SecCodeCheckValidity`(requirement つき)、`SecCodeCopySigningInformation` | 強(検証に成功し、保護ありのときだけ。「署名の検証と信頼の印」「強さ: クラスと深さ」) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所で、保護あり)、中(利用者が書ける場所、または認可で開く)、弱(保護が開いている) |
-| 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すので実質強い)。保護が開いていれば弱 |
+| 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すが、Linux の収集は保護の状態をまだ持たないので、持つまでは弱として扱う)。保護が開いていれば弱 |
 | app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取り、`VerifiedSignature.bundle_id` に持つ(照合に使う)。実行パスから `.app` を遡って読む `ProcessInfo.bundle` は表示用 | 強(`binary` の署名由来の field。`team_id`・`signing_id` と組。検証に成功し、保護ありのときだけ強で、認可で開くなら中、保護が開いていれば弱。「強さ: クラスと深さ」) |
 | 責任プロセス | `responsibility_get_pid_responsible_for_pid`(私的 API)。pid でなく個体の識別(`ProcessInfo.responsible: Option<ProcessIdentity>`)で持つ | 中 |
 | プロセス名、argv、cwd、tty | `kinfo_proc`(名前と tty)、`KERN_PROCARGS2`(argv)、`PROC_PIDVNODEPATHINFO`(cwd)。argv と cwd は同じ uid か root のみ | 弱 |
@@ -105,7 +105,7 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 | `unsigned` | 署名なし | 赤 |
 | `not_checked` | 時間の予算で検証しなかった | 赤 |
 
-赤は「身元が確かめられない」に揃えます。hardened runtime と platform binary は印に使わず、色を付けずに事実として出します。Team ID は根が Apple の時だけ持ちます(署名する側が CodeDirectory に書いた値なので、根が Apple でなければ何も示さない)。
+赤は「身元が確かめられない」に揃えます。hardened runtime と platform binary は印に使わず、色を付けずに事実として出します。Team ID は根が Apple 自身か Apple の発行(Developer ID、Mac App Store、開発用など)の時だけ持ちます(署名する側が CodeDirectory に書いた値なので、根がそのどちらでもなければ何も示さない)。
 
 アイコンや名前は誰でも真似できるので、画面では印と Team ID を並べて出します。過去の承認と比べて「署名者が変わった」と警告する仕組みは持ちません。ルールやタグは署名者で照合するので、署名者が変われば自然に当たらなくなるためです。
 
@@ -374,11 +374,11 @@ rule の値が placeholder(`true`)の項目や field は、grant で実値の完
 
 値の妥当性は項目が検査し(`Matcher::validate`。読み込みと builder が呼ぶ)、placeholder を実値に置き換えるのも項目です(`Matcher::resolve`。そのプロセスに値が無ければ `ResolveError::ValueUnavailable`)。
 
-`process`、`binary`、`os.session` は構造を持つ値で、完全一致だけにします(`binary` はどの field も完全一致)。署名の条件は、署名の検証に成功したとき(`CodeSigning::Verified`)だけ一致とみなします。Team ID は根が Apple の証明書のときだけ持つので、ad-hoc 署名と Apple 以外の証明書の署名は、Team ID の条件には決して一致しません。
+`process`、`binary`、`os.session` は構造を持つ値で、完全一致だけにします(`binary` はどの field も完全一致)。署名の条件は、署名の検証に成功したとき(`CodeSigning::Verified`)だけ一致とみなします。Team ID は根が Apple 自身か Apple の発行の証明書のときだけ持つので、ad-hoc 署名と Apple 以外の証明書の署名は、Team ID の条件には決して一致しません。
 
 **`process`** は「この個体のプロセス」を表す項目です(決定の記録: [DR-0005](decisions/DR-0005-process-identity-as-one-item.md))。rule では `true`(承認したその個体を pin)か具体値の複合を書き、grant では `Policy::grant` がその時点で取れた識別子と boot UUID(`kern.bootsessionuuid`)を全部持たせた複合値になります(例 `{"process": {"boot_uuid": "7B1E…", "unique_id": 12345, "pid": 501, "start_time": {"secs": 1762570683, "micros": 123456}}}`)。照合は両側に揃っている識別子を全部比べ、全部一致したときだけ当たります。最悪でも pid と起動時刻の組の一致を見ます。ルールを書く人は、どの識別子で比べたかを気にしません。クラスは強で、照合したプロセスの保護の状態で下がります(「強さ: クラスと深さ」)。`match` にも `ancestors` の中にも書けるので、「このターミナルのタブのシェルの子孫」が書けます。pin したプロセスが終わればそのプロセスは列に居なくなり、grant は当たらなくなります。列に居るプロセスの寿命はこれで表せます。終わったプロセスを指す grant の削除は掃除(アプリ)の責務です。UI では「このプロセスだけ」の 1 選択肢として出します。`process` は個体の同一性で、exec で中身のコードが変わっても同じ個体です。コードの同一性は `binary` が担うので、コードも固定したいときは `binary` と併用して pin します。
 
-**`binary`** は「このプロセスのコード」を表す項目です。値は任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` です(例 `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`)。field の値は文字列か placeholder の `true` で、grant ではどれも文字列です。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id`、`signing_id`、`bundle_id` は署名と署名で封印された Info.plist の値そのままです(照合元は `VerifiedSignature` の `team_id()`、`signing_id()`(識別子)、`bundle_id`、`cdhash`。`cdhash` は検証に成功した code の `kSecCodeInfoUnique` で、走っているコードの cdhash)。真偽値を値に取る field は無いので、`true` は placeholder の意味だけを持ちます。照合は値にある field をそれぞれ検証し、全部が一致したときだけ当たります(AND)。署名由来の field(`team_id`、`signing_id`、`bundle_id`、`cdhash`)は、署名の検証に成功したときだけ一致とみなします。署名が有効なことは署名由来の field の照合の性質なので、それだけを表す項目は持ちません。クラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中で、照合したプロセスの保護の状態で下がります(「強さ: クラスと深さ」)。Team ID は根が Apple の証明書の時に取れますが、Apple 自身のコードは Team ID を持たないものが多く(Terminal.app、`/bin/zsh` 等の OS のバイナリ)、持つものもあります(Xcode の CoreSimulator など)。`signing_id` は `team_id` と組でしか書けないので、Team ID を持たない OS のバイナリは `binary` の署名由来の field で指せません。そのため OS のバイナリは `binary` ではなく root 所有の `path` で書きます(照合したプロセスが保護ありなら強)。
+**`binary`** は「このプロセスのコード」を表す項目です。値は任意個の field の複合 `{digest?, team_id?, signing_id?, bundle_id?, cdhash?}` です(例 `{"binary": {"team_id": "VWXYZ67890", "signing_id": "com.anthropic.claude-code"}}`)。field の値は文字列か placeholder の `true` で、grant ではどれも文字列です。`digest` は `sha256:<hex>`、`cdhash` は hex、`team_id`、`signing_id`、`bundle_id` は署名と署名で封印された Info.plist の値そのままです(照合元は `VerifiedSignature` の `team_id()`、`signing_id()`(識別子)、`bundle_id`、`cdhash`。`cdhash` は検証に成功した code の `kSecCodeInfoUnique` で、走っているコードの cdhash)。真偽値を値に取る field は無いので、`true` は placeholder の意味だけを持ちます。照合は値にある field をそれぞれ検証し、全部が一致したときだけ当たります(AND)。署名由来の field(`team_id`、`signing_id`、`bundle_id`、`cdhash`)は、署名の検証に成功したときだけ一致とみなします。署名が有効なことは署名由来の field の照合の性質なので、それだけを表す項目は持ちません。クラスは値にある field のうち最も強いもので、署名由来の field があれば強、`digest` だけなら中で、照合したプロセスの保護の状態で下がります(「強さ: クラスと深さ」)。Team ID は根が Apple 自身か Apple の発行の証明書の時に取れますが、Apple 自身のコードは Team ID を持たないものが多く(Terminal.app、`/bin/zsh` 等の OS のバイナリ)、持つものもあります(Xcode の CoreSimulator など)。`signing_id` は `team_id` と組でしか書けないので、Team ID を持たない OS のバイナリは `signing_id` では指せません(`cdhash` は単独で書けます)。そのため OS のバイナリは root 所有の `path` で書きます(照合したプロセスが保護ありなら強)。
 
 値の妥当性の規則は `binary` の中に閉じています。
 
@@ -392,7 +392,7 @@ rule の値が placeholder(`true`)の項目や field は、grant で実値の完
 builder はこの規則を満たすように field を揃えて `true` を置き(利用者が `signing_id` を選べば `team_id` も入る)、読み込みは満たさない値をエラーにします。
 
 - `cdhash` は、下の field の値を全部決める最も強い field です。CodeDirectory が identifier、Team ID、Info.plist のハッシュを含むためです(SDK の `cs_blobs.h` の `CS_SUPPORTSTEAMID`、`teamOffset`、`CSSLOT_INFOSLOT`)。
-- `digest` は実行パス上のファイルの内容のハッシュで、署名に頼れないときの床として置きます。収集するかは `CollectOptions::digest` で選びます(既定は取らない)。macOS では `proc_pidpath` のパスを読むので、exec の後にファイルを置き換えられると稼働中の像と食い違います(クラスは中)。Linux では `/proc/<pid>/exe` が稼働中の inode を指すので、実質強い手段になります。署名由来の field が取れる環境・アプリでは `digest` を使わず、UI は署名由来の field を優先して出します。
+- `digest` は実行パス上のファイルの内容のハッシュで、署名に頼れないときの床として置きます。収集するかは `CollectOptions::digest` で選びます(既定は取らない)。macOS では `proc_pidpath` のパスを読むので、exec の後にファイルを置き換えられると稼働中の像と食い違います(クラスは中)。Linux では `/proc/<pid>/exe` が稼働中の inode を指しますが、Linux の収集は保護の状態をまだ持たないので、持つまでは保護の状態で決まる項目と同じく弱として扱います。署名由来の field が取れる環境・アプリでは `digest` を使わず、UI は署名由来の field を優先して出します。
 
 **`os.session`** は OS の世代を段階で選ぶ寿命型の条件です(世代の定義は「scope: grant の寿命」)。subject の `match` ではなく rule の `conditions` に書きます。引数は段階 `boot` < `awake` < `unlocked` で、pin 値は選んだ段階以下の世代の複合です(例 `{"boot": "7B1E…", "awake": 起床の時刻, "unlocked": 解錠の時刻}`)。`check` は段階以下の世代が全部一致したときだけ真です。条件の項目なので、ルールの強さ(subject のクラス)には数えません。
 
@@ -616,8 +616,8 @@ struct ObserveError { reason: String }
 | ルールの強さ(クラス) | `allow` で許される scope(アプリが与える制約の例) |
 | --- | --- |
 | 強(保護ありのプロセスの署名、`process`、root 所有で利用者が書けない場所の `path`) | 制限なし |
-| 中(責任プロセス、`digest`、利用者が書ける場所の `path`) | `until` が 7 日以内、または世代の scope を含む |
-| 弱(名前、cwd、argv、uid、gid、tty) | 世代の scope(`os.session`、`app.unlock` など)を含む |
+| 中(責任プロセス、保護が開いていないプロセスの `digest` と利用者が書ける場所の `path`、認可で開くプロセスの署名・`process`・root 所有の `path`) | `until` が 7 日以内、または世代の scope を含む |
+| 弱(名前、cwd、argv、uid、gid、tty、保護が開いているプロセスの署名・`digest`・`path`・`process`) | 世代の scope(`os.session`、`app.unlock` など)を含む |
 
 `deny` には制約をかけません。弱い条件の拒否も、少なくとも安全側には働くからです。画面では、弱い条件を選んだ時点で「同じユーザーの他のプロセスも満たせる条件です」と表示します。
 
@@ -671,7 +671,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // chain.boot_uuid: String。収集側が kern.bootsessionuuid を取る
 // p.code_signing: Option<CodeSigning>(None は収集しなかった)。CodeSigning { Verified(VerifiedSignature), Failed(FailureReason), Unsigned, NotChecked }。FailureReason { Replaced, Missing, Other }
 // VerifiedSignature { identifier, cdhash, signer: Signer, runtime: RuntimeState, entitlements, bundle_id, verified_from: VerifiedFrom }。Signer { AdHoc { linker_signed }, Certificate { chain, root: Root } }。Root { Apple { team_id }, AppleIssued { team_id, kind: CertificateKind }, Other }。CertificateKind { DeveloperId { notarized }, MacAppStore, Development, Other }。RuntimeState { hardened_runtime, platform_binary, debugged }(カーネルの動的な status)。VerifiedFrom { Disk, RunningCode }
-// code_signing.mark(): Apple / DeveloperIdNotarized / DeveloperId / MacAppStore / Development / AppleIssuedOther / OtherCertificate / Adhoc / Failed / Unsigned / NotChecked。VerifiedSignature::team_id() は根が Apple の時だけ値を返す
+// code_signing.mark(): Apple / DeveloperIdNotarized / DeveloperId / MacAppStore / Development / AppleIssuedOther / OtherCertificate / Adhoc / Failed / Unsigned / NotChecked。VerifiedSignature::team_id() は根が Apple か AppleIssued の時だけ値を返す
 // CollectOptions.signature_budget: Option<Duration>。予算を超えたら、検証を始めていないプロセスは NotChecked
 // ProcessInfo は digest: Option<String> と path_meta: Option<PathMeta> を持つ。PathMeta { owner_uid: u32, writable_by_user: bool }(path のクラスの判定に使う)
 // ProcessInfo.responsible: Option<ProcessIdentity>。責任プロセスは pid でなく個体の識別で持つ

@@ -194,14 +194,13 @@ pub enum Mark {
 ## Consequences
 
 - 表示と照合の元が同じ型 (`CodeSigning`) になり、検証に成功していない署名からは身元が取れない
-- `binary` の `team_id` は、根が Apple の時だけ照合元を持つ。今の自己署名の Team ID (codesign の自己署名では Team ID は入らなかったが、CodeDirectory を自前で組めば入りうる。未観測) で当たる経路が閉じる
+- `binary` の `team_id` は、根が `Apple` か `AppleIssued` の時だけ照合元を持つ (Developer ID、Mac App Store、開発用の証明書は `AppleIssued`)。今の自己署名の Team ID (codesign の自己署名では Team ID は入らなかったが、CodeDirectory を自前で組めば入りうる。未観測) で当たる経路が閉じる
 - pam-passkey の `protocol::signature` (DR-0014 の検証の手順、失敗の分類、印) と同じ判定がここに置かれ、載せ替えの時に向こうを消せる。印の値は同じ 11 個。JSON の形は違う (procline は型の形を写す)。承認ページは載せ替えの時に追従する
 - 走っている `sudo` (setuid、実行ファイルを読めない) を、ユーザ権限の収集から `apple` と検証できる (pid ベース)
 - 実行中に更新された app bundle と、実行ファイルが消えたプロセスは `Failed` になる。走っているコードが改ざんされたわけではない (カーネルの cdhash は起動時のままで、status は valid)
 - 証明書と公証のオンラインの失効確認はしない。失効した Developer ID の証明書や取り消された公証が、端末に失効の情報が届くまで印に出ない
 - 説明の無い属性 (`kSecGuestAttributeDynamicCode`) に依るのは、通常の方法が 100013 か -67034 で失敗した時だけ
 - 未観測の点:
-  - 接続相手を audit token で参照した時の pid ベースの検証 (`kSecGuestAttributeAudit` と `kSecGuestAttributeDynamicCode` の組)。公開ソースは audit token も受ける形だが、実機で確かめていない。段 2 の最初に確かめる
   - 開発用の leaf の OID 1.2.840.113635.100.6.1.12 の一次資料での裏取り
   - ネットワークの無い状態での `notarized` の評価
   - pid ベースの -67065 が、削除以外に何で出るか
@@ -213,5 +212,8 @@ pub enum Mark {
 - [DR-0012](DR-0012-strength-class-from-protection.md): 強さのクラスを対象の保護の状態で決める (この DR の `RuntimeState` と entitlements を使う)
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): `binary` の値の形と、署名由来の field は検証が通った時だけ当たること
 - [findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md): `anchor apple generic` の評価
-- pam-passkey (`~/.local/share/repos/github.com/kawaz/pam-passkey/main`): DR-0014、findings `2026-11-15-process-signing-elements.md`、`2026-11-15-running-code-identity.md`
+- [findings: audit token と kSecGuestAttributeDynamicCode](../findings/2026-11-15-audit-token-dynamic-code.md): 接続相手を audit token で参照した時の pid ベースの検証
+- [findings: 実行ファイルを消したプロセスの参照の時機](../findings/2026-11-15-deleted-executable-lookup-timing.md): 起動の直後に実行ファイルを消したプロセスの検証の失敗
+- [findings: ad-hoc の bit と証明書の列](../findings/2026-11-15-adhoc-flag-and-certificate-list.md): 証明書の列が空かどうかと CodeDirectory の ad-hoc の bit の一致
+- pam-passkey (別リポ kawaz/pam-passkey): DR-0014、findings `2026-11-15-process-signing-elements.md`、`2026-11-15-running-code-identity.md`
 - TN3127: Inside Code Signing: Requirements (https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)

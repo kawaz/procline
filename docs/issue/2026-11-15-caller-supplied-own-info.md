@@ -15,7 +15,7 @@ pam-passkey は、祖先の収集と署名の検証を root の PAM モジュー
 ## 背景 (事実)
 
 - argv (`KERN_PROCARGS2`) と cwd (`PROC_PIDVNODEPATHINFO`) は同じ uid か root からしか取れない (DESIGN-ja「収集する情報」、[findings](../findings/2026-11-09-collect-pid-observations.md): 別 uid では `EPERM`)
-- 統括の観測 (2026-11-15): 走っている `sudo` (uid 0 / ruid 501 / svuid 0) をユーザ権限から `dump` で集めると、argv と cwd は取れず、署名も取れなかった。`codesign -dv <pid>` も `Permission denied`
+- 観測 (2026-11-15): 走っている `sudo` (uid 0 / ruid 501 / svuid 0) をユーザ権限から `dump` で集めると、argv と cwd は取れず、署名も取れなかった。`codesign -dv <pid>` も `Permission denied`
 - 署名は、通常の方法では SecCode が得られない (100013) が、`kSecGuestAttributeDynamicCode` を足した検証 (カーネルが持つ署名を使う) ならユーザ権限から `anchor apple` まで評価できた (別リポ pam-passkey の findings `2026-11-15-running-code-identity.md`)。[DR-0011](../decisions/DR-0011-verified-signature-and-trust-mark.md) の手順はこれを使う
 - `kinfo_proc` (ppid、uid、起動時刻、名前)、`PROC_PIDUNIQIDENTIFIERINFO`、`proc_pidpath` は uid を問わず読める (findings)
 - 呼び出し元が渡す値は、呼び出し元が自分について主張するもので、procline が収集したものではない
@@ -31,4 +31,4 @@ pam-passkey は、祖先の収集と署名の検証を root の PAM モジュー
 
 - DESIGN-ja「収集する情報」「収集の整合性」
 - [DR-0011](../decisions/DR-0011-verified-signature-and-trust-mark.md): ユーザ権限から走っている `sudo` の署名を検証する手順
-- pam-passkey (`~/.local/share/repos/github.com/kawaz/pam-passkey/main`) の helper の方針
+- pam-passkey (別リポ kawaz/pam-passkey) の helper の方針

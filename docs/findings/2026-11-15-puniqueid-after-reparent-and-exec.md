@@ -10,7 +10,7 @@
 - 付け替えられた後でそのプロセスが exec すると、`p_puniqueid` はその時点の親 (launchd) の `p_uniqueid` = 1 になる。親の終わり方にも、exec する先が setuid root かにもよらない (4 通りで同じ)。`p_uniqueid` は exec の前後で変わらない
 - XNU の公開ソースでも、exec は親の一覧への入れ直し (`pinsertchild(…, in_exec = true)`) を通り、そこで `p_puniqueid` をその時の親の `p_uniqueid` で書き直す (下の引用)
 - [2026-11-09 の findings](./2026-11-09-collect-pid-observations.md) の「付け替えの後も `p_puniqueid` は元の親のまま」は、付け替えの後に exec していない場合の観測で、今回も同じ結果だった。exec を挟むと結果が変わる
-- 統括の観測 (2026-11-15、1 例) で、親 (サブシェル) が普通に終了した後の走っている `sudo` の `parent_unique_id` が 1 で、列が launchd に繋がっていたのは、`sudo` の exec がサブシェルの終了より後だった場合と合う (推定。その時の順序は記録が無い)
+- この測定とは別の観測 (2026-11-15、1 例) で、親 (サブシェル) が普通に終了した後の走っている `sudo` の `parent_unique_id` が 1 で、列が launchd に繋がっていたのは、`sudo` の exec がサブシェルの終了より後だった場合と合う (推定。その時の順序は記録が無い)
 
 ## 実用的な示唆
 
@@ -84,4 +84,4 @@ pinsertchild(proc_t parent, proc_t child, bool in_exec)
 - 別 uid (root) のプロセスが親で、その親が終わる組 (利用者の権限では、root の親を作って終わらせられない)
 - 親が終わる前に exec し、その後にもう一度 exec した場合 (2 回目の exec でも launchd の値になると読めるが、確かめていない)
 - `posix_spawn` の属性 (`POSIX_SPAWN_SETEXEC` 等) で exec した場合
-- 統括の観測した `sudo` の起動の順序 (サブシェルの終了と `sudo` の exec のどちらが先だったか)
+- 上の別の観測での `sudo` の起動の順序 (サブシェルの終了と `sudo` の exec のどちらが先だったか)
