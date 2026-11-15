@@ -606,7 +606,7 @@ fn path_class_follows_path_meta() {
 //
 // - 保護あり: hardened runtime があり、debugged でなく、保護を緩める 4 つの entitlement (get-task-allow、cs.allow-dyld-environment-variables、cs.disable-library-validation、cs.disable-executable-page-protection) のどれも無い
 // - 認可で開く: hardened runtime があり、debugged でなく、4 つのうち get-task-allow だけがある。宣言済みのデバッガの接続が利用者の認可の段に進むだけで、同じ uid のプロセスだけでは満たせない。process に限り、hardened runtime が無く 4 つのどれも無い時もこれ (起動時の差し込みは別のプロセスを作るだけで、走っている個体の乗っ取りには entitlement を持たないプロセスからの接続が要り、それはカーネルが断る)
-// - 開いている: それ以外。debugged、get-task-allow 以外の 3 つ (観測していないので弱い側に倒す)、hardened runtime が無い (binary と path は起動時の差し込みで同じコードの身元を満たせる)、署名を検証できなかった
+// - 開いている: それ以外。debugged、get-task-allow 以外の 3 つ、hardened runtime が無い (binary と path は起動時の差し込みで同じコードの身元を満たせる)、署名を検証できなかった。3 つの entitlement の根拠は観測: disable-library-validation は、環境変数では差し込めないが、読み込むライブラリのファイルを置き換えられれば別の署名のライブラリがそのまま読み込まれ、そのコードの身元で動く (どこから読み込むかは署名からは分からない)。allow-dyld-environment-variables は、単独では差し込む経路を観測していないが、dyld が利用者の環境変数を読み、disable-library-validation と組めば環境変数で差し込めた。disable-executable-page-protection は、カーネルの status から CS_HARD と CS_ENFORCEMENT が外れ、書き換えた実行ページや署名の無い実行ページを拒まなくなる (署名が示す「改変なしに動いている」をカーネルが保証しない)
 //
 // クラスの表 (保護あり / 認可で開く / 開いている): 署名由来の field を持つ binary、root 所有で書けない場所の path、process は 強 / 中 / 弱。digest だけの binary と書ける場所の path は 中 / 中 / 弱。責任プロセスは保護によらず中、name / cwd / argv / uid / gid / tty は弱。
 
