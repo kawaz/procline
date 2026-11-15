@@ -57,6 +57,8 @@ pub fn os_items() -> Vec<procline_acl::Item> {
 /// Collects the peer of a connected UNIX domain socket and its ancestors. The peer's audit token identifies its process and addresses its code signature; the other processes' signatures are looked up by pid.
 ///
 /// Signatures are verified with requirements and without the network (`procline_core::verify`); when the executable cannot be read or was replaced, the signature the kernel keeps for the running code is verified instead. The results are not cached.
+///
+/// The identifiers are recorded and read again at the end as for [`collect_pid`]. A peer that has exited (also one not yet reaped by its parent) makes the collection fail: with `Peer` (`ENOTCONN`) when it exited before its audit token is read, with `NoSuchProcess` when it exited after that and before it was recorded, and with `IdentityChanged` when it exited after it was recorded.
 pub fn collect_peer<S: AsFd>(
     stream: &S,
     options: &CollectOptions,
@@ -67,6 +69,8 @@ pub fn collect_peer<S: AsFd>(
 /// Collects the process with the given pid and its ancestors.
 ///
 /// The identifiers of every process are recorded first, everything else is read by pid, and the identifiers are read again at the end: if the target, or an ancestor that is still the same process, no longer runs the same image (an `exec` in between), the result is discarded with `IdentityChanged`; if an ancestor is no longer the same process, the chain ends before it with `Truncated::AncestorExited`. The code signature is looked up by pid.
+///
+/// A process that has exited but has not yet been reaped by its parent (a zombie) counts as exited: an ancestor ends the chain as above, and a target that has exited, before or during the collection, makes it fail with `NoSuchProcess`.
 pub fn collect_pid(pid: i32, options: &CollectOptions) -> Result<ProcessChain, CollectError> {
     collect::collect_pid(pid, options)
 }
@@ -74,15 +78,15 @@ pub fn collect_pid(pid: i32, options: &CollectOptions) -> Result<ProcessChain, C
 /// Collection failed as a whole.
 #[derive(Debug)]
 pub enum CollectError {
-    /// The peer credentials of the socket could not be read.
+    /// The peer credentials of the socket could not be read; `ENOTCONN` when the peer has already exited.
     Peer(io::Error),
-    /// No process with the pid exists.
+    /// No process with the pid exists, or it has exited and awaits being reaped by its parent.
     NoSuchProcess { pid: i32 },
     /// The identifiers of the target process could not be read for a reason other than its absence.
     Unreadable { pid: i32, source: io::Error },
     /// The boot UUID (`kern.bootsessionuuid`) could not be read.
     BootUuid(io::Error),
-    /// An identifier recorded at the start changed before collection finished: the target was replaced or ran `exec`, or an ancestor ran `exec`.
+    /// An identifier recorded at the start changed before collection finished: the target was replaced or ran `exec`, or an ancestor ran `exec`. For `collect_peer`, also a peer that exited after it was recorded.
     IdentityChanged,
 }
 

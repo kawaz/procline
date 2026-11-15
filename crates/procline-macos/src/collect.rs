@@ -735,8 +735,24 @@ mod tests {
             match (peer, result) {
                 (false, Err(CollectError::NoSuchProcess { pid: gone })) => assert_eq!(gone, pid),
                 (true, Err(CollectError::IdentityChanged)) => {}
-                (peer, result) => panic!("peer {peer}: {result:?}"),
+                (peer, result) => panic!("peer {peer}: {}", outline(&result)),
             }
+        }
+    }
+
+    /// The kind of a collection result and the pids of its chain, for a failure message without the certificate bytes of the whole chain.
+    fn outline(result: &Result<ProcessChain, CollectError>) -> String {
+        match result {
+            Ok(chain) => format!(
+                "Ok, pids {:?}, truncated {:?}",
+                chain
+                    .processes()
+                    .iter()
+                    .map(|p| p.identity.pid)
+                    .collect::<Vec<_>>(),
+                chain.truncated
+            ),
+            Err(err) => format!("Err({err:?})"),
         }
     }
 }
