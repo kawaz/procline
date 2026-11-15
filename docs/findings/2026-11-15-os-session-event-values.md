@@ -77,15 +77,31 @@
 - 通知を受けた時刻を記録する方法は、記録するプロセスが動いていない間の解錠を後から知れない (推論)
 - `kern.waketime` は、スリープを経ていない起動で 0 になる
 
+## ロックと解錠をまたいだ観測
+
+通知を受けた時にだけ値を記録するプログラム (分散通知、`notify(3)` の 12 の名前、`IORegisterForSystemPower` を登録し、受けた時点の値を 1 行ずつ書く) を動かしたまま、利用者の普段の操作でロック 2 回と解錠 1 回を記録した。その間にスリープは無かった (`kern.waketime` と `kern.sleeptime` は 0 のまま)。
+
+| 事象 (受けた通知) | `IOConsoleLocked` (IORegistry の root) | `CGSessionCopyCurrentDictionary` のロックの key |
+|---|---|---|
+| 記録の開始 (解錠中) | false | 無い |
+| ロック 1 回目 (`com.apple.screenIsLocked`) | true | `CGSSessionScreenIsLocked` = true、`CGSSessionScreenLockedTime` = ロックの時刻 (epoch 秒) |
+| 解錠 (`com.apple.screenIsUnlocked`) | false | `CGSSessionScreenIsLocked` = true、`CGSSessionScreenLockedTime` = 1 回目のロックの時刻のまま |
+| ロック 2 回目 (`com.apple.screenIsLocked`) | true | `CGSSessionScreenIsLocked` = true、`CGSSessionScreenLockedTime` = 2 回目のロックの時刻 |
+
+- 分散通知 `com.apple.screenIsLocked` と `com.apple.screenIsUnlocked` は、ロックと解錠のたびに届いた。`notify(3)` の 12 の名前からの通知は、この間 1 つも届かなかった
+- ロック中は、`CGSessionCopyCurrentDictionary` に `CGSSessionScreenIsLocked` と `CGSSessionScreenLockedTime` が現れ、後者はロックした時刻。IORegistry の root の `CGSSessionScreenLockedTime` は無いままだった
+- 解錠の通知を受けた時点では、`IOConsoleLocked` は false に戻っていたが、`CGSessionCopyCurrentDictionary` のロックの key はまだ残っていた。解錠からしばらく経った状態 (記録の開始の行) では無い。いつ消えるかは測っていない
+- 解錠の時刻を持つ値は、どの時点にも無かった
+
+観測から言えること: OS の状態として読めるのは「今ロック中か」(`IOConsoleLocked`) と、ロック中の「ロックした時刻」。解錠の時刻は読めず、解錠は通知で知るしかない。通知を受けていなかった間の解錠の時刻を、後から OS に問う方法は、試した中に無い。
+
 ## 未観測
 
 ロックとスリープをまたぐ観測が要るもの:
 
-- ロック中の `IOConsoleLocked` と `CGSSessionScreenLockedTime`
-- ロック中の `CGSessionCopyCurrentDictionary` の key
-- 解錠の後に、時刻や世代を表す値が残るか
-- どの通知が実際に届くか (分散通知の配達を含む)
-- 最初の起床の後と DarkWake での `kern.waketime` / `kern.sleeptime`
+- 解錠の後、`CGSessionCopyCurrentDictionary` のロックの key がいつ消えるか
+- スリープと起床をまたいだ値 (最初の起床の後と DarkWake での `kern.waketime` / `kern.sleeptime`、電源の通知の配達)
+- スクリーンセーバーだけ (ロックなし) の時の値と通知
 
 別の環境:
 
