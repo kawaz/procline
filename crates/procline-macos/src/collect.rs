@@ -312,26 +312,46 @@ fn collect_recorded(
     options: &CollectOptions,
     peer_token: Option<AuditToken>,
 ) -> Result<ProcessChain, CollectError> {
-    let pid = target.pid;
-    let (records, mut truncated) = walk(target, options.max_ancestors);
+    let (records, truncated) = walk(target, options.max_ancestors);
+    let signatures = signatures(&records, options, peer_token);
+    describe_and_recheck(
+        &records, truncated, signatures, boot_uuid, options, peer_token,
+    )
+}
+
+/// The code signature of every recorded process, in order, or all `None` when signatures are not collected. The peer's signature is addressed by its audit token, so a process that took over its pid is not verified in its place.
+fn signatures(
+    records: &[Recorded],
+    options: &CollectOptions,
+    peer_token: Option<AuditToken>,
+) -> Vec<Option<CodeSigning>> {
+    if !options.signature {
+        return vec![None; records.len()];
+    }
+    let guests: Vec<Guest> = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| match peer_token {
+            Some(token) if index == 0 => Guest::AuditToken(token),
+            _ => Guest::Pid(record.pid),
+        })
+        .collect();
+    signing::verify_chain(&guests, options.signature_budget)
+        .into_iter()
+        .map(Some)
+        .collect()
+}
+
+/// Reads the other attributes of the recorded processes, then reads their identifiers again and keeps the result only if it describes the processes that were recorded.
+fn describe_and_recheck(
+    records: &[Recorded],
+    mut truncated: Option<Truncated>,
+    signatures: Vec<Option<CodeSigning>>,
+    boot_uuid: &str,
+    options: &CollectOptions,
+    peer_token: Option<AuditToken>,
+) -> Result<ProcessChain, CollectError> {
     let mut names = Names::new(options.all_names);
-    // The peer's signature is addressed by its audit token, so a process that took over its pid is not verified in its place.
-    let signatures: Vec<Option<CodeSigning>> = if options.signature {
-        let guests: Vec<Guest> = records
-            .iter()
-            .enumerate()
-            .map(|(index, record)| match peer_token {
-                Some(token) if index == 0 => Guest::AuditToken(token),
-                _ => Guest::Pid(record.pid),
-            })
-            .collect();
-        signing::verify_chain(&guests, options.signature_budget)
-            .into_iter()
-            .map(Some)
-            .collect()
-    } else {
-        vec![None; records.len()]
-    };
     let mut processes: Vec<ProcessInfo> = records
         .iter()
         .zip(signatures)
@@ -348,7 +368,7 @@ fn collect_recorded(
         })
         .collect();
 
-    // Everything except the peer signature was read by pid, which another process can take over once the recorded one exits; rechecking the identifiers rejects mixed-up data.
+    // Everything except the peer signature was read by pid, which another process can take over once the recorded one exits; rechecking the identifiers rejects mixed-up data. An ancestor that exited ends the chain before it; an ancestor that is still the same individual but ran `exec` in between makes the whole result unusable, since its signature, path and arguments may describe different images.
     for (index, record) in records.iter().enumerate() {
         let now = Recorded::read(record.pid);
         if index == 0 {
@@ -360,14 +380,22 @@ fn collect_recorded(
                                 .is_none_or(|ids| ids.id_version == peer::pidversion(token))
                         }) => {}
                 Err(err) if is_no_such_process(&err) && peer_token.is_none() => {
-                    return Err(CollectError::NoSuchProcess { pid });
+                    return Err(CollectError::NoSuchProcess { pid: record.pid });
                 }
                 _ => return Err(CollectError::IdentityChanged),
             }
-        } else if !now.is_ok_and(|now| record.same_individual(&now)) {
-            processes.truncate(index);
-            truncated = Some(Truncated::AncestorExited);
-            break;
+        } else {
+            match now {
+                Ok(now) if record.same_image(&now) => {}
+                Ok(now) if record.same_individual(&now) => {
+                    return Err(CollectError::IdentityChanged);
+                }
+                _ => {
+                    processes.truncate(index);
+                    truncated = Some(Truncated::AncestorExited);
+                    break;
+                }
+            }
         }
     }
     Ok(ProcessChain::new(
@@ -375,4 +403,214 @@ fn collect_recorded(
         boot_uuid.to_owned(),
         truncated,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    use std::process::{Child, ChildStdin, Command, Stdio};
+
+    use procline_core::{CodeSigning, EnvPolicy, ProcessChain, Redaction, Truncated};
+
+    use super::{Recorded, describe_and_recheck, signatures, walk};
+    use crate::sys::proc as sys;
+    use crate::{CollectError, CollectOptions};
+
+    /// Waits for `exec` of one process with a kqueue (`EVFILT_PROC`, `NOTE_EXEC`), without polling. Registered before the `exec` is triggered, so the event is not missed.
+    struct ExecWatch(i32);
+
+    impl ExecWatch {
+        fn new(pid: i32) -> Self {
+            // SAFETY: kqueue takes no arguments and returns a new descriptor or -1.
+            let kq = unsafe { libc::kqueue() };
+            assert!(kq >= 0);
+            let change = libc::kevent {
+                ident: usize::try_from(pid).unwrap(),
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ONESHOT,
+                fflags: libc::NOTE_EXEC,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // SAFETY: one change from a valid kevent, no events asked for.
+            let n =
+                unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            assert_eq!(n, 0);
+            Self(kq)
+        }
+
+        fn wait(&self) {
+            let mut event = libc::kevent {
+                ident: 0,
+                filter: 0,
+                flags: 0,
+                fflags: 0,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // SAFETY: room for one event, no timeout (blocks until the exec).
+            let n = unsafe {
+                libc::kevent(self.0, std::ptr::null(), 0, &mut event, 1, std::ptr::null())
+            };
+            assert_eq!(n, 1);
+            assert_ne!(event.fflags & libc::NOTE_EXEC, 0);
+        }
+    }
+
+    impl Drop for ExecWatch {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor is owned by this value.
+            unsafe { libc::close(self.0) };
+        }
+    }
+
+    /// `/bin/sh` and the target: a subshell of sh that only forks, never runs `exec`, and stays blocked opening a FIFO nobody writes to. So the only `exec` and the only exit while a chain is collected are the ones the test makes sh do. sh leads its own process group; dropping the value kills the group (both processes) and reaps sh, also when an assertion failed.
+    struct Family {
+        sh: Child,
+        stdin: ChildStdin,
+        target: i32,
+        _fifo_dir: tempfile::TempDir,
+    }
+
+    impl Family {
+        fn start() -> Self {
+            let fifo_dir = tempfile::tempdir().unwrap();
+            let fifo = fifo_dir.path().join("never-written");
+            let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: a NUL-terminated path in a directory this test owns.
+            assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+            let mut sh = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "( read never < \"$1\" ) & echo $!; read line; exec /bin/sleep 60",
+                    "sh",
+                ])
+                .arg(&fifo)
+                .process_group(0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let stdin = sh.stdin.take().unwrap();
+            let stdout = sh.stdout.take().unwrap();
+            let mut family = Self {
+                sh,
+                stdin,
+                target: 0,
+                _fifo_dir: fifo_dir,
+            };
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).unwrap();
+            family.target = line.trim().parse().unwrap();
+            family
+        }
+
+        fn sh_pid(&self) -> i32 {
+            i32::try_from(self.sh.id()).unwrap()
+        }
+
+        /// Lets sh run `exec /bin/sleep` and returns once the exec is done. The kqueue is registered before sh is let go, so the event is not missed.
+        fn exec_sh(&mut self) {
+            let watch = ExecWatch::new(self.sh_pid());
+            self.stdin.write_all(b"\n").unwrap();
+            self.stdin.flush().unwrap();
+            watch.wait();
+        }
+
+        /// Kills sh and reaps it, so its pid no longer names it. The target stays, reparented to launchd.
+        fn end_sh(&mut self) {
+            self.sh.kill().unwrap();
+            self.sh.wait().unwrap();
+        }
+    }
+
+    impl Drop for Family {
+        fn drop(&mut self) {
+            // The group keeps sh's pid as its id while the target is in it, also after sh was reaped, so the signal does not reach another process.
+            // SAFETY: killpg only sends a signal.
+            unsafe { libc::killpg(self.sh_pid(), libc::SIGKILL) };
+            let _ = self.sh.wait();
+        }
+    }
+
+    /// Collects the chain of the target (the target and sh, cut at `max_ancestors` 1) with `between` run after the signatures are verified and before the other attributes are read. Returns the verified signatures with the result.
+    fn collect_with(
+        family: &mut Family,
+        between: impl FnOnce(&mut Family),
+    ) -> (Vec<Option<CodeSigning>>, Result<ProcessChain, CollectError>) {
+        let options = CollectOptions {
+            env: EnvPolicy::None,
+            redaction: Redaction::default(),
+            icon: false,
+            digest: false,
+            signature: true,
+            signature_budget: None,
+            all_names: false,
+            max_ancestors: 1,
+        };
+        let boot_uuid = sys::boot_session_uuid().unwrap();
+        let (records, truncated) = walk(Recorded::read(family.target).unwrap(), 1);
+        assert_eq!(
+            records.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            [family.target, family.sh_pid()]
+        );
+        let verified = signatures(&records, &options, None);
+        between(family);
+        let result = describe_and_recheck(
+            &records,
+            truncated,
+            verified.clone(),
+            &boot_uuid,
+            &options,
+            None,
+        );
+        (verified, result)
+    }
+
+    fn identifier(signing: Option<&CodeSigning>) -> Option<&str> {
+        match signing {
+            Some(CodeSigning::Verified(signature)) => Some(&signature.identifier),
+            _ => None,
+        }
+    }
+
+    // 収集の最後の確かめ直しで、祖先に起きた変化を 3 通りに分ける。対象は sh の子のサブシェル、祖先は sh。sh を動かすのは、署名を検証した後・ほかの属性を読む前で、祖先が exec すると「署名は exec の前のイメージ、実行パスと argv は後のイメージ」という混ざった結果ができる時機。
+    // - 何も起きない: 列はそのまま (対象と sh の 2 つで、max_ancestors で途切れる)。
+    // - sh が exec する: 同じ個体のまま、pid version (exec のたびにカーネルが増やす) だけが変わる。結果を捨てて IdentityChanged にする。列を sh の手前で途切れさせて残りを返すのではない: sh は生きていて親子関係は本物なので、途切れさせると「祖先が終わった」と偽ることになる。集め直せば (exec の後の像だけを読むので) 通り、sh は /bin/sleep として、exec の前に検証したものとは別の署名で出る (= 捨てた結果は 2 つのイメージが混ざっていた)。
+    // - sh が終わって回収される: その pid はもう sh を指さない。列を sh の手前で AncestorExited で終える (祖先が途中で終わるのは普通に起きる)。
+    // 時機は収集の段の間で sh を動かして作る。exec の完了は kqueue の NOTE_EXEC、終了は wait で待つ (時間待ちをしない)。
+    #[test]
+    fn the_recheck_tells_an_ancestor_exec_from_an_ancestor_exit() {
+        let mut family = Family::start();
+        let (_, unchanged) = collect_with(&mut family, |_| {});
+        let unchanged = unchanged.unwrap();
+        assert_eq!(unchanged.processes().len(), 2);
+        assert_eq!(unchanged.truncated, Some(Truncated::MaxAncestors));
+
+        let mut family = Family::start();
+        let (verified, exec) = collect_with(&mut family, Family::exec_sh);
+        assert!(
+            matches!(exec, Err(CollectError::IdentityChanged)),
+            "{exec:?}"
+        );
+        let (_, again) = collect_with(&mut family, |_| {});
+        let again = again.unwrap();
+        assert_eq!(
+            again.processes()[1].path.as_deref(),
+            Some(Path::new("/bin/sleep"))
+        );
+        let before = identifier(verified[1].as_ref()).unwrap();
+        let after = identifier(again.processes()[1].code_signing.as_ref()).unwrap();
+        assert_ne!(before, after);
+
+        let mut family = Family::start();
+        let (_, exit) = collect_with(&mut family, Family::end_sh);
+        let exit = exit.unwrap();
+        assert_eq!(exit.processes().len(), 1);
+        assert_eq!(exit.processes()[0].identity.pid, family.target);
+        assert_eq!(exit.truncated, Some(Truncated::AncestorExited));
+    }
 }
