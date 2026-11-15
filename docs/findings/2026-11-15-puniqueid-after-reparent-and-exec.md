@@ -17,6 +17,7 @@
 - `p_puniqueid` と親の `p_uniqueid` の一致で親子関係を確かめる walk は、「付け替えの後に exec したプロセス」を launchd の直接の子として繋ぎ、`truncated` を出さない。元の親の系譜は消え、列からは分からない
 - fork して親が終わってから exec する (二重 fork の後の exec。デーモン化の普通の形) だけで、同じ uid のプロセスは自分を launchd の直接の子に見せられる。祖先への肯定の条件 (allow の `ancestors`) は系譜を消しても当たらなくなるだけだが、祖先を条件にした deny は、系譜を消すことで当たらなくできる。列が途切れた時の「判定できない」(`undecidable`) にもならない
 - 祖先の列を根拠にする判断 (承認画面の系譜の表示、祖先を条件にした deny) は、「列の先頭が launchd に繋がっている」ことを「そのプロセスを launchd が直接起動した」とは読めない
+- 「launchd が直接起動した」と「付け替えの後に exec した」を `p_orig_ppidversion` で区別した観測と、それを使う walk: [findings: p_orig_ppidversion で付け替えの後の exec を見分ける](./2026-11-15-orig-ppidversion-tells-reparented-exec.md)
 
 ## 検証の詳細
 

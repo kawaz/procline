@@ -160,7 +160,7 @@ struct ProcUniqIdentifierInfo {
     p_uniqueid: u64,
     p_puniqueid: u64,
     p_idversion: i32,
-    _p_orig_ppidversion: i32,
+    p_orig_ppidversion: i32,
     _p_reserve2: u64,
     _p_reserve3: u64,
 }
@@ -208,6 +208,8 @@ pub(crate) struct UniqueIds {
     pub parent_unique_id: u64,
     /// The pid version, which the kernel bumps on every `exec` (the `pidversion` of an audit token).
     pub id_version: i32,
+    /// The pid version of the parent at the `fork` that created the process (`p_orig_ppidversion`). An `exec` keeps it, and so does the parent exiting; the parent's own `exec` after the `fork` gives the parent a new pid version but leaves this one as it was.
+    pub orig_parent_id_version: i32,
 }
 
 /// `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)`. Readable for processes of any uid.
@@ -217,6 +219,7 @@ pub(crate) fn unique_ids(pid: i32) -> io::Result<UniqueIds> {
         unique_id: info.p_uniqueid,
         parent_unique_id: info.p_puniqueid,
         id_version: info.p_idversion,
+        orig_parent_id_version: info.p_orig_ppidversion,
     })
 }
 

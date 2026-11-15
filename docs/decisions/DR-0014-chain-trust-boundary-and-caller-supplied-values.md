@@ -39,8 +39,8 @@
 祖先の walk が隣り合う行を親子として繋ぐ強さは、識別子が取れたかで変わる (`crates/procline-macos/src/collect.rs` の `Recorded::read` と `is_parent_of`、DESIGN-ja「識別子」)。
 
 - 識別子 (`PROC_PIDUNIQIDENTIFIERINFO`、`#ifdef PRIVATE` の SPI) が親と子の両方で取れた時: 子の `p_puniqueid` と親の `p_uniqueid` の一致で繋ぐ。どちらも uid を問わず読め、`p_puniqueid` はカーネルが fork と exec の時に、その時の親の `p_uniqueid` で書く。親が終わって付け替えられただけなら元の親の値のままで、launchd の `p_uniqueid` と合わないので、列は `AncestorExited` で途切れる ([findings](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md))
-- 取れなかった時: `kinfo_proc` の ppid と、親の起動時刻が子の起動時刻以前であることで繋ぐ。親の pid を後から使い回したプロセス (子より後に起動したもの) は外れるが、付け替えられたプロセスは launchd に繋がり、途切れの印は付かない
-- どちらでも、親が終わって付け替えられた後に exec したプロセスは、`p_puniqueid` が launchd の値 (1) に書き換わるので launchd の子として繋がり、途切れの印は付かない (同じ findings)。これは列のどの行の間でも起きうる。例えば、走っている `sudo` が起動した子が exec する前に `sudo` が終わると、その子から集めた列は 子 → launchd になる (親が root の組は観測していない。同じ uid の親での観測と XNU の公開ソースからの推定)
+- 識別子が取れた時、親が終わって付け替えられた後に exec したプロセスは、`p_puniqueid` が launchd の値 (1) に書き換わる (同じ findings) が、`p_orig_ppidversion` (fork された時の親の pid version) は終わった元の親の値のまま残る。walk は launchd を親として繋ぐ時に限り、子の `p_orig_ppidversion` が launchd の `p_idversion` と一致することも確かめ、一致しなければ `AncestorExited` で途切れる ([findings](../findings/2026-11-15-orig-ppidversion-tells-reparented-exec.md)。1 つの版の macOS (26.5.2) での観測)。launchd 以外の親では比べない (親が子を fork した後に自分で exec すると親の pid version は変わる)。例えば、走っている `sudo` が起動した子が exec する前に `sudo` が終わると、その子から集めた列は子だけで途切れる (親が root の組は観測していない。同じ uid の親での観測と XNU の公開ソースからの推定)
+- 取れなかった時: `kinfo_proc` の ppid と、親の起動時刻が子の起動時刻以前であることで繋ぐ。親の pid を後から使い回したプロセス (子より後に起動したもの) は外れるが、付け替えられたプロセスは、その後に exec したかどうかによらず launchd に繋がり、途切れの印は付かない
 - どちらで繋いだかは、行の識別子 (`Identity.unique_id`、`parent_unique_id`) が `Some` か `None` かで分かる
 - 自分の pid で `collect_pid` を呼ぶと、列の先頭が自分、2 番目が親になる (同じ uid の親子で観測。親子は unique ID で繋がった)
 
@@ -118,10 +118,10 @@ impl<'a> TaggedChain<'a> {
 
 procline が保証すること / しないこと:
 
-- 出すもの: 列の各行の識別子 (`pid`、`unique_id`、`parent_unique_id`、`start_time`)。隣り合う行は、識別子が取れた時は `p_puniqueid` と親の `p_uniqueid` の一致で、取れなかった時は ppid と起動時刻の順で繋いだもの。どちらで繋いだかは行の識別子の有無で分かる
+- 出すもの: 列の各行の識別子 (`pid`、`unique_id`、`parent_unique_id`、`start_time`)。隣り合う行は、識別子が取れた時は `p_puniqueid` と親の `p_uniqueid` の一致 (親が launchd の時は、子の `p_orig_ppidversion` と launchd の `p_idversion` の一致も) で、取れなかった時は ppid と起動時刻の順で繋いだもの。どちらで繋いだかは行の識別子の有無で分かる
 - 保証しないこと:
-  - 識別子が取れなかった時の繋がりは、付け替えを途切れとして出さない (起動時刻の順は付け替え先の launchd でも満たす)
-  - 識別子が取れた時も、親が終わった後に exec したプロセスは launchd の子に見え、途切れの印 (`truncated`) は付かない。印が無いことは、どの行が期待する親であるかを示さない
+  - 識別子が取れなかった時の繋がりは、付け替えを、その後に exec したかどうかによらず途切れとして出さない (起動時刻の順は付け替え先の launchd でも満たす)。その行では、途切れの印 (`truncated`) が無いことは、どの行が期待する親であるかを示さない
+  - 識別子が取れた時の、付け替えの後に exec したプロセスの区別は、1 つの版の macOS (26.5.2) での観測に基づく。他の版、launchd 自身が exec し直した後、pid version が一巡した時は観測していない
   - 渡された値がどの行のものか、送り手が誰か
 - アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出し、`collect_peer` (ソケットの相手を audit token で決めて集める入口。相手は、token を読んだ時点で相手側の端を最後に送受信に使ったプロセス) を持つ
 - 送り手と受け渡しの経路について言えること ([findings](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)):
@@ -135,7 +135,7 @@ procline が保証すること / しないこと:
 ### DESIGN に書くこと
 
 - 「脅威モデルの前提」: 評価に渡す chain は、評価するプロセスが自分で収集したもの。他のプロセスから受け取った値は表示にだけ使う。収集した事実の型は JSON から読めず、chain の組み立ては `from_collected` (アプリのコードの表明) だけ。観測値と、項目に直接渡す `ProcessInfo` はアプリの責務
-- 「収集の整合性」の 4: 識別子が取れなかった時の繋ぎ方と、付け替えの後の exec で途切れの印が付かないこと
+- 「収集の整合性」の 4: 識別子が取れた時は、付け替えの後の exec を `p_orig_ppidversion` と launchd の `p_idversion` の比較で途切れとして出すことと、その根拠の範囲。識別子が取れなかった時の繋ぎ方と、そこでは付け替えが途切れとして出ないこと
 - 「収集する情報」: argv と cwd を取れない対象について、呼び出し元が渡す値は crate の外 (受け取ったアプリ) が持つこと
 - 「API の骨格」: `ProcessChain` と `TaggedChain` のアクセサ。収集の結果の JSON は書き出しの形で、読み戻せないこと
 
@@ -163,10 +163,11 @@ procline が保証すること / しないこと:
 - テスト: chain を組むテストは `from_collected` を使う。収集の結果と `CodeSigning` の JSON は、書き出した形を確かめる
 - `TaggedChain` は、作った Policy と別の Policy の `evaluate` に渡しても止まらない (語彙とタグの定義が違えば、付いたタグが評価する Policy のものと食い違う)。この DR では扱わない
 - 収集の入口は `collect_peer` と `collect_pid` で、足す入口は無い
-- 付け替えの後の exec で列が途切れずに launchd へ繋がること (issue `2026-11-15-ancestry-reset-by-exec-after-reparent`) は、列のどの行の間にも起き、この DR では変わらない。識別子が取れない環境では、付け替えだけでも同じことが起きる
+- 付け替えの後に exec したプロセスは、識別子が取れた時は launchd を親として繋ぐ時の `p_orig_ppidversion` の比較で `AncestorExited` になる ([issue](../issue/archive/2026-11-15-ancestry-reset-by-exec-after-reparent.md))。識別子が取れない環境では、付け替えだけでも、その後に exec しても、列は途切れずに launchd へ繋がる
 - 未観測の点:
   - 識別子 (SPI) が取れない macOS での walk (今の macOS では uid を問わず取れた)
-  - 別 uid (root) の親が終わる組での `p_puniqueid` (findings `2026-11-15-puniqueid-after-reparent-and-exec.md` の未観測。利用者の権限では root の親を作って終わらせられない)。Context の例「走っている `sudo` が起動した子が exec する前に `sudo` が終わる」はこの組で、同じ uid の親で観測したことからの推定
+  - 別 uid (root) の親が終わる組での `p_puniqueid` と `p_orig_ppidversion` (findings `2026-11-15-puniqueid-after-reparent-and-exec.md` と `2026-11-15-orig-ppidversion-tells-reparented-exec.md` の未観測。利用者の権限では root の親を作って終わらせられない)。Context の例「走っている `sudo` が起動した子が exec する前に `sudo` が終わる」はこの組で、同じ uid の親で観測したことからの推定
+  - 付け替えの後の exec の区別 (findings `2026-11-15-orig-ppidversion-tells-reparented-exec.md` の未観測): 他の版の macOS、pid version の一巡、launchd 自身が exec し直した後、setuid の組
   - root から別 uid のプロセスの argv と cwd が取れるか
   - hardened runtime の Developer ID 署名のプロセスが自分の pid で集めた時の所要時間と、列の先頭 (自分) の署名の検証の結果
   - 走っている `sudo` の子として起動されたプロセスが自分の pid で集めた列で、2 番目が `sudo` になること (同じ uid の親子では観測した。親が実効 uid 0 の組は、walk が使う値が uid を問わず読めることだけ観測済み)
@@ -179,5 +180,5 @@ procline が保証すること / しないこと:
 - [DR-0012](DR-0012-strength-class-from-protection.md): 保護の状態とクラス (chain の `runtime` と `entitlements` を信じる側)
 - [DR-0013](DR-0013-acl-layer-in-separate-crates.md): ACL の層を収集の層から crate で分ける
 - [DESIGN-ja の「脅威モデルの前提」「識別子」「収集する情報」「収集の整合性」「API の骨格」](../DESIGN-ja.md)
-- issue: [JSON から読み込んだ ProcessChain を評価が信用する](../issue/archive/2026-11-15-deserialized-chain-is-trusted-by-evaluate.md)、[呼び出し元が渡して補う入口](../issue/archive/2026-11-15-caller-supplied-own-info.md)、[付け替えの後の exec](../issue/2026-11-15-ancestry-reset-by-exec-after-reparent.md)
-- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: UNIX ドメインソケットの相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
+- issue: [JSON から読み込んだ ProcessChain を評価が信用する](../issue/archive/2026-11-15-deserialized-chain-is-trusted-by-evaluate.md)、[呼び出し元が渡して補う入口](../issue/archive/2026-11-15-caller-supplied-own-info.md)、[付け替えの後の exec](../issue/archive/2026-11-15-ancestry-reset-by-exec-after-reparent.md)
+- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: p_orig_ppidversion で付け替えの後の exec を見分ける](../findings/2026-11-15-orig-ppidversion-tells-reparented-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: UNIX ドメインソケットの相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)

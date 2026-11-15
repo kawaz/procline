@@ -53,7 +53,7 @@ impl ProcessChain {
 pub enum Truncated {
     /// The walk reached `max_ancestors` of the collect options.
     MaxAncestors,
-    /// An ancestor exited during the walk.
+    /// The parent of the last process of the chain has exited, before the walk or during the collection. A process that was reparented after its parent exited (to launchd on macOS) ends the chain here instead of continuing under its new parent, when the collection can tell (on macOS, when the unique IDs of the process and of launchd could be read).
     AncestorExited,
     /// An ancestor could not be read.
     Unavailable,

@@ -2,7 +2,6 @@
 
 | date | category | status | issue | blocked_by |
 |---|---|---|---|---|
-| 2026-11-15 | design | open | [親が終わった後に exec したプロセスは p_puniqueid が launchd になり、系譜が途切れずに消える](./2026-11-15-ancestry-reset-by-exec-after-reparent.md) |  |
 | 2026-11-15 | design | open | [CLI が端末に出す JSON に入る argv やパスの制御文字を扱うか](./2026-11-15-cli-json-output-control-characters.md) |  |
 | 2026-11-15 | bug | open | [entitlements の辞書を JSON にする変換が入れ子の深さを抑えていない](./2026-11-15-entitlements-dict-recursion-depth.md) |  |
 | 2026-11-15 | design | open | [署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる](./2026-11-15-grant-and-list-rollback.md) |  |

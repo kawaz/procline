@@ -74,10 +74,18 @@ impl Recorded {
         self.same_individual(other) && versions_agree
     }
 
-    /// `self` is the process that `child` names as its parent, not another process that took over the parent's pid after it exited. Compared by unique ID when both have it, else by the parent having started no later than the child.
+    /// `self` is the process that `child` names as its parent, not another process that took over the parent's pid after it exited, nor launchd standing in for a parent that exited. Compared by unique ID when both have it, else by the parent having started no later than the child.
+    ///
+    /// When both have the unique IDs and `self` is launchd, the child must also have been forked by this launchd: its original parent's pid version equals launchd's pid version. A process whose parent exited is reparented to launchd and keeps the unique ID of the exited parent as its parent's, until it runs `exec`: the kernel then rewrites the parent's unique ID with launchd's, and only the original parent's pid version still names the exited parent (`p_orig_ppidversion`, which the kernel sets at the `fork` and keeps through `exec`; equal to launchd's pid version for every process launchd started that was observed, and not for a process that ran `exec` after reparenting, on macOS 26.5.2). Without the unique IDs this is not checked, and a reparented process links to launchd (launchd started before it).
+    ///
+    /// Design rationale: the pid versions are compared only when the parent is launchd. A parent other than launchd may have run `exec` after forking the child, which gives it a new pid version while the child keeps the one from the fork, so the versions of a real parent and child need not agree; the unique IDs already link them. A process whose parent exits is reparented to launchd, so a parent other than launchd that the unique IDs name is the process that forked the child (or, after an `exec` of the child, its parent at that `exec`).
     fn is_parent_of(&self, child: &Self) -> bool {
-        match (self.unique_id(), child.ids.map(|ids| ids.parent_unique_id)) {
-            (Some(id), Some(parent_id)) => id == parent_id,
+        match (self.ids, child.ids) {
+            (Some(parent), Some(child_ids)) => {
+                parent.unique_id == child_ids.parent_unique_id
+                    && (!is_launchd(self.pid)
+                        || child_ids.orig_parent_id_version == parent.id_version)
+            }
             _ => self.start_time() <= child.start_time(),
         }
     }
@@ -92,7 +100,12 @@ fn is_root(pid: i32) -> bool {
     pid <= 1
 }
 
-/// Records the target and its ancestors up to the root, stopping early at `max_ancestors` ancestors or at an ancestor that cannot be read.
+/// launchd, which the kernel makes the parent of every process whose parent exited.
+fn is_launchd(pid: i32) -> bool {
+    pid == 1
+}
+
+/// Records the target and its ancestors up to the root, stopping early at `max_ancestors` ancestors, at an ancestor that cannot be read, or where the parent has exited (`AncestorExited`, also when the process was reparented to launchd: see `is_parent_of`).
 fn walk(target: Recorded, max_ancestors: usize) -> (Vec<Recorded>, Option<Truncated>) {
     let mut chain = vec![target];
     loop {

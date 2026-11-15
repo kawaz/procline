@@ -1,6 +1,7 @@
 //! `collect_pid` against real processes of the machine running the tests.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -125,7 +126,9 @@ fn parent_is_second_and_linked_by_unique_id() {
 //
 // どちらになるかはテストを起動した環境で決まる。祖先のどれかの元の親が終了して launchd に付け替えられていると (二重 fork したデーモンや、親が先に終わった端末内のプロセス)、そのプロセスの ppid は 1 になるが、カーネルの parent_unique_id は元の親の値のまま変わらない。launchd はその元の親ではないので、列はそこで AncestorExited で終わる (launchd を親として繋ぐと、実在しない親子関係を列に書くことになる)。
 //
-// そこで、終わり方ごとにその理由が正しいことを OS の別の窓口から確かめる: launchd に届いたなら最後は pid 1。途切れたなら、最後のプロセスの今の ppid (ps で見る) を集め直すと、その unique_id は最後のプロセスの parent_unique_id と一致しない。
+// 付け替えられた後にそのプロセスが exec していると、parent_unique_id は launchd の値に書き換わるが、元の親が終了していることは変わらないので、列は同じく AncestorExited で終わる (この組そのものは a_process_that_ran_exec_after_reparenting_ends_the_chain が確かめる)。
+//
+// そこで、終わり方ごとにその理由が正しいことを OS の別の窓口から確かめる: launchd に届いたなら最後は pid 1。途切れたなら、最後のプロセスの今の ppid (ps で見る) は launchd (付け替えられている) か、集め直した unique_id が最後のプロセスの parent_unique_id と一致しない (親の pid を別のプロセスが使っている)。付け替えられたプロセスが launchd の本当の子でないことは、公開の値からは確かめられないので、ここでは ppid が 1 であることまでを見る。
 #[test]
 fn chain_reaches_launchd_or_ends_where_the_lineage_breaks() {
     let chain = collect_pid(own_pid(), &options()).unwrap();
@@ -139,13 +142,15 @@ fn chain_reaches_launchd_or_ends_where_the_lineage_breaks() {
             )
             .parse()
             .unwrap();
-            let parent = collect_pid(ppid, &options()).unwrap();
-            assert_ne!(
-                target(&parent).identity.unique_id,
-                last.identity.parent_unique_id,
-                "the walk stopped at pid {} though its parent {ppid} is still linked",
-                last.identity.pid
-            );
+            if ppid != 1 {
+                let parent = collect_pid(ppid, &options()).unwrap();
+                assert_ne!(
+                    target(&parent).identity.unique_id,
+                    last.identity.parent_unique_id,
+                    "the walk stopped at pid {} though its parent {ppid} is still linked",
+                    last.identity.pid
+                );
+            }
         }
         other => panic!("unexpected truncation {other:?}: {:?}", pids(&chain)),
     }
@@ -404,6 +409,207 @@ fn stay_alive_helper() {
         stdout.flush().unwrap();
         let _ = std::io::stdin().read_line(&mut String::new());
     }
+}
+
+/// Set in the environment of this test binary when it runs `orphan_helper`: `spawn-exec` / `spawn-stay` for the process that starts the orphan and exits, `exec` / `stay` for the orphan.
+const ORPHAN: &str = "PROCLINE_TEST_ORPHAN";
+
+/// Written by the process that starts the orphan, followed by the orphan's pid.
+const ORPHAN_PID: &str = "orphan-pid=";
+
+/// The `--exact` arguments that make this test binary run `test`.
+fn exact(test: &str) -> [&str; 2] {
+    ["--exact", test]
+}
+
+// 単独のテストではない: 親が終わって launchd に付け替えられたプロセス (orphan) を作る役。役は ORPHAN で渡す。普通に cargo test で走ったときは何もせずに終わる。
+// - spawn-exec / spawn-stay (中間): 同じバイナリを orphan の役で起こし、その pid を標準出力に書いて、待たずに終わる。orphan は中間の標準入力と標準出力 (= 起こしたテストの pipe) を引き継ぐ。
+// - exec / stay (orphan): 標準入力から 1 行 (起こしたテストの合図。中間を回収した後に送られる) を読み、自分の親が launchd (pid 1) になっていることを確かめる。exec ならそこで自分自身を exec して stay_alive_helper の役になる (ready を出すのは exec の後のイメージ)。stay なら exec せずに ready を出す。どちらも標準入力が閉じるまで生き続ける。親が launchd でなければ理由を書いて終わり、起こした側は ready を読めずに失敗する。
+// 出力は libtest の出力の取り込みを通らないよう、標準出力に直接書く。中間と orphan の libtest の出力が同じ pipe に混ざるので、pid の行は印 (ORPHAN_PID) で探す。
+#[test]
+fn orphan_helper() {
+    let Some(role) = std::env::var(ORPHAN).ok() else {
+        return;
+    };
+    let exe = std::env::current_exe().unwrap();
+    let mut stdout = std::io::stdout();
+    match role.as_str() {
+        "spawn-exec" | "spawn-stay" => {
+            // Design rationale: the orphan is never waited for, unlike every other child of these tests. This process has to end while the orphan runs, so that the orphan is reparented to launchd; launchd then reaps it.
+            #[expect(
+                clippy::zombie_processes,
+                reason = "the orphan outlives this process and is reaped by launchd"
+            )]
+            let orphan = Command::new(&exe)
+                .args(exact("orphan_helper"))
+                .env_clear()
+                .env(ORPHAN, &role["spawn-".len()..])
+                .spawn()
+                .unwrap();
+            stdout
+                .write_all(format!("{ORPHAN_PID}{}\n", orphan.id()).as_bytes())
+                .unwrap();
+            stdout.flush().unwrap();
+        }
+        "exec" | "stay" => {
+            if std::io::stdin().read_line(&mut String::new()).unwrap() == 0 {
+                return;
+            }
+            let ppid = std::os::unix::process::parent_id();
+            if ppid != 1 {
+                stdout
+                    .write_all(format!("the parent is {ppid}, not launchd\n").as_bytes())
+                    .unwrap();
+                return;
+            }
+            if role == "exec" {
+                let err = Command::new(&exe)
+                    .args(exact("stay_alive_helper"))
+                    .env_clear()
+                    .env(STAY_ALIVE, "1")
+                    .exec();
+                panic!("exec failed: {err}");
+            }
+            stdout.write_all(b"ready\n").unwrap();
+            stdout.flush().unwrap();
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
+        other => panic!("unknown role {other}"),
+    }
+}
+
+/// A process whose parent has exited and been reaped, so it is reparented to launchd, and that ran `exec` after the reparenting or not. It is not a child of this test: it lives until its standard input is closed. Dropping the value closes it and reads the orphan's output to its end, so the orphan has ended (and wrote its last lines into an open pipe) when the value is gone, also on failure.
+struct Orphan {
+    pid: i32,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for Orphan {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = std::io::copy(&mut self.stdout, &mut std::io::sink());
+    }
+}
+
+impl Orphan {
+    /// Starts the process that starts the orphan, reads the orphan's pid, reaps that process (so the orphan's parent has exited and the orphan is reparented), then lets the orphan go and returns once it printed `ready`: after its `exec` when `exec` is set. Fails, instead of waiting on, when a process ends before that.
+    fn start(exec: bool) -> Self {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(exact("orphan_helper"))
+            .env_clear()
+            .env(ORPHAN, if exec { "spawn-exec" } else { "spawn-stay" })
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut middle = Spawned(child);
+        let mut line = String::new();
+        let pid = loop {
+            line.clear();
+            let read = stdout.read_line(&mut line).unwrap();
+            assert_ne!(
+                read, 0,
+                "the middle process ended before it started the orphan"
+            );
+            if let Some(at) = line.find(ORPHAN_PID) {
+                break line[at + ORPHAN_PID.len()..].trim().parse().unwrap();
+            }
+        };
+        assert!(middle.0.wait().unwrap().success());
+        stdin.write_all(b"go\n").unwrap();
+        stdin.flush().unwrap();
+        while line != "ready\n" {
+            line.clear();
+            let read = stdout.read_line(&mut line).unwrap();
+            assert_ne!(read, 0, "the orphan ended before it was ready");
+        }
+        Self {
+            pid,
+            stdin: Some(stdin),
+            stdout,
+        }
+    }
+}
+
+/// The unique ID of launchd.
+fn launchd_unique_id() -> Option<u64> {
+    target(&collect_pid(1, &options()).unwrap())
+        .identity
+        .unique_id
+}
+
+// 親が終わって launchd に付け替えられた後に exec したプロセスを集めると、列はそのプロセスだけで AncestorExited で終わり、launchd の行は無い。
+//
+// 背景: 祖先の walk は、子の parent_unique_id (カーネルの p_puniqueid) と親の unique_id の一致で親子を繋ぐ。付け替えだけなら p_puniqueid は終わった元の親の値のままで launchd と合わず、列はそこで途切れる (次のテスト)。ところが付け替えの後に exec すると、カーネルは p_puniqueid をその時の親 = launchd の値に書き直す。p_puniqueid だけで繋ぐと、このプロセスは launchd の直接の子に見え、途切れの印も付かない。同じ uid のプロセスは fork して親を終わらせてから exec するだけでこれを作れるので、祖先を条件にした deny を系譜を消して外せてしまう。
+// そこで walk は、launchd を親として繋ぐ時に限り、子の p_orig_ppidversion (fork した時の親の pid version。exec でも付け替えでも変わらない) が launchd の pid version と一致することも確かめる。launchd が直接起動したプロセスでは一致し、付け替えの後に exec したプロセスでは終わった元の親の版のままなので一致しない (macOS 26.5.2 の観測)。一致しなければ元の親は終わっているので、ほかの「祖先が終わった」と同じく AncestorExited で列を終える。
+//
+// argv で exec が済んだこと (stay_alive_helper の役のイメージ) を、parent_unique_id が launchd の値になったことで、p_puniqueid だけでは区別できない組であることを確かめてから、列を見る。
+#[test]
+fn a_process_that_ran_exec_after_reparenting_ends_the_chain() {
+    let orphan = Orphan::start(true);
+    let chain = collect_pid(orphan.pid, &options()).unwrap();
+    let info = target(&chain);
+    assert_eq!(
+        info.argv.as_ref().map(|argv| &argv[1..]),
+        Some(&exact("stay_alive_helper").map(String::from)[..])
+    );
+    assert_eq!(info.identity.parent_unique_id, launchd_unique_id());
+    assert_eq!(pids(&chain), [orphan.pid]);
+    assert_eq!(chain.truncated(), Some(Truncated::AncestorExited));
+}
+
+// 対照: 付け替えられただけで exec していないプロセス。parent_unique_id は終わった元の親の値のままで launchd と合わないので、列はそのプロセスだけで AncestorExited で終わる (launchd を親として繋ぐと、実在しない親子関係を列に書くことになる)。前のテストと同じ作り方で exec だけを外し、同じ結果になることで、前のテストの途切れが「付け替えの後の exec」でも「付け替え」と同じ扱いになったことを示す。
+#[test]
+fn a_reparented_process_ends_the_chain() {
+    let orphan = Orphan::start(false);
+    let chain = collect_pid(orphan.pid, &options()).unwrap();
+    let info = target(&chain);
+    assert_eq!(
+        info.argv.as_ref().map(|argv| &argv[1..]),
+        Some(&exact("orphan_helper").map(String::from)[..])
+    );
+    assert!(info.identity.parent_unique_id.is_some());
+    assert_ne!(info.identity.parent_unique_id, launchd_unique_id());
+    assert_eq!(pids(&chain), [orphan.pid]);
+    assert_eq!(chain.truncated(), Some(Truncated::AncestorExited));
+}
+
+// launchd が直接起動したプロセスは、今までどおり launchd に繋がり、列は途切れない。上の確認 (launchd を親として繋ぐ時に p_orig_ppidversion と launchd の pid version を比べる) が、本物の launchd の子を途切れさせないこと。
+//
+// どのプロセスを launchd が直接起動したかは、テストを走らせる環境で決まる (システムのデーモン、利用者のエージェント、app)。そこで ppid が 1 のプロセスを全部集め、どの列も「途切れていないなら 2 行で最後は launchd、途切れたならそのプロセスだけで AncestorExited」の形であることと、launchd まで届いた列が少なくとも 1 つあることを確かめる (付け替えられたプロセスも ppid は 1 なので、全部が届くとは言えない)。launchd の子は macOS が起動していれば必ずいる。集めている間に終わったプロセスは数えない。署名は検証しない (数百のプロセスを集めるので。繋がり方は署名に依らない)。
+#[test]
+fn processes_launchd_started_reach_launchd() {
+    let opts = CollectOptions {
+        signature: false,
+        bundle: false,
+        all_names: false,
+        ..options()
+    };
+    let listed = command_output("/bin/ps", &["-axo", "pid=,ppid="]);
+    let mut reached = 0;
+    for line in listed.lines() {
+        let mut fields = line.split_whitespace().map(|f| f.parse::<i32>().unwrap());
+        let (Some(pid), Some(1)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let chain = match collect_pid(pid, &opts) {
+            Ok(chain) => chain,
+            Err(CollectError::NoSuchProcess { .. } | CollectError::IdentityChanged) => continue,
+            Err(err) => panic!("pid {pid}: {err:?}"),
+        };
+        match chain.truncated() {
+            None => {
+                assert_eq!(pids(&chain), [pid, 1]);
+                reached += 1;
+            }
+            Some(Truncated::AncestorExited) => assert_eq!(pids(&chain), [pid]),
+            other => panic!("pid {pid}: unexpected truncation {other:?}"),
+        }
+    }
+    assert!(reached > 0);
 }
 
 // env を All で集めると、子に渡した変数の名前がすべて入り、カーネルが env の後に置く dyld 向けの文字列 (executable_path= 等) は入らない。
