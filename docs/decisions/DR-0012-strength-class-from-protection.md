@@ -20,7 +20,11 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 - 攻撃者が使うバイナリは、承認した時のプロセスと同じファイルである必要は無い。Team ID と signing identifier の条件は、同じ身元で hardened runtime なしに署名された別のビルド (古い版、開発中の版) でも満たせる。持ち込めばよい
 - 利用者の認可のダイアログは、要求したプログラムも対象のプロセスも示さず、Touch ID で応じられ、1 度下りると 10 時間共有される。強い境界ではない
 - カーネル (AMFI) が「hardened」と扱う基準は CodeDirectory の flags ではない。Xcode の `sample` (flags は `library-validation` だけ) にも、platform binary の `/usr/bin/sample` にも、宣言済みのデバッガの要求は「is hardened, … doesn't have get-task-allow」で断られた。platform binary の `/usr/bin/leaks` への差し込みも効かなかった。走っているプロセスの動的な status (`kSecCodeInfoStatus`) では、観測した platform binary 4 つ (launchd、zsh、configd、sudo) は全部 `CS_RUNTIME` (0x10000) を持ち、sudo は flags に hardened runtime が無いのに status にはあった
-- 保護を緩める entitlement のうち、`com.apple.security.cs.allow-dyld-environment-variables`、`com.apple.security.cs.disable-library-validation`、`com.apple.security.cs.disable-executable-page-protection` は、一次資料が差し込みや改変を許すと書くだけで、観測していない
+- 保護を緩める entitlement のうち `get-task-allow` 以外の 3 つは、hardened runtime の ad-hoc 署名の試験プログラムに 1 つずつ付けて、entitlement を持たない同じ uid のプロセスから当てた (findings `2026-11-15-process-memory-probe.md` の「保護を緩める entitlement (`get-task-allow` 以外の 3 つ) の効き方」)。どれを付けても task port と ptrace はカーネルが断った
+  - `com.apple.security.cs.disable-library-validation` だけ: 起動時の環境変数 (`DYLD_INSERT_LIBRARIES`、`DYLD_LIBRARY_PATH`、`DYLD_FRAMEWORK_PATH`) では差し込めない。対象が読み込むライブラリのファイルをディスク上で置き換えると、別の署名 (別の identifier の ad-hoc 署名) のライブラリがそのまま読み込まれた
+  - `com.apple.security.cs.allow-dyld-environment-variables` だけ: dyld は変数を読むが、library validation が Team ID の違うライブラリを拒んだ。この 2 つを両方持つ対象には、環境変数で差し込めた
+  - `com.apple.security.cs.disable-executable-page-protection` だけ: カーネルの status から `CS_HARD` と `CS_ENFORCEMENT` が外れた (書き換えた実行ページや署名の無い実行ページを拒まない)。library validation は残り、環境変数は効かなかった
+  - 試験プログラムは ad-hoc 署名で Team ID を持たないので、自分のライブラリも library validation に拒まれる。「元の版は読み込まれ、差し替えた版は拒まれる」の対比は作れておらず、Developer ID のアプリには当てていない
 
 この状況で、hardened runtime の無い署名済みのバイナリに `binary {team_id, signing_id}` で制限なしの `allow` を与えると、同じ uid の攻撃者がそのバイナリ (か同じ身元の別のビルド) に差し込んで、条件を満たすプロセスを作れる。クラスの定義に照らせば弱にあたる。
 
@@ -55,7 +59,10 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 
 - `binary`、`path`、`digest` は「そのコードから新しく起動したプロセス」も満たすので、起動時の差し込みと、起動した後に認可で開くことの両方を見る
 - 「認可で開く」を中にするのは、満たすのに利用者の認可が要り、同じ uid のプロセスだけでは満たせないため。認可は強い境界ではないので強にはしない
-- `get-task-allow` 以外の 3 つの entitlement は観測していないので、開いている (弱い側) に倒す
+- `get-task-allow` 以外の 3 つの entitlement は、開いている (弱い側) に倒す
+  - `disable-library-validation`: 読み込むライブラリのファイルを同じ uid が置き換えられれば、別の署名のコードがそのコードの身元で動く (観測)。どこからライブラリを読み込むか (利用者が書ける場所か) は署名からは分からないので、署名だけで決めるクラスは弱い側になる
+  - `allow-dyld-environment-variables`: 単独では差し込む経路を観測していない。ただし dyld は利用者の環境変数を読み、`disable-library-validation` と組めば環境変数で差し込めた (観測)。同じ Team ID で署名された別のライブラリ (古い版など) への差し替えは観測していないので、弱い側に倒す
+  - `disable-executable-page-protection`: 外から差し込む経路は観測していないが、カーネルが書き換えた実行ページや署名の無い実行ページを拒まなくなる (観測)。署名が示す「その code が改変なしに動いている」をカーネルが保証しなくなるので、弱い側に倒す
 - platform binary も同じ規則で決める。観測した platform binary は status に `CS_RUNTIME` を持ち、宣言済みのデバッガは断られ、差し込みは効かなかった
 - 責任プロセスは、今回の観測の対象でないので中のまま (未観測)
 
@@ -90,7 +97,10 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 - 評価のたびに、`allow` の grant の自身への条件のクラスを照合したプロセスで算出する。収集した署名の情報から決めるので、評価中に OS を呼ばない
 - 開発用のビルド (Xcode の Debug は `get-task-allow` を付ける) は「認可で開く」になり、署名由来の field は中
 - 未観測の点:
-  - `allow-dyld-environment-variables`、`disable-library-validation`、`disable-executable-page-protection` を持つ対象への差し込みと接続 (弱に倒している)
+  - `get-task-allow` 以外の 3 つの entitlement を持つ Developer ID のアプリそのものへの当て込み (観測は ad-hoc 署名の試験プログラムだけ)
+  - `disable-library-validation` の対象が実行時に `dlopen` するプラグインや `@rpath` の探す先が利用者に書ける場合、`/Applications` の app bundle の中のライブラリを置き換えた場合
+  - `allow-dyld-environment-variables` の対象のライブラリを、同じ Team ID で署名された別のライブラリに環境変数で差し替えること
+  - `disable-executable-page-protection` の対象で、実際に書き換えた実行ページを持つプロセスの振る舞い
   - 宣言済みのデバッガと認可が、root が降格して起動した対象にどう働くか (認可がある時)
   - 開発者モード (`DevToolsSecurity -enable`) の Mac での、認可の段の振る舞い
   - SIP を無効にした Mac
