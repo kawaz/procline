@@ -113,16 +113,27 @@ pub(crate) fn signing_information(code: &SecCode) -> Result<SigningInfo, OSStatu
             &mut info,
         )
     };
-    if status != 0 {
-        return Err(status);
+    // SAFETY: `info` is NULL or the dictionary the call stored, retained for the caller.
+    unsafe { owned_result(status, info) }.map(SigningInfo)
+}
+
+/// Takes ownership of the dictionary a `Copy` call stored through its output pointer, whatever status it returned: a dictionary stored by a failing call is released here instead of leaked. A success without a dictionary is `Err(-1)`.
+///
+/// # Safety
+///
+/// `dictionary` is NULL or a dictionary retained for the caller (`CF_RETURNS_RETAINED`), not used after this call.
+unsafe fn owned_result(
+    status: OSStatus,
+    dictionary: CFDictionaryRef,
+) -> Result<CFDictionary, OSStatus> {
+    // SAFETY: by the contract above, a non-NULL dictionary is owned by the caller, so the create rule takes that ownership.
+    let owned = (!dictionary.is_null())
+        .then(|| unsafe { CFDictionary::wrap_under_create_rule(dictionary) });
+    match (status, owned) {
+        (0, Some(dictionary)) => Ok(dictionary),
+        (0, None) => Err(-1),
+        (status, _) => Err(status),
     }
-    if info.is_null() {
-        return Err(-1);
-    }
-    // SAFETY: a successful call returns a dictionary under the create rule (`CF_RETURNS_RETAINED`).
-    Ok(SigningInfo(unsafe {
-        CFDictionary::wrap_under_create_rule(info)
-    }))
 }
 
 /// The keys of the signing information dictionary this crate reads.
@@ -239,5 +250,45 @@ impl SigningInfo {
     pub(crate) fn plist_string(&self, key: &str) -> Option<String> {
         let plist = self.get(InfoKey::PList)?.downcast::<CFDictionary>()?;
         cf::dictionary_string(&plist, key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr;
+
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::CFMutableDictionary;
+    use core_foundation::string::CFString;
+
+    use super::owned_result;
+
+    // Copy の形の呼び出し (SecCodeCopySigningInformation) が出力のポインタに辞書を入れたら、戻り値が 0 でなくても、その辞書は呼び出し側が持ち、解放する責任を負う (CF_RETURNS_RETAINED)。失敗の時に辞書を包まずに捨てると漏れる。Security framework が失敗の時に辞書を入れるかは確かめていないので、入れた場合をここで作る: 本物の辞書をもう 1 つ retain して渡し、結果を捨てた後に retain count が元の 1 に戻ることを見る (0 を返した時は成功として辞書を返し、捨てれば同じく戻る)。辞書が無い時は、失敗ならその戻り値、成功なら -1 (情報が無いのに成功とは扱わない)。
+    #[test]
+    fn a_dictionary_stored_by_the_call_is_released_whatever_the_status() {
+        let mut dictionary = CFMutableDictionary::<CFString, CFString>::new();
+        dictionary.add(&CFString::new("key"), &CFString::new("value"));
+        for status in [0, -67061] {
+            let handed = dictionary.clone();
+            let stored = handed.as_concrete_TypeRef().cast_const();
+            std::mem::forget(handed);
+            assert_eq!(dictionary.retain_count(), 2);
+            // SAFETY: `stored` carries the retain made by the clone above and is not used again.
+            let result = unsafe { owned_result(status, stored) };
+            match &result {
+                Ok(_) => assert_eq!(status, 0),
+                Err(returned) => assert_eq!(*returned, status),
+            }
+            drop(result);
+            assert_eq!(dictionary.retain_count(), 1, "status {status}");
+        }
+
+        // SAFETY: NULL is allowed.
+        assert_eq!(unsafe { owned_result(0, ptr::null()) }.err(), Some(-1));
+        // SAFETY: NULL is allowed.
+        assert_eq!(
+            unsafe { owned_result(-67061, ptr::null()) }.err(),
+            Some(-67061)
+        );
     }
 }
