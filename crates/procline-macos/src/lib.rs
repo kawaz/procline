@@ -69,7 +69,7 @@ pub fn wake_time_secs() -> io::Result<i64> {
 ///
 /// Signatures are verified with requirements and without the network (`procline_core::verify`); when the executable cannot be read or was replaced, the signature the kernel keeps for the running code is verified instead. The results are not cached.
 ///
-/// The identifiers are recorded and read again at the end as for [`collect_pid`]. A peer that has exited (also one not yet reaped by its parent) makes the collection fail: with `Peer` (`ENOTCONN`) when every process holding the other end of the socket has exited before the audit token is read, with `NoSuchProcess` when the peer exited after that and before it was recorded, and with `IdentityChanged` when it exited after it was recorded.
+/// The identifiers are recorded and read again at the end as for [`collect_pid`]. A peer that has exited (also one not yet reaped by its parent) makes the collection fail: with `Peer` (`ENOTCONN`) when every process holding the other end of the socket has exited before the audit token is read, with `NoSuchProcess` when the peer exited after that and before it was recorded, and with `IdentityChanged` when it exited after it was recorded. When only the process that last sent or received on the other end has exited while another process still holds that end, the audit token cannot be read and the collection fails with `Peer` (`EINVAL`); once that pid belongs to another process, the token is that process's and it is the one collected.
 pub fn collect_peer<S: AsFd>(
     stream: &S,
     options: &CollectOptions,
@@ -89,7 +89,7 @@ pub fn collect_pid(pid: i32, options: &CollectOptions) -> Result<ProcessChain, C
 /// Collection failed as a whole.
 #[derive(Debug)]
 pub enum CollectError {
-    /// The peer's audit token (`LOCAL_PEERTOKEN`) could not be read; `ENOTCONN` when every process holding the other end of the socket has exited.
+    /// The peer's audit token (`LOCAL_PEERTOKEN`) could not be read; `ENOTCONN` when every process holding the other end of the socket has exited, `EINVAL` when the process that last sent or received on the other end has exited while another process still holds that end.
     Peer(io::Error),
     /// No process with the pid exists, or it has exited and awaits being reaped by its parent.
     NoSuchProcess { pid: i32 },
