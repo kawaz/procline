@@ -2,6 +2,8 @@
 
 - Date: 2026-11-15
 
+cw の今の実装はかなり古く、procline の上に作り直す予定 (kawaz 2026-11-15)。この記録は観測として残すもので、procline の設計の根拠には使わない。
+
 cw のリポ (`kawaz/cache-warden`) を読んで確かめた。cw はまだ procline を使っておらず、自前の `macos-process-inspect` crate で収集している。以下のパスは cw のリポのルートからの相対。
 
 ## 判明した事実
