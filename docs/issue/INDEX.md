@@ -3,6 +3,7 @@
 | date | category | status | issue | blocked_by |
 |---|---|---|---|---|
 | 2026-11-15 | design | open | [親が終わった後に exec したプロセスは p_puniqueid が launchd になり、系譜が途切れずに消える](./2026-11-15-ancestry-reset-by-exec-after-reparent.md) |  |
+| 2026-11-15 | bug | open | [entitlements の辞書を JSON にする変換が入れ子の深さを抑えていない](./2026-11-15-entitlements-dict-recursion-depth.md) |  |
 | 2026-11-15 | design | open | [署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる](./2026-11-15-grant-and-list-rollback.md) |  |
 | 2026-11-15 | design | open | [引き継いだコードのレビューで残した点 (裁定や設計の後で決めるもの)](./2026-11-15-handoff-review-followups.md) |  |
 | 2026-11-15 | design | open | [収集だけを使う利用者が、ACL とアイコンを持ち込まずに済む入口が要るか決める](./2026-11-15-minimal-collect-entry.md) |  |

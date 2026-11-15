@@ -71,6 +71,7 @@ fn main() -> std::process::ExitCode {
         redaction: Redaction::default(),
         icon: false,
         digest,
+        bundle: true,
         signature,
         signature_budget: None,
         all_names,

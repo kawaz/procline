@@ -249,7 +249,11 @@ fn process_info(
         } else {
             None
         },
-        bundle: path.as_deref().and_then(file::bundle),
+        bundle: if options.bundle {
+            path.as_deref().and_then(file::bundle)
+        } else {
+            None
+        },
         responsible: responsible(pid, boot_uuid),
         name,
         argv,
@@ -594,6 +598,7 @@ mod tests {
             redaction: Redaction::default(),
             icon: false,
             digest: false,
+            bundle: true,
             signature: true,
             signature_budget: None,
             all_names: false,

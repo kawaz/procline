@@ -17,7 +17,8 @@ core-foundation.workspace = true
 security-framework.workspace = true
 security-framework-sys.workspace = true
 sha2.workspace = true
-plist.workspace = true
+# Design rationale: `plist::stream` (behind the unstable feature) reads the events of an Info.plist without building a tree and without recursion (see `bundle` in src/file.rs); the version is pinned to `~1.10` in the workspace, as the crate asks of users of its unstable features.
+plist = { workspace = true, features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
 
 [dev-dependencies]
 tempfile = "3"

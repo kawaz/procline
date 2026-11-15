@@ -56,6 +56,7 @@ mod collect {
             redaction: Redaction::default(),
             icon: false,
             digest: choice.digest,
+            bundle: true,
             signature: choice.signature,
             signature_budget: None,
             all_names: choice.all_names,

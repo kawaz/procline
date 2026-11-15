@@ -13,6 +13,7 @@ fn options() -> CollectOptions {
         redaction: Redaction::default(),
         icon: false,
         digest: false,
+        bundle: true,
         signature: true,
         signature_budget: None,
         all_names: true,

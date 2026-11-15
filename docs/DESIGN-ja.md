@@ -66,7 +66,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | コード署名(検証の結果。成功した時だけ識別子、cdhash、署名者の証明書チェーン、証明書の根と種類、Team ID、公証、entitlements、カーネルの動的な status の hardened runtime・platform binary・debugged) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid。読めないか差し替えられた時は `kSecGuestAttributeDynamicCode` を足して検証し直す)、`SecCodeCheckValidity`(requirement つき)、`SecCodeCopySigningInformation` | 強(検証に成功し、保護ありのときだけ。「署名の検証と信頼の印」「強さ: クラスと深さ」) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所で、保護あり)、中(利用者が書ける場所、または認可で開く)、弱(保護が開いている) |
 | 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すが、Linux の収集は保護の状態をまだ持たないので、持つまでは弱として扱う)。保護が開いていれば弱 |
-| app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取り、`VerifiedSignature.bundle_id` に持つ(照合に使う)。実行パスから `.app` を遡って読む `ProcessInfo.bundle` は表示用 | 強(`binary` の署名由来の field。`team_id`・`signing_id` と組。検証に成功し、保護ありのときだけ強で、認可で開くなら中、保護が開いていれば弱。「強さ: クラスと深さ」) |
+| app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取り、`VerifiedSignature.bundle_id` に持つ(照合に使う)。実行パスから `.app` を遡って読む `ProcessInfo.bundle` は表示用。その Info.plist はプロセスの持ち主が中身も種類も決められるので、通常のファイルだけを読み、トップレベルの辞書の直下の値だけを拾う。上限は 3 つで、ファイルの大きさ(1 MiB)、解析の event の数、解析が読むバイト数の合計(binary plist は同じオブジェクトを何度も参照でき、参照のたびに読み直される)。どれかを超えるか、全体を最後まで解析できなければ `None` にする。読むかは `CollectOptions.bundle` で選び、切れば `None` で、持ち主が決めたファイルの解析を省ける | 強(`binary` の署名由来の field。`team_id`・`signing_id` と組。検証に成功し、保護ありのときだけ強で、認可で開くなら中、保護が開いていれば弱。「強さ: クラスと深さ」) |
 | 責任プロセス | `responsibility_get_pid_responsible_for_pid`(私的 API)。pid でなく個体の識別(`ProcessInfo.responsible: Option<ProcessIdentity>`)で持つ | 中 |
 | プロセス名、argv、cwd、tty | `kinfo_proc`(名前と tty)、`KERN_PROCARGS2`(argv)、`PROC_PIDVNODEPATHINFO`(cwd)。argv と cwd は同じ uid か root のみ | 弱 |
 | env | `KERN_PROCARGS2`(同じ uid か root のみ。platform binary の env は `KERN_PROCARGS2` が返さないので取れず、空でなく `None` になる) | 表示専用(伏せた後の値しか持たないので照合に使えない。方針は後述) |
@@ -667,6 +667,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
     icon: true,
     digest: false,                                   // 実行ファイルの digest(既定は取らない)
+    bundle: true,                                    // 表示用の ProcessInfo.bundle(.app の Info.plist を読む。切れば None)
     max_ancestors: 32,
     redaction: Redaction::default(),                 // env の伏せ字(対象の判定と伏せ方の 2 関数)の差し替え
 })?;
@@ -681,7 +682,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // CollectOptions.signature_budget: Option<Duration>。予算を超えたら、検証を始めていないプロセスは NotChecked
 // ProcessInfo は digest: Option<String> と path_meta: Option<PathMeta> を持つ。PathMeta { owner_uid: u32, writable_by_user: bool }(path のクラスの判定に使う)
 // ProcessInfo.responsible: Option<ProcessIdentity>。責任プロセスは pid でなく個体の識別で持つ
-// VerifiedSignature.bundle_id: Option<String>(kSecCodeInfoPList 由来。照合に使い、BinaryPin.bundle_id の照合元)。ProcessInfo.bundle(実行パスから .app を遡って読む)は表示用
+// VerifiedSignature.bundle_id: Option<String>(kSecCodeInfoPList 由来。照合に使い、BinaryPin.bundle_id の照合元)。ProcessInfo.bundle(実行パスから .app を遡って読む)は表示用。CollectOptions.bundle: bool で読むかを選ぶ。読むのは通常のファイルだけで、トップレベルの辞書の直下の値だけを拾う。ファイルの大きさ(1 MiB)、event の数、読み取りの量のどれかの上限を超えれば None
 // ProcessIdentity(process の pin 値)は boot_uuid: String を持つ。Identity::process_identity(&self, boot_uuid) で作り、boot_uuid は chain.boot_uuid() を渡す
 
 // 強さ(procline-core の共有型)。どの項目がどのクラスかは Vocabulary が持ち、ProcessInfo の項目は持たない。深さは UI の概念で、型は持たない

@@ -28,6 +28,8 @@ pub struct CollectOptions {
     pub icon: bool,
     /// Hash the contents of the executable (`ProcessInfo.digest`); off unless set.
     pub digest: bool,
+    /// Read the bundle ID and version of the nearest `.app` above the executable from its `Contents/Info.plist` (`ProcessInfo.bundle`, for display; the bundle ID sealed by the signature is `VerifiedSignature.bundle_id`). Only a regular file of at most 1 MiB is read, and only the values directly under its top-level dictionary are taken, within limits on the parsing events and the bytes the parsing reads; anything else leaves it `None`. Off leaves it `None` and skips parsing a file that the owner of the process can write.
+    pub bundle: bool,
     /// Verify the code signature of every process (`ProcessInfo.code_signing`). Off leaves it `None` and makes the chain unusable for `binary` conditions, but cuts the time to well under a millisecond for a first, light pass (a Touch ID prompt that only needs names and paths).
     pub signature: bool,
     /// The time the verification of the signatures of one collection may take. Once it runs out, the processes whose verification has not started are `CodeSigning::NotChecked`; a verification under way is not cut short. `None` verifies every process.
@@ -44,6 +46,7 @@ impl fmt::Debug for CollectOptions {
             .field("env", &self.env)
             .field("icon", &self.icon)
             .field("digest", &self.digest)
+            .field("bundle", &self.bundle)
             .field("signature", &self.signature)
             .field("signature_budget", &self.signature_budget)
             .field("all_names", &self.all_names)
