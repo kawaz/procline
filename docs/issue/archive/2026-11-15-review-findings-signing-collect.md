@@ -1,9 +1,10 @@
 ---
 title: 署名の検証と収集の実装へのレビューの指摘 (7 件)
-status: open
+status: resolved
 category: bug
 created: 2026-11-15T09:25:00+09:00
 origin: pam-passkey のセッションから (別系統のレビュアーによる検査)
+close_reason: implemented
 ---
 
 # 署名の検証と収集の実装へのレビューの指摘 (7 件)
@@ -23,18 +24,26 @@ DR-0011 / DR-0012 の実装 (2026-11-15) を別系統のレビュアーが検査
 ## 指摘ごとの結果
 
 1. **該当、直した**。腕を重複させた途中の修正のまま実機で再現した: 祖先 (sh) の `code_signing` が exec の前の `com.apple.bash`、`path` と `argv` が exec の後の `/bin/sleep` のまま `Ok` で返った。最後の確かめ直しで、同じ個体のまま pid version が変わった祖先は結果を捨てて `IdentityChanged` にし、終わった祖先は従来どおり列をその手前で `AncestorExited` で終える。収集を記録・署名の検証・属性の読み取りと確かめ直しの段に分け、テスト (`collect::tests::the_recheck_tells_an_ancestor_exec_from_an_ancestor_exit`) は段の間で sh に exec させる / 終わらせる (kqueue の `NOTE_EXEC` と `wait` で待ち、時間待ちをしない)。何も起きない・exec・終了の 3 通りを固定し、腕を `same_individual` の重複に戻すとテストが落ちることも確かめた
-2. **該当しない (macOS 26.5.2 で観測)**。走っている ad-hoc のコード (テストのバイナリのコピー) で、要求なしの検証と署名の情報の取得の間に実行ファイルを、Apple の署名のファイル・identifier を変えた ad-hoc のファイル・削除の 3 通りで差し替えた。3 通りとも、差し替えの前に開いた SecCode は検証した静的なコードを持ち続け、署名の情報は走っているコードのもの (`verified_from` は disk) だった。対照として、差し替えの後に開き直すと気づく (置き換えは running_code に切り替え、削除は `Failed(Missing)`)。SecCode.h は「Code の署名の情報の一部はディスクから読む」と書くので、OS の更新で変わりうる。テスト (`signing::tests::replacement_between_the_check_and_the_signing_information`) で、結果が走っているコードの身元か `Failed` であることを、対照と合わせて固定した
+2. **観測した範囲では該当しない (macOS 26.5.2)**。検証に成功した結果に差し替え先の身元が付くことは、どの場合も無かった。SecCode.h は「Code の署名の情報の一部はディスクから読む」と書くので、OS の更新で変わりうる
+   - 観測した範囲: 走っているコードは linker が署名した ad-hoc の単体のバイナリ (テストのバイナリのコピー)。時機は通常の方法の要求なしの検証の直後
+   - rename による置き換え 2 通り (Apple の署名のファイル、別の identifier の ad-hoc) と削除: 差し替えの前に開いた SecCode は検証した静的なコードを持ち続け、結果は走っているコードの身元 (`verified_from` は disk)
+   - 同じ inode への上書き 2 通り (Apple の署名の中身、別の identifier の ad-hoc の中身): `Failed(Other)`
+   - 対照として、差し替えの後に開き直すと気づく: 置き換えと上書きの 4 通りは running code に切り替えて走っているコードの身元、削除は `Failed(Missing)`
+   - 以上の 5 通りと対照を、テスト (`signing::tests::replacement_between_the_check_and_the_signing_information`) で固定した。結果は走っているコードの身元か `Failed` のどちらか、という形で固定している
+   - 確認の専任が追加で観測したもの (テストには無い): running code の検証の直後の置き換えは走っているコードの身元のまま、直後の削除は `Failed(Replaced)`
+   - 未観測: 証明書つきの走っているコード、app bundle、ほかの macOS の版
 3. **該当、直した**。subject が空の自己署名の証明書 (openssl で作成、`tests/fixtures/empty-subject.der`) で `SecCertificateCopySubjectSummary` が NULL を返し、security-framework 3.7.0 の `subject_summary` は `Attempted to create a NULL object.` で panic した (変異で確かめた)。`Certificate.summary` を `Option<String>` にし (JSON は null)、関数を自前で包んで NULL を None にする。DR-0011 の JSON の節に `summary` の説明を足した。テストは、fixture の要約が None になること (対照: launchd の leaf は `Software Signing`)、JSON の null の往復、要約の無い証明書でも印が requirement だけで決まること (根が Apple でなければ `other_certificate`)。その証明書で実際に署名したプロセスの検証は観測していない: `codesign` で自己署名の identity を使うには鍵束への取り込みと信頼の設定が要り、鍵束の検索リストの変更や認可のダイアログを伴うため
 4. **該当。2 つに分けた**。SecCode.h の `kSecCodeInfoCertificates` は「ad-hoc では無い。エラーの時は欠けるか一部だけになりうる」
    - (b) **直した**: 証明書の列の値が配列でない・要素が証明書でない・NULL を含む (要素の数が配列の長さと合わない) 時は、空や短い列を返さず、署名の情報の取得の失敗 (`Failed(Other)`) にする。DR-0011 の手順 4 の「取れなければ Failed(Other)」と同じ考え方で、手順の文面は変わらない。テストは、key が無い (空の列)・配列でない・証明書でない要素を含む・証明書の配列の 4 通り
-   - (a) **未決 (観測だけ)**: ad-hoc の判定を CodeDirectory の flags の `kSecCodeSignatureAdhoc` (0x2) に変える案は実装していない。flags は署名する側が書く値で、DR-0011 の「requirement で検証した事実だけを持つ」に触るため。今の規則でも、証明書の列を取れずに `AdHoc` になった時は印が `adhoc` (赤)、Team ID と根は無しで、信頼を強く言う方向の誤りにはならない (実装を読んで確かめた)。走っている全プロセス (検証に成功した 999 個) で「証明書の列が空か」と「ad-hoc の bit」を数え、食い違いは 0 件だった ([findings](../findings/2026-11-15-adhoc-flag-and-certificate-list.md))。入れるかは統括と kawaz が決める
+   - (a) **入れない (統括が決めた)**: ad-hoc の判定を CodeDirectory の flags の `kSecCodeSignatureAdhoc` (0x2) に変える案。DR-0011 の手順は変えない。理由:
+     - 今の規則は、証明書の列を取れなかった時も「身元が確かめられない」側 (印は `adhoc` で赤、Team ID と根を持たない) に倒れ、信頼を強く言う誤りが出ない。根は requirement の評価で決まり、証明書の列は表示用 (実装を読んで確かめた)
+     - flags は署名する側が CodeDirectory に書く値で、DR-0011 の「requirement で検証した事実だけを持つ」に足すものではない
+     - 観測でも入れて変わる対象が無い。走っている全プロセスで「証明書の列が空か」と「ad-hoc の bit」を数え、検証に成功した 999 個と、確認の専任の再測の 984 個のどちらでも食い違いは 0 件だった ([findings](../findings/2026-11-15-adhoc-flag-and-certificate-list.md))。証明書のある署名を running code で検証した組は観測していない (findings に書いたとおり残す)
 5. **該当、直した**。`"+f"` が `u8::from_str_radix` を通って 0x0f になることを、テストで再現した (修正前に RED)。読み込みを 16 進の数字 40 文字だけに限り、符号・空白・全角の数字を拒むテストを足した。ルールの `binary` の cdhash もこの読み込みを通る
 6. **該当、直した**。予算 0 でも `Requirements::compile()` が先に 6 本をコンパイルしていた。requirement を、検証がそれを初めて問う時にコンパイルし、収集の残りで使い回す。テストで、予算 0 と ad-hoc ではどれもコンパイルせず、Apple (launchd) では `anchor apple` だけ (2 度目も増えない) を確かめる
 7. **該当 (防御として直した)**。失敗の戻り値の時に、出力のポインタの辞書を包まずに返していた。Security framework が失敗の時に辞書を入れるかは確かめていない (ソースが手元に無い)。CF の約束 (`CF_RETURNS_RETAINED`) に沿い、NULL でなければ戻り値によらず所有を受け取って解放する。テストは本物の辞書を retain して渡し、retain count が戻ることを見る。順序を戻すとテストが落ちることも確かめた
 
 ## 受け入れ条件
 
-- [x] 各指摘について、該当するかを確かめた結果 (直した / 該当しない理由) がある (4 の (a) は採否が未決で、観測の結果まで)
+- [x] 各指摘について、該当するかを確かめた結果 (直した / 該当しない理由) がある
 - [x] 直したものにテストがある (1 と 2 は、差し替えと exec の時機を作るテスト)
-
-status は open のまま: 4 の (a) の採否が決まっていない。
