@@ -380,6 +380,72 @@ mod tests {
         assert_eq!(parse_bundle(contents), None);
     }
 
+    // 重なり合う data: 6 バイトの data のヘッダ (0x4f 0x12 と 4 バイトの長さ) を 4,000 個並べ、各 object が「自分のヘッダの直後から offset table の直前まで」(32 KiB 余り) を中身として申告する。中身の範囲は互いに重なり、offset が別々なので共有ではなく 4,000 個の別の object になる。木を作る実装では 4,000 個が別々にコピーされる (1 MiB のファイルで 8,000 個なら約 7.5 GB)。ここでは大きさを抑え (約 190 KiB、全部読むと約 128 MB)、トップレベルに正しい bundle ID があっても None を確かめる。止めるのは読み取りの量の上限 (MAX_INFO_PLIST_READ): data は event として覚えられず参照のたびに申告された全量を読み直す一方、event は 4,000 余りで MAX_INFO_PLIST_EVENTS には掛からない。
+    #[test]
+    fn overlapping_data_objects_are_not_read() {
+        const COUNT: usize = 4_000;
+        const PAD: usize = 32 << 10;
+        let refs: Vec<u32> = (5..5 + u32::try_from(COUNT).unwrap()).collect();
+        let head = [
+            dict(&[(1, 2), (3, 4)]),
+            ascii("CFBundleIdentifier"),
+            ascii("com.example.x"),
+            ascii("k"),
+            array(&refs),
+        ];
+        let head_len: usize = head.iter().map(Vec::len).sum();
+        let table = 8 + head_len + 6 * COUNT + PAD;
+        let mut objects = head.to_vec();
+        for i in 0..COUNT {
+            let after_header = 8 + head_len + 6 * i + 6;
+            let mut object = vec![0x4f, 0x12];
+            object.extend_from_slice(&u32::try_from(table - after_header).unwrap().to_be_bytes());
+            objects.push(object);
+        }
+        objects.last_mut().unwrap().resize(6 + PAD, 0);
+        let contents = bplist(&objects);
+        assert!(contents.len() as u64 <= MAX_INFO_PLIST_LEN);
+        assert!((COUNT * PAD) as u64 > MAX_INFO_PLIST_READ);
+        assert!((COUNT as u64) < MAX_INFO_PLIST_EVENTS);
+        assert_eq!(parse_bundle(contents), None);
+    }
+
+    // set (marker の上位 4 bit が 0xc) の要素に、中身が等しい別々の object の配列の鎖を 2 本 (深さ 28、各段が次の段を 2 回参照、最下段は同じ葉) 置いた binary plist。set に入れる時の等値比較が共有を辿り直す実装では時間が 1 段ごとに約 2 倍になるが、plist の stream reader (1.10.3、stream/binary_reader.rs の read_next) は set の marker を知らず、match の最後の腕で UnknownObjectType の解析エラーにする。set の中の鎖は 1 つも読まれず等値比較もしないので、トップレベルに正しい bundle ID があっても短い時間で None。
+    #[test]
+    fn a_set_of_equal_chains_is_not_read() {
+        const DEPTH: u32 = 28;
+        let chain_a = 5;
+        let chain_b = chain_a + DEPTH;
+        let leaf = chain_b + DEPTH;
+        let set = [
+            marker(0xc0, 2),
+            [chain_a, chain_b]
+                .iter()
+                .flat_map(|r| r.to_be_bytes())
+                .collect(),
+        ]
+        .concat();
+        let mut objects = vec![
+            dict(&[(1, 2), (3, 4)]),
+            ascii("CFBundleIdentifier"),
+            ascii("com.example.x"),
+            ascii("k"),
+            set,
+        ];
+        for first in [chain_a, chain_b] {
+            for level in 0..DEPTH {
+                let next = if level + 1 == DEPTH {
+                    leaf
+                } else {
+                    first + level + 1
+                };
+                objects.push(array(&[next, next]));
+            }
+        }
+        objects.push(vec![0x10, 0]);
+        assert_eq!(parse_bundle(bplist(&objects)), None);
+    }
+
     // 深い入れ子 (XML の <array> を 40,000 段) でも、走査は再帰しないのでスタックはあふれず、event の上限で None が返る。
     #[test]
     fn a_deeply_nested_plist_does_not_overflow() {
