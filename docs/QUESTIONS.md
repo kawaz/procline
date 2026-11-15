@@ -24,7 +24,7 @@ HO-Q1〜Q4 は、pam-passkey のセッションが起票した PL-Q1〜Q4 (収�
 
 提案中の [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md) の「`Deserialize` を外す範囲」に 2 案の比較表がある。同じ uid の別プロセスに対する守りは 2 案で変わらない。決め手は「他のプロセスが収集した結果を、Rust で procline の型として読んで表示する使い方を、procline が支えるか」。
 
-- [ ] a (起票側の推奨): 支えない。収集した事実の型すべてから外す (DR の案 2)。「検証済み」の型を持つのは検証したプロセスの値だけになり、JSON から読んだ値を評価に渡す取り違えの経路が無くなる。DR-0011 の「読み込みで印と事実の食い違いを拒む」規則は無くなる (今呼んでいるのはテスト 4 つだけ)。後で Rust の表示側が要るなら、表示用の型を別に足す
+- [x] a (起票側の推奨): 支えない。収集した事実の型すべてから外す (DR の案 2)。「検証済み」の型を持つのは検証したプロセスの値だけになり、JSON から読んだ値を評価に渡す取り違えの経路が無くなる。DR-0011 の「読み込みで印と事実の食い違いを拒む」規則は無くなる (今呼んでいるのはテスト 4 つだけ)。後で Rust の表示側が要るなら、表示用の型を別に足す
 - [ ] b: 支える。列の型 (`ProcessChain`) だけから外し、中身の型は JSON から読めるままにする (DR の案 1)。別プロセスの表示側が照合と同じ型で読めるが、JSON から読んだ値も「検証済み」の型になる
 
 ### 👺HO-Q2: DR-0014 の共通の決定 (HO-Q1 のどちらでも同じ部分) を採るか
@@ -32,15 +32,20 @@ HO-Q1〜Q4 は、pam-passkey のセッションが起票した PL-Q1〜Q4 (収�
 - 評価に渡せる列は、自分で収集したものか、アプリのコードが `from_collected` (名前で表明が読める関数) で組んだものだけ。列の型は JSON から読めず、field は非公開。タグ付きの列は `Policy::tag` だけが作れる
 - PAM が helper に渡す argv / cwd は procline の列に入れず、アプリ (pam-passkey) が表示用に持つ。procline に新しい入口は足さない
 
-- [ ] a (起票側の推奨): 採る
+- [x] a (起票側の推奨): 採る
 - [ ] b: 採らない
 
-### 👺HO-Q3: `os.*` の語彙を feature `acl` (既定で無効) の後ろに置くか
+### 👺HO-Q3: ACL の層を収集の層からどう分けるか
 
-提案中の [DR-0013](decisions/DR-0013-collect-only-dependencies.md)。[DR-0001](decisions/DR-0001-crate-naming.md) の「procline-macos は procline-acl に常に依存する」を置き換える。収集だけのアプリのビルドに入る crate が 53 → 42、release ビルドが約 10 秒 → 約 6.5 秒 (worker の計測)。
+kawaz (2026-11-15): ACL 自体は分けてよい。利用者はさまざまで、特定のアプリ (pam-passkey、cw) だけを前提に決めない。
 
-- [ ] a (起票側の推奨): feature にして既定は無効。収集だけのアプリ (pam-passkey の helper) のビルドに ACL の crate が入らない。ACL を使うアプリは feature を有効にする
-- [ ] b: 今のまま (常に依存)
+収集 (プロセスと祖先の情報、署名の検証) は単独で使える機能で、ACL はその上に載る任意の層。今は procline-macos が `os.*` の語彙を出すために procline-acl に依存していて、収集の層が ACL の層を知っている ([DR-0001](decisions/DR-0001-crate-naming.md))。分け方の案:
+
+- [ ] a (統括の推奨): `os.*` の語彙を別の crate (`procline-acl-macos`) に出し、依存を ACL → 収集の一方向にする。収集の crate (core、macos、入口の procline) は ACL を一切知らない。feature の組み合わせが増えない。crate が 1 つ増える。procline-macos は語彙が使う観測 (起動の UUID、起床の時刻、asid) を普通の関数として公開する
+- [ ] b: procline-macos の feature `acl` (既定で無効) の後ろに置く (提案中の [DR-0013](decisions/DR-0013-collect-only-dependencies.md) の形)。crate は増えないが、収集の crate が ACL への任意の依存を持ち続け、feature の有無の両方をビルドとテストで見る必要がある
+- [ ] c: 今のまま (常に依存)
+
+a の推奨理由: 層の境界が crate の境界と一致し、依存の向きが 1 つになる。b は同じ分離を feature で表すので、境界がビルドの設定に隠れる。
 
 ### 👺HO-Q4: アイコンを収集の型から外すか
 
