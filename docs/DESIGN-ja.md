@@ -51,9 +51,9 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 | 項目 | 取り方(macOS) | 強さ | 備考 |
 | --- | --- | --- | --- |
-| audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む |
+| audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む。表すのは、token を読んだ時点で相手側の端を最後に送受信に使ったプロセスと、その時点の資格情報で、要求を書いたプロセスや、ソケットを作った・接続したプロセスとは限らない([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md)) |
 | unique\_id / parent\_unique\_id | `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` の `p_uniqueid`、`p_puniqueid` | 強 | 起動ごとに一意な 64bit ID。祖先を確実に辿れる。`#ifdef PRIVATE` の SPI なので、取れなければ pid と起動時刻の組に落とす |
-| pid、起動時刻 | `sysctl(KERN_PROC_PID)` の `kinfo_proc`(uid を問わず読める) | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、接続後に exec した相手の検出に使える |
+| pid、起動時刻 | `sysctl(KERN_PROC_PID)` の `kinfo_proc`(uid を問わず読める) | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、token を読んだ後に exec した相手の検出に使える(読む前に exec していれば、token が既に exec の後の値) |
 | asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。起動ごとに再利用されるので、`os.login_session` の pin 値に boot UUID と組で使う |
 
 これらの識別子は収集の内部の分類で、ルールの語彙では audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれ(「matcher」)、asid は `os.login_session` の pin 値(`{boot_uuid, asid}`)として内部で使われるだけで語彙には出ません。
@@ -145,7 +145,7 @@ argv、パス、env の値など、相手が自由に決められる文字列を
 
 1. 接続相手は audit token、祖先は unique\_id(なければ pid と起動時刻)を、収集の最初に記録する。
 2. 署名は、接続相手を audit token で参照して検証する(pid で参照すると、その間に別のプロセスになり得る)。
-3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。対象でも祖先でも、同じ個体のまま exec していれば(pid version が変わる)同じく結果を捨てる(署名は exec の前のイメージ、実行パスや argv は後のイメージのもの、という混ざった結果になり得るため)。エラーは `IdentityChanged` で、利用側は集め直す。unique\_id を取る SPI が使えない時は pid version も取れないので、exec は検出できない。対象が終了していれば(親に回収されていないものを含む)収集は失敗する(pid で集めた時は `NoSuchProcess`。接続相手では、audit token を読む前に終わっていれば `Peer`(`ENOTCONN`)、読んだ後・記録する前なら `NoSuchProcess`、記録した後なら `IdentityChanged`)。
+3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。対象でも祖先でも、同じ個体のまま exec していれば(pid version が変わる)同じく結果を捨てる(署名は exec の前のイメージ、実行パスや argv は後のイメージのもの、という混ざった結果になり得るため)。エラーは `IdentityChanged` で、利用側は集め直す。unique\_id を取る SPI が使えない時は pid version も取れないので、exec は検出できない。対象が終了していれば(親に回収されていないものを含む)収集は失敗する(pid で集めた時は `NoSuchProcess`。接続相手では、audit token を読む前に相手側の端を持つプロセスが全部終わっていれば `Peer`(`ENOTCONN`)、読んだ後・記録する前なら `NoSuchProcess`、記録した後なら `IdentityChanged`)。
 4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。終了して親にまだ回収されていないプロセス(zombie)も終了したものとして扱う(カーネルの状態 `SZOMB` で判定する)。隣り合う行は、unique\_id が親と子の両方で取れた時は、子の `p_puniqueid` と親の `p_uniqueid` の一致で親子として繋ぐ。親が終了して launchd に付け替えられたプロセスは、ppid が 1 になっても `p_puniqueid` は元の親の値のままなので、列はそこで `ancestor_exited` として終わる(launchd を親として繋ぐと、実在しない親子関係になる)。unique\_id が取れなかった時は、ppid と、親の起動時刻が子の起動時刻以前であることで繋ぐ。親の pid を後から使い回したプロセス(子より後に起動したもの)は外れるが、付け替えられたプロセスは launchd に繋がり、途切れの印は付かない。どちらで繋いだかは、行の識別子(`Identity.unique_id`、`parent_unique_id`)が `Some` か `None` かで分かる。どちらで繋いだ時も、親が終了して付け替えられた後に exec したプロセスは、`p_puniqueid` がその時の親(launchd)の値に書き換わるので launchd の子として繋がり、途切れの印は付かない。これは列のどの行の間でも起きうる。途切れの印が無いことは、どの行が期待する親であるかを示さない(決定の記録: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 ## ACL ルールの形と評価

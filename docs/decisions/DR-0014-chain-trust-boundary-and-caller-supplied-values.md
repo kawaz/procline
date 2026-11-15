@@ -123,11 +123,13 @@ procline が保証すること / しないこと:
   - 識別子が取れなかった時の繋がりは、付け替えを途切れとして出さない (起動時刻の順は付け替え先の launchd でも満たす)
   - 識別子が取れた時も、親が終わった後に exec したプロセスは launchd の子に見え、途切れの印 (`truncated`) は付かない。印が無いことは、どの行が期待する親であるかを示さない
   - 渡された値がどの行のものか、送り手が誰か
-- アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出し、`collect_peer` (ソケットの相手を audit token で決めて集める入口) を持つ
+- アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出し、`collect_peer` (ソケットの相手を audit token で決めて集める入口。相手は、token を読んだ時点で相手側の端を最後に送受信に使ったプロセス) を持つ
 - 送り手と受け渡しの経路について言えること ([findings](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)):
   - pipe でも socketpair でも、書き込み側の端を持てるのは、作ったプロセスと、それが fork で引き継がせたか fd を渡したプロセスだけ (fd の性質。観測はしていない)
   - pipe の読み側からは、書き込み側のプロセスをカーネルに問えない (`LOCAL_PEERPID` が `ENOTSOCK`、観測)。送り手が誰かは、起動の手順から言うことになる
-  - socketpair の読み側からは、作ったプロセスの pid と pidversion をカーネルの値で読める (fork と exec の後も、同じ uid で 1 回観測)。親子の繋がりとは別に送り手の候補を決められるので、付け替えの後の exec で列が launchd に繋がった場合も、作ったプロセスを名指せる。作ったプロセスが終わった後と、root が作って降格した子が読む組は観測していない
+  - UNIX ドメインソケット (socketpair と名前付き) の読み側が `LOCAL_PEERPID` / `LOCAL_PEERTOKEN` で読めるのは、`getsockopt` した時点で相手側の端を最後に送受信 (write / read / sendmsg / recvmsg) に使ったプロセスの pid と、その時点の資格情報 (euid、ruid、pidversion) (同じ uid で、3 種類のソケットと 12 の組で観測)。どのプロセスも送受信していない間は、作ったプロセス (名前付きでは connect したプロセス)。読み手が自分自身を exec しても変わらない
+  - そのため、相手の token は要求を書いたプロセスや書いた時の実行イメージと一致するとは限らない。書いた後に相手が exec すれば exec の後の実行イメージと資格情報 (setuid root のプログラムなら euid 0) になり、相手側の端を持つ別のプロセス (fork で引き継いだ子、`SCM_RIGHTS` で受け取ったプロセス) が送受信すればそのプロセスになる。作ったプロセスを後から名指す手段にはならない
+  - 相手側の端を持つプロセスが全部終わると、`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` は `ENOTCONN` で失敗する。`LOCAL_PEERCRED` の uid は接続の時の値のまま残る (SOCK_DGRAM の socketpair では取れない)
 
 ### DESIGN に書くこと
 
@@ -167,7 +169,7 @@ procline が保証すること / しないこと:
   - root から別 uid のプロセスの argv と cwd が取れるか
   - hardened runtime の Developer ID 署名のプロセスが自分の pid で集めた時の所要時間と、列の先頭 (自分) の署名の検証の結果
   - 走っている `sudo` の子として起動されたプロセスが自分の pid で集めた列で、2 番目が `sudo` になること (同じ uid の親子では観測した。親が実効 uid 0 の組は、walk が使う値が uid を問わず読めることだけ観測済み)
-  - socketpair を root のプロセスが作り、降格して exec した子が読む組と、その audit token での `collect_peer`
+  - UNIX ドメインソケットの相手 (findings `2026-11-15-socketpair-peer-after-fork-exec.md` の未観測): root のプロセスが作り、降格して exec した子が読む組。委譲 (`LOCAL_PEEREPID` が別の pid になる設定)。最後に送受信に使ったプロセスが終わり、相手側の端を別のプロセスがまだ持っている間に読んだ値。観測した以外の syscall と他の版の macOS。`collect_peer` を通した照合
 
 ## 関連
 
@@ -177,4 +179,4 @@ procline が保証すること / しないこと:
 - [DR-0013](DR-0013-acl-layer-in-separate-crates.md): ACL の層を収集の層から crate で分ける
 - [DESIGN-ja の「脅威モデルの前提」「識別子」「収集する情報」「収集の整合性」「API の骨格」](../DESIGN-ja.md)
 - issue: [JSON から読み込んだ ProcessChain を評価が信用する](../issue/archive/2026-11-15-deserialized-chain-is-trusted-by-evaluate.md)、[呼び出し元が渡して補う入口](../issue/archive/2026-11-15-caller-supplied-own-info.md)、[付け替えの後の exec](../issue/2026-11-15-ancestry-reset-by-exec-after-reparent.md)
-- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: socketpair の相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
+- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: UNIX ドメインソケットの相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
