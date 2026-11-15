@@ -129,7 +129,7 @@ pub enum Mark {
 
 ### 検証の手順 (1 プロセス)
 
-1. SecCode を得る。接続相手は audit token (`kSecGuestAttributeAudit`)、祖先は pid
+1. SecCode を得る。audit token で指した対象は audit token (`kSecGuestAttributeAudit`)、それ以外は pid
 2. requirement 無しの `SecCodeCheckValidity`。`errSecCSUnsigned` (-67062) なら `Unsigned`
 3. 2 か 1 が「実行ファイルを読めない」(100013) か「ディスク上の実行ファイルが走っているものと違う」(-67034) で失敗したら、pid ベース (同じ参照に `kSecGuestAttributeDynamicCode` を足す) で 1 と 2 をやり直す。それも失敗したら `Failed` で、理由は通常の方法の戻り値で分類する (-67034 → `Replaced`、100002 → `Missing`、それ以外 → `Other`)。その他の失敗は pid ベースに切り替えず `Failed`
 4. 成功したら、`SecCodeCopySigningInformation` (署名と動的な情報) で identifier、cdhash (`kSecCodeInfoUnique`)、証明書の連なり、flags、動的な status、entitlements、Info.plist を取る。identifier・cdhash・flags・status のどれかが取れなければ `Failed(Other)`。status に valid (`CS_VALID`、0x1) が無ければ `Failed(Other)` (検証の後に valid が外れたコードに身元を付けない)。entitlements の blob (`kSecCodeInfoEntitlements`) があるのに dict の形 (`kSecCodeInfoEntitlementsDict`) で取れない時も `Failed(Other)` (保護を緩める entitlement の有無を確かめられないまま「無い」と言わない。[DR-0012](DR-0012-strength-class-from-protection.md) の保護の状態はこれで決まる)
@@ -213,7 +213,7 @@ pub enum Mark {
 - [DR-0012](DR-0012-strength-class-from-protection.md): 強さのクラスを対象の保護の状態で決める (この DR の `RuntimeState` と entitlements を使う)
 - [DR-0006](DR-0006-structured-values-instead-of-depends.md): `binary` の値の形と、署名由来の field は検証が通った時だけ当たること
 - [findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md): `anchor apple generic` の評価
-- [findings: audit token と kSecGuestAttributeDynamicCode](../findings/2026-11-15-audit-token-dynamic-code.md): 接続相手を audit token で参照した時の pid ベースの検証
+- [findings: audit token と kSecGuestAttributeDynamicCode](../findings/2026-11-15-audit-token-dynamic-code.md): 対象を audit token で参照した時の pid ベースの検証
 - [findings: 実行ファイルを消したプロセスの参照の時機](../findings/2026-11-15-deleted-executable-lookup-timing.md): 起動の直後に実行ファイルを消したプロセスの検証の失敗
 - [findings: ad-hoc の bit と証明書の列](../findings/2026-11-15-adhoc-flag-and-certificate-list.md): 証明書の列が空かどうかと CodeDirectory の ad-hoc の bit の一致
 - [findings: Team ID と leaf 証明書の OU](../findings/2026-11-15-team-id-and-leaf-certificate-ou.md)

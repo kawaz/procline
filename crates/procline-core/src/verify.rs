@@ -102,7 +102,7 @@ pub struct SigningInfo {
     pub bundle_id: Option<String>,
 }
 
-/// The Security framework calls the verification of one process needs, each returning the raw OSStatus. An implementation addresses one process (by audit token for a socket peer, by pid otherwise).
+/// The Security framework calls the verification of one process needs, each returning the raw OSStatus. An implementation addresses one process (by audit token for a target collected by its audit token, by pid otherwise).
 pub trait SigningCalls {
     type Code;
     /// `SecCodeCopyGuestWithAttributes` for the process, adding `kSecGuestAttributeDynamicCode` for `Lookup::RunningCode`.

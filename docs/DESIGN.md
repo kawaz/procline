@@ -1,24 +1,24 @@
-# Collecting Information About the Connecting Process and ACL Design
+# Collecting Information About a Process and ACL Design
 
 ## Overview
 
-A set of crates for collecting information about a process and its ancestors, and for defining and evaluating access control (ACL) over that information. The collected information can be used with the same types both for display and for ACL matching, and an app can use collection alone or use it with the ACL on top. The main entry point for collection is the peer of a UNIX domain socket (its audit token), but the center is the process itself, and nothing depends on it being a peer.
+A set of crates for collecting information about a process and its ancestors, and for defining and evaluating access control (ACL) over that information. The collected information can be used with the same types both for display and for ACL matching, and an app can use collection alone or use it with the ACL on top. There are two collect entry points, which point at the target process by pid or by audit token. Knowing who the peer of a connection is lies outside procline's responsibility.
 
 **Patterns of use**
 
 - **An app that uses only collection**: collects the calling process and its ancestors and shows them in the approval UI. It does not use matching.
-- **An app that also uses the ACL**: collects the peer and decides allow, deny, or re-authentication via an ACL per object the app protects. It creates rules after the fact from the approval UI.
+- **An app that also uses the ACL**: collects the target process and decides allow, deny, or re-authentication via an ACL per object the app protects. It creates rules after the fact from the approval UI.
 
 **Design pillars**
 
-1. **Identify by something stronger than pid**: the peer is identified by its audit token and ancestors by a per-process unique ID, so pid reuse cannot cause a mix-up.
+1. **Identify by something stronger than pid**: the target is pointed at by a pid or an audit token the caller passes, and with an audit token the individual process is confirmed by the token's pidversion. Ancestors are linked by a per-process unique ID, so pid reuse cannot cause a mix-up.
 2. **Display and matching share the same types**: a rule can be built directly from the information shown on screen.
 3. **Every item has a strength**: conditions that identify the approved individual process or code (code signature, identification of the individual process) and conditions that any process with the same uid can satisfy (name, cwd, argv, uid) are distinguished by class when the item is registered, so that the app can constrain allows based only on conditions that identify nothing. The constraint values are given by the app; the crate holds only the checking mechanism.
 4. **Apps can extend the vocabulary**: matcher items, scopes (grant lifetimes), and conditions can be registered by an app in the same form as the built-in vocabulary.
 
 **Scope**
 
-macOS is implemented first, in a form that Linux can be added to later. Linux collection (`SO_PEERCRED`, pidfd, `/proc`) is added the same way on top of the same types.
+macOS is implemented first, in a form that Linux can be added to later. Linux collection (pidfd, `/proc`) is added the same way on top of the same types.
 
 **Threat model assumptions**
 
@@ -37,7 +37,7 @@ Collection is implemented in per-OS crates, while the types and matching live in
 | --- | --- | --- |
 | procline | Entry point. Re-exports the core types and the collect of the build target's OS | core, a per-OS crate (only one, per target) |
 | procline-core | Types for collection results, the strength class type (`Strength`), the signature verification steps and the trust mark, env policy and redaction, the JSON shape | none (OS-independent) |
-| procline-macos | Collection of the peer and ancestors, code signature verification, icons, the OS observations the `os.*` vocabulary uses (`boot_session_uuid()`, `wake_time_secs()`) | core, Security framework, AppKit |
+| procline-macos | Collection of the target process and ancestors, code signature verification, icons, the OS observations the `os.*` vocabulary uses (`boot_session_uuid()`, `wake_time_secs()`) | core, Security framework, AppKit |
 | procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, the OS-independent built-in vocabulary, rule creation and grant issuance | core |
 | procline-acl-macos | Providing the `os.*` vocabulary (`procline_acl_macos::os_items()`). It observes the OS through the public functions of procline-macos and has no `unsafe` | procline-acl, core, procline-macos |
 
@@ -45,16 +45,16 @@ Apps use only what they need. An app that uses only collection depends on procli
 
 ## Collected Information
 
-The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. The sequence also holds the boot UUID of the boot it was collected in (`kern.bootsessionuuid`, `ProcessChain::boot_uuid()`). Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the class when the item is used for matching, determined by how much the condition pins down the approved individual process or code ("Strength: Class and Depth").
+The collection result is a sequence that starts with the target process followed by its ancestors up to launchd. The sequence also holds the boot UUID of the boot it was collected in (`kern.bootsessionuuid`, `ProcessChain::boot_uuid()`). Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the class when the item is used for matching, determined by how much the condition pins down the approved individual process or code ("Strength: Class and Depth").
 
 ### Identifiers
 
 | Item | How to obtain (macOS) | Strength | Notes |
 | --- | --- | --- | --- |
-| audit token (peer) | `getsockopt(LOCAL_PEERTOKEN)` | Strong | Public API. Contains pid, pidversion, uid, asid. It represents the process that last sent or received on the other end at the time the token is read, with its credentials at that time; this is not necessarily the process that wrote the request, nor the one that created or connected the socket. The token is looked up by the recorded pid: once that process has exited while another process still holds the other end, the token cannot be read (`EINVAL`), and when the pid is assigned to another process, it becomes the token of that process, which is unrelated to the socket ([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md)) |
+| audit token (target collected by audit token) | Passed by the caller | Strong | Contains pid, pidversion, uid, asid |
 | unique\_id / parent\_unique\_id | `p_uniqueid` and `p_puniqueid` from `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` | Strong | 64-bit ID unique per launch. Lets ancestors be traced reliably. It is an SPI under `#ifdef PRIVATE`, so if unavailable, fall back to the pair of pid and start time |
-| pid, start time | `kinfo_proc` from `sysctl(KERN_PROC_PID)` (readable regardless of uid) | Strong (as a pair) | Together they form an identifier (identification when unique\_id is unavailable). The pidversion in the audit token changes on exec, so it can be used to detect a peer that exec'd after the token was read (if it exec'd before, the token already holds the post-exec values) |
-| asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. It is reused across boots, so it is used for the pinned value of `os.login_session` paired with the boot UUID |
+| pid, start time | `kinfo_proc` from `sysctl(KERN_PROC_PID)` (readable regardless of uid) | Strong (as a pair) | Together they form an identifier (identification when unique\_id is unavailable). The pidversion in the audit token changes on exec, so it can be used to detect a target that exec'd after the token was obtained (if it exec'd before, the token already holds the post-exec values) |
+| asid (audit session ID) | audit token | Strong | Distinct per login or ssh session. It is reused across boots, so it is used for the pinned value of `os.login_session` paired with the boot UUID. A target collected by pid has none, and pinning `os.login_session` fails on such a sequence |
 
 These identifiers are an internal classification of collection: in the rule vocabulary, the audit token, unique\_id, and pid with start time are folded into the single item `process` that identifies the individual process ("matcher"), and the asid is used only internally as the pinned value of `os.login_session` (`{boot_uuid, asid}`) and does not appear in the vocabulary.
 
@@ -62,8 +62,8 @@ These identifiers are an internal classification of collection: in the rule voca
 
 | Item | How to obtain (macOS) | Strength |
 | --- | --- | --- |
-| uid, gid, supplementary groups (matched numerically; for display each ID carries its representative `name` (the result of `getpwuid_r` / `getgrgid_r`) and `names`, every name that resolves to the ID. The full list needs one enumeration of the passwd / group databases, about 16 ms per collection, so it is chosen with `CollectOptions.all_names`. One ID has several names when Open Directory has duplicate uids) | `cr_uid` (the effective uid) and `cr_groups` (up to 16 entries, the first being the effective gid) of `kinfo_proc`. The same for the peer and the ancestors, with the values at the time of collection. The uid of `LOCAL_PEERCRED` stays the value at the time of connecting and is from a different time than the credentials in the audit token (when a setuid program is exec'd after connecting, the token's euid becomes 0 while the uid of `LOCAL_PEERCRED` stays as it was. [findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md)), so it is not used | Weak |
-| Code signature (the result of verification; only when it succeeds: identifier, cdhash, signer certificate chain, the root and kind of the certificate, Team ID, notarization, entitlements, and hardened runtime / platform binary / debugged from the kernel's dynamic status) | `SecCodeCopyGuestWithAttributes` (audit token for the peer, pid for ancestors; when the executable cannot be read or was replaced, verified again with `kSecGuestAttributeDynamicCode` added), `SecCodeCheckValidity` (with requirements), `SecCodeCopySigningInformation` | Strong (only when verification succeeds and the process is protected; "Signature Verification and the Trust Mark", "Strength: Class and Depth") |
+| uid, gid, supplementary groups (matched numerically; for display each ID carries its representative `name` (the result of `getpwuid_r` / `getgrgid_r`) and `names`, every name that resolves to the ID. The full list needs one enumeration of the passwd / group databases, about 16 ms per collection, so it is chosen with `CollectOptions.all_names`. One ID has several names when Open Directory has duplicate uids) | `cr_uid` (the effective uid) and `cr_groups` (up to 16 entries, the first being the effective gid) of `kinfo_proc`. The same for the target and the ancestors, with the values at the time of collection | Weak |
+| Code signature (the result of verification; only when it succeeds: identifier, cdhash, signer certificate chain, the root and kind of the certificate, Team ID, notarization, entitlements, and hardened runtime / platform binary / debugged from the kernel's dynamic status) | `SecCodeCopyGuestWithAttributes` (audit token for a target collected by audit token, pid otherwise; when the executable cannot be read or was replaced, verified again with `kSecGuestAttributeDynamicCode` added), `SecCodeCheckValidity` (with requirements), `SecCodeCopySigningInformation` | Strong (only when verification succeeds and the process is protected; "Signature Verification and the Trust Mark", "Strength: Class and Depth") |
 | Executable path. Its owner (whether root) and whether the user can write to it are also collected (used for deciding the class. "Writable" means the user can write to the file itself or to any directory on the path) | `proc_pidpath` | Strong (a root-owned location the user cannot write to, and protected), Medium (a location the user can write to, or opened by authorization), Weak (open) |
 | Executable digest | sha256 of the contents of the file at the executable path | Medium (same as the path. If the file is replaced after exec, it diverges from the running image. On Linux, `/proc/<pid>/exe` points to the running inode, but the Linux collection does not have the protection state yet, so until it does, it is treated as Weak). Weak when the protection is open |
 | app bundle (bundle ID, version) | Taken from `kSecCodeInfoPList` of `SecCodeCopySigningInformation` (the Info.plist sealed by the signature) and held in `VerifiedSignature.bundle_id` (used for matching). `ProcessInfo.bundle`, read by walking up from the executable path to the `.app`, is for display. The owner of the process decides both the contents and the type of that Info.plist, so only a regular file is read, and only the values directly under the top-level dictionary are taken. There are three limits: the size of the file (1 MiB), the number of parsing events, and the total bytes the parsing reads (a binary plist can refer to one object many times, and each reference reads it again). Past any of them, or unless the whole plist parses to its end, it is `None`. Whether it is read is chosen with `CollectOptions.bundle`; off leaves it `None` and skips parsing a file the owner decided | Strong (a signature field of `binary`. Paired with `team_id` and `signing_id`. Strong only when verified and protected; Medium when opened by authorization, Weak when the protection is open. See "Strength: Class and Depth") |
@@ -86,7 +86,7 @@ Icons and names are "what it looks like"; the signature is "who it actually is".
 
 **Verification steps**:
 
-1. Obtain the SecCode (audit token for the peer, pid for ancestors) and call `SecCodeCheckValidity` without a requirement.
+1. Obtain the SecCode (audit token for a target collected by audit token, pid otherwise) and call `SecCodeCheckValidity` without a requirement.
 2. Only when the executable cannot be read (seeing a setuid process such as a running `sudo` from user privileges) or the executable on disk differs from the running one, verify again against the signature the kernel holds, by adding `kSecGuestAttributeDynamicCode`. If that fails too, the result is `Failed`, with the reason decided from the first return value.
 3. Check the root of the certificate with the requirement `anchor apple` (Apple's own code), then `anchor apple generic` (a certificate Apple issued). Only for a certificate Apple issued, check its kind by the extension OIDs of the certificate (requirements combined with `anchor apple generic`): Mac App Store, then Developer ID, then development. Only for Developer ID, check `notarized`.
 4. Take hardened runtime, platform binary and debugged from the kernel's dynamic status (`kSecCodeInfoStatus`). Some code is treated as hardened by the kernel while its CodeDirectory flags have no hardened runtime (a running `sudo`, for example). When the status lacks valid (`CS_VALID`), the result is `Failed` (other). When the entitlements blob is present but cannot be had in dictionary form, the result is `Failed` (other), so as not to say that no entitlement relaxes the protection without having checked it.
@@ -137,9 +137,9 @@ Sanitization for display is outside procline's responsibility. Values are return
 
 Collection takes time, and processes may be replaced in the meantime.
 
-1. At the start of collection, record the audit token for the peer and the unique\_id (or pid and start time if unavailable) for ancestors.
-2. Verify the signature by referring to the peer via its audit token (referring by pid could hit a different process in the meantime).
-3. At the end of collection, confirm that the recorded identifiers have not changed. If they have, discard the result and return an error. The same applies when the target or an ancestor is still the same individual but has run exec (its pid version changes), because the result could mix images: the signature from before the exec, the executable path and argv from after it. The error is `IdentityChanged`, and the caller collects again. When the SPI that gives the unique\_id is unavailable, the pid version is unavailable too, so an exec cannot be detected. If the target has exited (including one not yet reaped by its parent), the collection fails (`NoSuchProcess` when collecting by pid; for a peer, `Peer` (`ENOTCONN`) if every process holding the other end has exited before the audit token is read, `NoSuchProcess` if the peer exits after the token is read and before it is recorded, and `IdentityChanged` if after it is recorded). If only the process that last sent or received on the other end has exited while another process still holds that end, the audit token cannot be read and the collection fails with `Peer` (`EINVAL`). Once that pid has been assigned to another process, the token is that process's, and the collection collects that process without an error (this follows from the observations of cases 11 and 12 in the [findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md); it has not been observed through `collect_peer`).
+1. At the start of collection, record the unique\_id (or pid and start time if unavailable) of the target and the ancestors. When collecting by audit token, also confirm, if the identifiers are available, that the target's pid version equals the token's pidversion.
+2. Verify the signature of a target collected by audit token by referring to it via its audit token (referring by pid could hit a different process in the meantime).
+3. At the end of collection, confirm that the recorded identifiers have not changed. If they have, discard the result and return an error. The same applies when the target or an ancestor is still the same individual but has run exec (its pid version changes), because the result could mix images: the signature from before the exec, the executable path and argv from after it. The error is `IdentityChanged`, and the caller collects again. When the SPI that gives the unique\_id is unavailable, the pid version is unavailable too, so an exec cannot be detected. If the target has exited (including one not yet reaped by its parent), the collection fails with `NoSuchProcess`. When collecting by audit token, if the identifiers are available and the target's pid version differs from the token's pidversion, the collection fails with `IdentityChanged` (when the target exec'd after the token was obtained, or when the token's pid has been assigned to another process).
 4. An ancestor may have exited partway through. In that case, end the sequence in a form that shows "it was cut off here". A process that has exited but has not yet been reaped by its parent (a zombie) is also treated as exited (judged by the kernel state `SZOMB`). When unique\_id is obtained for both the parent and the child, adjacent rows are linked as parent and child by the child's `p_puniqueid` matching the parent's `p_uniqueid`. For a process reparented to launchd after its parent exited, the ppid becomes 1 but `p_puniqueid` keeps the original parent's value, so the sequence ends there as `ancestor_exited` (linking launchd as the parent would record a parent-child relationship that does not exist). For a process that execs after it was reparented, `p_puniqueid` is rewritten to the value of its parent at that moment (launchd), but the pid version of the parent it was forked by (`p_orig_ppidversion`) keeps the value of the original parent that exited. So only when linking launchd as the parent, also confirm that the child's `p_orig_ppidversion` equals launchd's `p_idversion`, and if it does not, end the sequence there as `ancestor_exited`. For parents other than launchd they are not compared (when a parent execs after forking the child, the parent's pid version changes, so they need not match even for a real parent and child). This distinction rests on observation on one version of macOS (26.5.2); other versions, the state after launchd itself execs again, and pid versions wrapping around have not been observed ([findings](findings/2026-11-15-orig-ppidversion-tells-reparented-exec.md)). When unique\_id is not obtained, they are linked by the ppid and by the parent's start time being no later than the child's. A process that later reused the parent's pid (one started after the child) is rejected, but a reparented process is linked to launchd whether or not it exec'd afterwards, and gets no cut-off mark (the pid version is unavailable too, so this cannot be checked). Which way a row was linked shows in whether the row's identifiers (`Identity.unique_id`, `parent_unique_id`) are `Some` or `None`. For rows whose unique\_id was not obtained, the absence of the cut-off mark does not show which row is the expected parent (decision record: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)).
 
 ## ACL Rule Shape and Evaluation
@@ -151,13 +151,13 @@ The ACL is made of four parts. subject, tag, and rule are static definitions tha
 | subject | A condition on one process. Can hold conditions on ancestors as an ordered list | The target of a rule, tag definitions |
 | tag | A named subject. Matching processes get the tag | Display in the approval UI, conditions in other subjects |
 | rule | Who (subject), on what (targets), until when and under what circumstances (conditions), with what outcome (effect). The conditions stay symbolic | The source of grants. Pick "the usual allow" in the approval UI and apply it with a single passkey |
-| grant | A rule applied to the peer at the moment of approval, with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value | Evaluation |
+| grant | A rule applied to the target process at the moment of approval, with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value | Evaluation |
 
 If no grant matches, the default effect applies (given by the app as `default_effect` of `Policy::load_verified`), and deny takes precedence over allow.
 
 ### subject
 
-A subject is a condition on one process and does not distinguish between the peer and ancestors. Conditions on ancestors are written in `ancestors` as an ordered list. A value of `true` is a placeholder, filled with that process's actual value when the grant is created. Placeholders can be written only in a rule's inline subject ("rule").
+A subject is a condition on one process and does not distinguish between the target and ancestors. Conditions on ancestors are written in `ancestors` as an ordered list. A value of `true` is a placeholder, filled with that process's actual value when the grant is created. Placeholders can be written only in a rule's inline subject ("rule").
 
 ```json
 {
@@ -301,7 +301,7 @@ A static rule is never used directly in evaluation. Evaluation looks only at gra
 
 ### grant
 
-A grant is a rule applied to an actual process (the peer at the moment of approval), with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value. When the grant is created, placeholders in the subject's `match` are filled with the values of the target process (the head of the sequence), placeholders in an `ancestors` entry are filled with the values of the ancestor that entry matched, the epoch at that moment is recorded for lifetime conditions, and `age` is converted to a time.
+A grant is a rule applied to an actual process (the target at the moment of approval, the head of the sequence), with the subject's placeholders pinned to the actual values and each condition pinned to a concrete value. When the grant is created, placeholders in the subject's `match` are filled with the values of the target process (the head of the sequence), placeholders in an `ancestors` entry are filled with the values of the ancestor that entry matched, the epoch at that moment is recorded for lifetime conditions, and `age` is converted to a time.
 
 ```json
 {
@@ -322,7 +322,7 @@ A grant is a rule applied to an actual process (the peer at the moment of approv
 }
 ```
 
-- Each element of `conditions` has `key`, the original arguments `args` (if needed), and `pinned` (the pinned value; state conditions normally have none, and only those that fix a value depending on the peer, such as `os.login_session`, have one). `age` is converted into the pinned value of `until` when the grant is created (`key` also becomes `until`).
+- Each element of `conditions` has `key`, the original arguments `args` (if needed), and `pinned` (the pinned value; state conditions normally have none, and only those that fix a value depending on the target process, such as `os.login_session`, have one). `age` is converted into the pinned value of `until` when the grant is created (`key` also becomes `until`).
 - The pinned value of `os.session` holds every epoch at or below its level (for `unlocked`, the three of `boot`, `awake`, and `unlocked`. `awake` is the wake time, `unlocked` is the unlock time).
 - `id` is assigned uniquely by `Policy::grant` (the `g-…` above is illustrative).
 - No placeholder remains in the subject (if one does, it is a load error). If there is no value to fill one with (such as `team_id: true` without a signature), the grant cannot be created (`GrantError::ValueUnavailable`).
@@ -482,7 +482,7 @@ The target of evaluation is grants (decision record: [DR-0008](decisions/DR-0008
 3. Apply each condition's `advance` only to the adopted grant. If even one returns a new pinned value, create a new grant with the pinned values replaced (grants are immutable).
 4. The app signs and persists the changed grant, and uses the result (allow) only after the write succeeds.
 
-The evaluation result (`Decision`) returns not only the effect but also the id of the adopted grant and which item each condition matched (the trace). This is used for the UI's "why did this pass, why was I asked". `Decision.trace` is not returned to the peer (it would reveal which condition failed). When step 3 changed the grant, the new version is also returned (`updated_grant`).
+The evaluation result (`Decision`) returns not only the effect but also the id of the adopted grant and which item each condition matched (the trace). This is used for the UI's "why did this pass, why was I asked". `Decision.trace` is not returned to the target process (it would reveal which condition failed). When step 3 changed the grant, the new version is also returned (`updated_grant`).
 
 There are two entry points for evaluation. `evaluate` runs through step 3 and only returns `updated_grant`; it does not replace the in-memory grant. `explain` is for displaying the trace; it does not apply `advance`, and `updated_grant` is always empty. `explain` also fills `expired`, but it does not settle the expiry (the app does not use `explain`'s `expired` for deletion).
 
@@ -536,9 +536,9 @@ State conditions are ones whose truth value can change on every evaluation. Unli
 
 | Name | True when |
 | --- | --- |
-| `os.not_remote` | The peer's asid belongs to the console session. Judged by the asid alone (the presence of ancestors can be changed by a double fork, so it is not used) |
+| `os.not_remote` | The asid of the target process (the head of the sequence) belongs to the console session. Judged by the asid alone (the presence of ancestors can be changed by a double fork, so it is not used) |
 | `os.console_active` | The screen is not locked |
-| `os.login_session` | The peer's login session is the same as when the grant was created (it holds the pair of the boot UUID and asid at creation, `{boot_uuid, asid}`, as its pinned value. The asid is reused across boots, so it is paired with the boot UUID. Detecting logout is not promised) |
+| `os.login_session` | The login session of the target process (the head of the sequence) is the same as when the grant was created (it holds the pair of the boot UUID and asid at creation, `{boot_uuid, asid}`, as its pinned value. The asid is reused across boots, so it is paired with the boot UUID. Detecting logout is not promised) |
 | `time.window` | Within the specified days of the week and time range |
 
 Location conditions such as "while on the home Wi-Fi" are added by apps as needed.
@@ -558,7 +558,7 @@ trait Condition {
     fn kind(&self) -> ConditionKind;                                   // Lifetime / State
     /// Observe the current value (an epoch uuid, screen lock state, etc.). EvalContext::capture calls it once for every condition at the start of evaluation. Ok(None) for conditions with nothing to observe and outside the period (for a lifetime condition, check becomes false and the expiry is settled). When the observation fails (a sysctl or IOKit call fails) it is Err, and grants that use that condition cannot be decided in that evaluation
     fn observe(&self) -> Result<Option<Value>, ObserveError>;
-    /// Called once when creating a grant. Returns the pinned value. Values taken from the chain, such as the {boot_uuid, asid} of os.login_session, look at chain. State conditions normally return Ok(None); those that fix a value depending on the peer at creation (os.login_session) return a pinned value. Err(PinError::Unobservable) for a lifetime condition with no observed value. Err(PinError::InvalidArgs) if args are invalid
+    /// Called once when creating a grant. Returns the pinned value. Values taken from the chain, such as the {boot_uuid, asid} of os.login_session, look at chain. State conditions normally return Ok(None); those that fix a value depending on the target process at creation (os.login_session) return a pinned value. Err(PinError::Unobservable) for a lifetime condition with no observed value. Err(PinError::InvalidArgs) if args are invalid
     fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;
     /// The check. No side effects
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
@@ -579,12 +579,12 @@ struct ObserveError { reason: String }
 | `age` | None | obs.now + the duration in args (becomes the pinned value of `until`) | obs.now < pinned | None |
 | `uses` | None | N from args | pinned > 0 | pinned − 1 |
 | State (`os.console_active`, etc.) | The current state (if there is something to observe) | None | Looks at observed / args / chain | None |
-| State `os.login_session` | None | `{boot_uuid, asid}` from chain (`ProcessChain::boot_uuid()` and the peer's asid) | `{boot_uuid, asid}` from chain == pinned | None |
+| State `os.login_session` | None | `{boot_uuid, asid}` from chain (`ProcessChain::boot_uuid()` and the target process's asid) | `{boot_uuid, asid}` from chain == pinned | None |
 
 - `ConditionKind` has two values, Lifetime / State. Epochs, `until`, `age`, and `uses` are Lifetime; `uses` too never comes back once it reaches 0.
 - `EvalContext` holds `now` and "key → the result of `observe()` (`Result<Option<Value>, ObserveError>`)". The Policy builds `Observed { now, value: ctx.observed(key) }` per condition and passes it (a condition does not know its own key). A grant that uses a condition whose key's result is `Err` is treated as undecidable in that evaluation and put in `Decision.undecidable` ("Evaluation").
 - `args` reaches the state `check`, so arguments such as the time range of `time.window` can be used in the check.
-- State conditions can also have pinned values. This is to fix a value depending on the peer (the `{boot_uuid, asid}` of `os.login_session`) when the grant is created. The lifetime rule "once false, the expiry is settled" applies only to conditions that compare an observed value (the state of the world) with the pinned value. A value depending on the peer not matching just means a different peer came, not that the state of the world changed, so it is a state condition.
+- State conditions can also have pinned values. This is to fix a value depending on the target process (the `{boot_uuid, asid}` of `os.login_session`) when the grant is created. The lifetime rule "once false, the expiry is settled" applies only to conditions that compare an observed value (the state of the world) with the pinned value. A value depending on the target process not matching just means the target is a different process, not that the state of the world changed, so it is a state condition.
 
 ### Rule Creation and Strength Constraints
 
@@ -658,7 +658,8 @@ In JSON, byte strings (such as certificate DER) are written as base64url (withou
 // Collection (procline-macos)
 // the procline command (crates/procline-cli) prints the chain collected with collect_pid as JSON (procline <pid>)
 // in the strings of that JSON, the control characters that change the state of a terminal, the direction of the display or the lines (DEL, C1, the bidi controls, U+2028, U+2029) are written as \uXXXX
-let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
+// the entry points are collect_pid(pid, &options) and collect_audit_token(token: AuditToken, &options), which point at the target process by pid or by audit token
+let chain: ProcessChain = collect_audit_token(token, &CollectOptions {
     env: EnvPolicy::Allowlist(vec!["PWD".into(), "SSH_CONNECTION".into()]),
     icon: true,
     digest: false,                                   // executable digest (not collected by default)
@@ -747,7 +748,7 @@ for id in &decision.expired {
     // delete from storage, and policy.remove_grant(id)
 }
 // when decision.undecidable is non-empty, whether to let an allow pass while leaving undecidable grants is decided by the app
-// decision.trace is not returned to the peer (it would reveal which condition failed)
+// decision.trace is not returned to the target process (it would reveal which condition failed)
 let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // no advance (for displaying the trace). Fills expired but does not settle the expiry (the app does not use explain's expired for deletion)
 
 pub struct Decision {

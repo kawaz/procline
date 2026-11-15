@@ -11,7 +11,7 @@ procline/
     procline/               # 入口。core の型と、ビルドターゲットの OS の collect を再公開する (examples/ に bench)
     procline-cli/           # procline コマンド。対象と祖先を集めた列を JSON で出す (src/lib.rs に文法・--help・補完の表、src/main.rs に実行)
     procline-core/          # 収集結果の型、Strength、署名の検証の手順と信頼の印 (verify)、env の方針と伏せ字 (OS 非依存)
-    procline-macos/         # macOS での接続相手と祖先の収集、Security framework の呼び出し、os.* の語彙が使う OS の観測 (boot_session_uuid、wake_time_secs)。ACL の crate に依存しない
+    procline-macos/         # macOS での対象のプロセスと祖先の収集、Security framework の呼び出し、os.* の語彙が使う OS の観測 (boot_session_uuid、wake_time_secs)。ACL の crate に依存しない
     procline-acl/           # Vocabulary、subject / tag / rule / grant、評価、ルールの作成
     procline-acl-macos/     # macOS の os.* の語彙 (os_items)。tests/ に収集と ACL をまたぐテスト (実プロセスの保護の状態からクラスが決まる)
   docs/

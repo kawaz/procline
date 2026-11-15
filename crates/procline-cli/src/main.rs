@@ -88,7 +88,7 @@ mod collect {
                 "Check that the process may be inspected by this user, or run as root.".to_owned()
             }
             CollectError::IdentityChanged => "Run the command again.".to_owned(),
-            CollectError::BootUuid(_) | CollectError::Peer(_) => {
+            CollectError::BootUuid(_) => {
                 "The system did not answer as expected; run the command again, and report it if it keeps failing.".to_owned()
             }
         }

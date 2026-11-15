@@ -1,24 +1,24 @@
-# 接続元プロセスの情報収集と ACL 設計
+# プロセスの情報収集と ACL 設計
 
 ## 概要
 
-プロセスとその祖先の情報を集め、その情報に対するアクセス制御(ACL)を定義・評価するための crate 群です。収集した情報は表示にも ACL の照合にも同じ型で使え、収集だけを使うことも、その上に ACL を載せて使うこともできます。収集の入口は UNIX ドメインソケットの接続相手(audit token)が主ですが、中心はあくまでプロセスで、接続相手であることには依存しません。
+プロセスとその祖先の情報を集め、その情報に対するアクセス制御(ACL)を定義・評価するための crate 群です。収集した情報は表示にも ACL の照合にも同じ型で使え、収集だけを使うことも、その上に ACL を載せて使うこともできます。収集の入口は 2 つで、対象のプロセスを pid か audit token で指します。接続相手が誰かを知ることは procline の責務外です。
 
 **使い方の型**
 
 - **収集だけを使うアプリ**: 呼び出し元のプロセスとその祖先を集め、承認画面に表示する。照合は使わない。
-- **ACL も使うアプリ**: 接続相手を集め、アプリが守る対象ごとの ACL で許可・拒否・再認証を決める。承認画面から後付けでルールを作る。
+- **ACL も使うアプリ**: 対象のプロセスを集め、アプリが守る対象ごとの ACL で許可・拒否・再認証を決める。承認画面から後付けでルールを作る。
 
 **設計の柱**
 
-1. **識別は pid より強いもので**: 接続相手は audit token、祖先はプロセスごとに一意な ID で特定し、pid の再利用で取り違えない。
+1. **識別は pid より強いもので**: 対象は呼ぶ側が渡す pid か audit token で指し、audit token なら token の pidversion で個体を確かめる。祖先はプロセスごとに一意な ID で繋ぎ、pid の再利用で取り違えない。
 2. **表示と照合を同じ型の上に置く**: 画面で見ている情報から、そのままルールを作れるようにする。
 3. **項目ごとに強さを持つ**: 承認した個体・コードを特定する条件(コード署名、個体の識別)と、同じ uid なら誰でも満たせる条件(名前、cwd、argv、uid)を、項目を登録するときにクラスで区別し、特定しない条件だけの許可にアプリが制約をかけられるようにする。制約の値はアプリが与え、crate は検査の仕組みだけを持つ。
 4. **語彙をアプリが足せる**: matcher の項目、scope(grant の寿命)、条件は、組み込みの語彙に加えて、アプリ固有のものを同じ形で登録できるようにする。
 
 **範囲**
 
-macOS を先に実装し、Linux は後から足せる形にします。Linux の収集(`SO_PEERCRED`、pidfd、`/proc`)も同じ型の上に同じやり方で足します。
+macOS を先に実装し、Linux は後から足せる形にします。Linux の収集(pidfd、`/proc`)も同じ型の上に同じやり方で足します。
 
 **脅威モデルの前提**
 
@@ -37,7 +37,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | --- | --- | --- |
 | procline | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
 | procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の検証の手順と信頼の印の決定、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
-| procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、`os.*` の語彙が使う OS の観測(`boot_session_uuid()`、`wake_time_secs()`) | core、Security framework、AppKit |
+| procline-macos | 対象のプロセスと祖先の収集、コード署名の検証、アイコン、`os.*` の語彙が使う OS の観測(`boot_session_uuid()`、`wake_time_secs()`) | core、Security framework、AppKit |
 | procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、OS 非依存の組み込みの語彙、rule の作成と grant の発行 | core |
 | procline-acl-macos | `os.*` の語彙の提供(`procline_acl_macos::os_items()`)。OS の観測は procline-macos の公開関数で行い、`unsafe` を持たない | procline-acl、core、procline-macos |
 
@@ -45,16 +45,16 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 ## 収集する情報
 
-収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。列は収集した起動の boot UUID(`kern.bootsessionuuid`、`ProcessChain::boot_uuid()`)も持ちます。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は、その項目を照合に使ったときのクラスで、その条件が承認した個体・コードをどれだけ特定するかで決まります(「強さ: クラスと深さ」)。
+収集結果は、対象のプロセスを先頭に launchd までの祖先を並べた列です。列は収集した起動の boot UUID(`kern.bootsessionuuid`、`ProcessChain::boot_uuid()`)も持ちます。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は、その項目を照合に使ったときのクラスで、その条件が承認した個体・コードをどれだけ特定するかで決まります(「強さ: クラスと深さ」)。
 
 ### 識別子
 
 | 項目 | 取り方(macOS) | 強さ | 備考 |
 | --- | --- | --- | --- |
-| audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む。表すのは、token を読んだ時点で相手側の端を最後に送受信に使ったプロセスと、その時点の資格情報で、要求を書いたプロセスや、ソケットを作った・接続したプロセスとは限らない。token は記録された pid で引かれ、相手側の端を別のプロセスが持ったままそのプロセスが終わると読めず(`EINVAL`)、その pid が別のプロセスに割り当て直されるとソケットと無関係なそのプロセスの token になる([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md)) |
+| audit token(audit token で集めた対象) | 呼び出し側が渡す | 強 | pid、pidversion、uid、asid を含む |
 | unique\_id / parent\_unique\_id | `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` の `p_uniqueid`、`p_puniqueid` | 強 | 起動ごとに一意な 64bit ID。祖先を確実に辿れる。`#ifdef PRIVATE` の SPI なので、取れなければ pid と起動時刻の組に落とす |
-| pid、起動時刻 | `sysctl(KERN_PROC_PID)` の `kinfo_proc`(uid を問わず読める) | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、token を読んだ後に exec した相手の検出に使える(読む前に exec していれば、token が既に exec の後の値) |
-| asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。起動ごとに再利用されるので、`os.login_session` の pin 値に boot UUID と組で使う |
+| pid、起動時刻 | `sysctl(KERN_PROC_PID)` の `kinfo_proc`(uid を問わず読める) | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、token を得た後に exec した対象の検出に使える(得る前に exec していれば、token が既に exec の後の値) |
+| asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。起動ごとに再利用されるので、`os.login_session` の pin 値に boot UUID と組で使う。pid で集めた対象には無く、その列では `os.login_session` の pin は失敗する |
 
 これらの識別子は収集の内部の分類で、ルールの語彙では audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれ(「matcher」)、asid は `os.login_session` の pin 値(`{boot_uuid, asid}`)として内部で使われるだけで語彙には出ません。
 
@@ -62,8 +62,8 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 | 項目 | 取り方(macOS) | 強さ |
 | --- | --- | --- |
-| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。代表名 `name` (`getpwuid_r` / `getgrgid_r` の結果) と、その ID に解決される全部の名前 `names` を持つ。全部の名前は passwd / group の全走査が要り 1 回の収集で約 16 ms かかるので `CollectOptions.all_names` で選ぶ。1 つの ID に名前が複数あるのは Open Directory で uid が重複している場合) | `kinfo_proc` の `cr_uid`(実効 uid)と `cr_groups`(最大 16 件で、先頭が実効 gid)。接続相手も祖先も同じで、収集した時点の値。`LOCAL_PEERCRED` の uid は接続の時の値のまま変わらず、audit token の資格情報とは時点が違う(接続の後に setuid のプログラムを exec すると、token の euid は 0 になり `LOCAL_PEERCRED` の uid は元のまま。[findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md))ので使わない | 弱 |
-| コード署名(検証の結果。成功した時だけ識別子、cdhash、署名者の証明書チェーン、証明書の根と種類、Team ID、公証、entitlements、カーネルの動的な status の hardened runtime・platform binary・debugged) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid。読めないか差し替えられた時は `kSecGuestAttributeDynamicCode` を足して検証し直す)、`SecCodeCheckValidity`(requirement つき)、`SecCodeCopySigningInformation` | 強(検証に成功し、保護ありのときだけ。「署名の検証と信頼の印」「強さ: クラスと深さ」) |
+| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。代表名 `name` (`getpwuid_r` / `getgrgid_r` の結果) と、その ID に解決される全部の名前 `names` を持つ。全部の名前は passwd / group の全走査が要り 1 回の収集で約 16 ms かかるので `CollectOptions.all_names` で選ぶ。1 つの ID に名前が複数あるのは Open Directory で uid が重複している場合) | `kinfo_proc` の `cr_uid`(実効 uid)と `cr_groups`(最大 16 件で、先頭が実効 gid)。対象も祖先も同じで、収集した時点の値 | 弱 |
+| コード署名(検証の結果。成功した時だけ識別子、cdhash、署名者の証明書チェーン、証明書の根と種類、Team ID、公証、entitlements、カーネルの動的な status の hardened runtime・platform binary・debugged) | `SecCodeCopyGuestWithAttributes`(audit token で集めた対象は audit token、それ以外は pid。読めないか差し替えられた時は `kSecGuestAttributeDynamicCode` を足して検証し直す)、`SecCodeCheckValidity`(requirement つき)、`SecCodeCopySigningInformation` | 強(検証に成功し、保護ありのときだけ。「署名の検証と信頼の印」「強さ: クラスと深さ」) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所で、保護あり)、中(利用者が書ける場所、または認可で開く)、弱(保護が開いている) |
 | 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すが、Linux の収集は保護の状態をまだ持たないので、持つまでは弱として扱う)。保護が開いていれば弱 |
 | app bundle(bundle ID、版) | `SecCodeCopySigningInformation` の `kSecCodeInfoPList`(署名で封印された Info.plist)から取り、`VerifiedSignature.bundle_id` に持つ(照合に使う)。実行パスから `.app` を遡って読む `ProcessInfo.bundle` は表示用。その Info.plist はプロセスの持ち主が中身も種類も決められるので、通常のファイルだけを読み、トップレベルの辞書の直下の値だけを拾う。上限は 3 つで、ファイルの大きさ(1 MiB)、解析の event の数、解析が読むバイト数の合計(binary plist は同じオブジェクトを何度も参照でき、参照のたびに読み直される)。どれかを超えるか、全体を最後まで解析できなければ `None` にする。読むかは `CollectOptions.bundle` で選び、切れば `None` で、持ち主が決めたファイルの解析を省ける | 強(`binary` の署名由来の field。`team_id`・`signing_id` と組。検証に成功し、保護ありのときだけ強で、認可で開くなら中、保護が開いていれば弱。「強さ: クラスと深さ」) |
@@ -86,7 +86,7 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 
 **検証の手順**:
 
-1. SecCode を得て(接続相手は audit token、祖先は pid)、requirement 無しで `SecCodeCheckValidity` を呼ぶ。
+1. SecCode を得て(audit token で集めた対象は audit token、それ以外は pid)、requirement 無しで `SecCodeCheckValidity` を呼ぶ。
 2. 実行ファイルを読めない(走っている `sudo` のような setuid のプロセスをユーザ権限から見る時)か、ディスク上の実行ファイルが走っているものと違う時だけ、`kSecGuestAttributeDynamicCode` を足して、カーネルが持つ署名で検証し直す。それも失敗したら `Failed` で、理由は最初の戻り値で決める。
 3. 証明書の根を requirement `anchor apple`(Apple 自身のコード)→ `anchor apple generic`(Apple が発行した証明書)の順に確かめ、Apple が発行した証明書の時だけ、種類を証明書の拡張の OID(`anchor apple generic` と組の requirement)で Mac App Store → Developer ID → 開発用の順に確かめ、Developer ID の時だけ `notarized` を確かめる。
 4. hardened runtime、platform binary、debugged は、カーネルの動的な status(`kSecCodeInfoStatus`)から取る。CodeDirectory の flags には hardened runtime が無いのにカーネルが hardened として扱うコードがある(走っている `sudo` など)ためです。status に valid(`CS_VALID`)が無ければ `Failed`(その他)にします。entitlements の blob があるのに dict の形で取れない時は `Failed`(その他)にします。保護を緩める entitlement の有無を確かめられないまま「無い」と言わないためです。
@@ -137,9 +137,9 @@ env にはトークンなどの秘密が混ざるので、収集するかどう�
 
 収集は時間がかかるので、その間にプロセスが入れ替わることがあります。
 
-1. 接続相手は audit token、祖先は unique\_id(なければ pid と起動時刻)を、収集の最初に記録する。
-2. 署名は、接続相手を audit token で参照して検証する(pid で参照すると、その間に別のプロセスになり得る)。
-3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。対象でも祖先でも、同じ個体のまま exec していれば(pid version が変わる)同じく結果を捨てる(署名は exec の前のイメージ、実行パスや argv は後のイメージのもの、という混ざった結果になり得るため)。エラーは `IdentityChanged` で、利用側は集め直す。unique\_id を取る SPI が使えない時は pid version も取れないので、exec は検出できない。対象が終了していれば(親に回収されていないものを含む)収集は失敗する(pid で集めた時は `NoSuchProcess`。接続相手では、audit token を読む前に相手側の端を持つプロセスが全部終わっていれば `Peer`(`ENOTCONN`)、読んだ後・記録する前なら `NoSuchProcess`、記録した後なら `IdentityChanged`)。相手側の端を別のプロセスが持ったまま、端を最後に送受信に使ったプロセスだけが終わっていれば、audit token は読めず `Peer`(`EINVAL`)になる。その pid が別のプロセスに割り当て直された後なら、token はそのプロセスのものになり、収集はエラーにならずにそのプロセスを集める([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md) の組 11・12 の観測からの帰結。`collect_peer` を通しては観測していない)。
+1. 対象と祖先の unique\_id(なければ pid と起動時刻)を、収集の最初に記録する。audit token で集める時は、識別子が取れれば、対象の pid version が token の pidversion と一致することも確かめる。
+2. 署名は、audit token で集めた対象を audit token で参照して検証する(pid で参照すると、その間に別のプロセスになり得る)。
+3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。対象でも祖先でも、同じ個体のまま exec していれば(pid version が変わる)同じく結果を捨てる(署名は exec の前のイメージ、実行パスや argv は後のイメージのもの、という混ざった結果になり得るため)。エラーは `IdentityChanged` で、利用側は集め直す。unique\_id を取る SPI が使えない時は pid version も取れないので、exec は検出できない。対象が終了していれば(親に回収されていないものを含む)収集は `NoSuchProcess` で失敗する。audit token で集めた時は、識別子が取れれば、対象の pid version が token の pidversion と違うと `IdentityChanged` で失敗する(token を得た後に対象が exec した時や、token の pid が別のプロセスに割り当て直された時)。
 4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。終了して親にまだ回収されていないプロセス(zombie)も終了したものとして扱う(カーネルの状態 `SZOMB` で判定する)。隣り合う行は、unique\_id が親と子の両方で取れた時は、子の `p_puniqueid` と親の `p_uniqueid` の一致で親子として繋ぐ。親が終了して launchd に付け替えられたプロセスは、ppid が 1 になっても `p_puniqueid` は元の親の値のままなので、列はそこで `ancestor_exited` として終わる(launchd を親として繋ぐと、実在しない親子関係になる)。付け替えの後に exec したプロセスは、`p_puniqueid` がその時の親(launchd)の値に書き換わるが、fork された時の親の pid version(`p_orig_ppidversion`)は終わった元の親の値のまま残る。そこで、launchd を親として繋ぐ時に限り、子の `p_orig_ppidversion` が launchd の `p_idversion` と一致することも確かめ、一致しなければ列をそこで `ancestor_exited` として終える。launchd 以外の親では比べない(親が子を fork した後に自分で exec すると親の pid version は変わるので、本物の親子でも一致するとは限らない)。この区別の根拠は 1 つの版の macOS(26.5.2)での観測で、他の版、launchd 自身が exec し直した後、pid version が一巡した時は観測していない([findings](findings/2026-11-15-orig-ppidversion-tells-reparented-exec.md))。unique\_id が取れなかった時は、ppid と、親の起動時刻が子の起動時刻以前であることで繋ぐ。親の pid を後から使い回したプロセス(子より後に起動したもの)は外れるが、付け替えられたプロセスは、その後に exec したかどうかによらず launchd に繋がり、途切れの印は付かない(pid version も取れないので確かめられない)。どちらで繋いだかは、行の識別子(`Identity.unique_id`、`parent_unique_id`)が `Some` か `None` かで分かる。unique\_id が取れなかった行では、途切れの印が無いことは、どの行が期待する親であるかを示さない(決定の記録: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 ## ACL ルールの形と評価
@@ -151,13 +151,13 @@ ACL は4つの部品でできています。subject、tag、rule は名前を付
 | subject | 1つのプロセスへの条件。祖先への条件を順序付きの列で持てる | ルールの対象、タグの定義 |
 | tag | 名前の付いた subject。当たるプロセスにタグが付く | 承認画面での表示、ほかの subject の条件 |
 | rule | 誰が(subject)、何に(targets)、いつまで・どんなときに(conditions)、どうなるか(effect)。conditions は記号のまま | grant の元。「いつもの許可」を承認画面で選んで passkey 1回で適用 |
-| grant | rule を承認の瞬間の接続相手に適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの | 評価 |
+| grant | rule を承認の瞬間の対象のプロセスに適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの | 評価 |
 
 どの grant にも当たらなければ既定の effect(アプリが `Policy::load_verified` の `default_effect` で与える)になり、拒否は許可より優先します。
 
 ### subject
 
-subject は1つのプロセスへの条件で、接続相手か祖先かを区別しません。祖先への条件は `ancestors` に順序付きの列で書きます。値の `true` は placeholder で、grant を作るときにそのプロセスの実値で埋まります。placeholder を書けるのは rule の inline の subject だけです(「rule」)。
+subject は1つのプロセスへの条件で、対象か祖先かを区別しません。祖先への条件は `ancestors` に順序付きの列で書きます。値の `true` は placeholder で、grant を作るときにそのプロセスの実値で埋まります。placeholder を書けるのは rule の inline の subject だけです(「rule」)。
 
 ```json
 {
@@ -301,7 +301,7 @@ placeholder を書けるのは rule の inline の subject だけです(決定�
 
 ### grant
 
-grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適用し、subject の placeholder を実値に、各 condition を具体値に pin したものです。grant を作るときに、subject の `match` の placeholder は対象プロセス(列の先頭)の値で、`ancestors` の要素の placeholder はその要素が当たった祖先の値で埋め、寿命型の条件にはその時点の世代を記録し、`age` は時刻に直します。
+grant は、rule を実際のプロセス(承認の瞬間の対象、列の先頭)に適用し、subject の placeholder を実値に、各 condition を具体値に pin したものです。grant を作るときに、subject の `match` の placeholder は対象プロセス(列の先頭)の値で、`ancestors` の要素の placeholder はその要素が当たった祖先の値で埋め、寿命型の条件にはその時点の世代を記録し、`age` は時刻に直します。
 
 ```json
 {
@@ -322,7 +322,7 @@ grant は、rule を実際のプロセス(承認の瞬間の接続相手)に適�
 }
 ```
 
-- `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には普通は無く、`os.login_session` のように接続相手に依存する値を固定するものだけが持つ)です。`age` は grant を作るときに `until` の pin 値に直します(`key` も `until` にする)。
+- `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には普通は無く、`os.login_session` のように対象のプロセスに依存する値を固定するものだけが持つ)です。`age` は grant を作るときに `until` の pin 値に直します(`key` も `until` にする)。
 - `os.session` の pin 値は、段階以下の世代を全部持ちます(`unlocked` なら `boot`、`awake`、`unlocked` の 3 つ。`awake` は起床の時刻、`unlocked` は解錠の時刻)。
 - `id` は `Policy::grant` が一意に付けます(上の `g-…` は例示)。
 - subject に placeholder は残りません(残っていれば読み込みエラー)。埋める値が無ければ(署名が無いのに `team_id: true` など)grant は作れません(`GrantError::ValueUnavailable`)。
@@ -482,7 +482,7 @@ register(key, impl)
 3. 採用された grant にだけ、各 condition の `advance` をかける。1 つでも新しい pin 値を返せば、pin 値を差し替えた新しい grant を作る(grant は immutable)。
 4. アプリが、変わった grant を署名して永続化し、書けてから結果(allow)を使う。
 
-評価の結果(`Decision`)は effect だけでなく、採用された grant の id と、各条件がどの項目に一致したか(trace)を返します。画面の「なぜ通ったか、なぜ聞かれたか」に使います。`Decision.trace` は接続相手に返しません(どの条件で落ちたかが見えるため)。手順 3 で grant が変わったときは、その新版も返します(`updated_grant`)。
+評価の結果(`Decision`)は effect だけでなく、採用された grant の id と、各条件がどの項目に一致したか(trace)を返します。画面の「なぜ通ったか、なぜ聞かれたか」に使います。`Decision.trace` は対象のプロセスに返しません(どの条件で落ちたかが見えるため)。手順 3 で grant が変わったときは、その新版も返します(`updated_grant`)。
 
 評価の入口は 2 つです。`evaluate` は手順 3 まで行い、`updated_grant` を返すだけで、メモリ上の grant は差し替えません。`explain` は trace の表示用で、`advance` をかけず、`updated_grant` は常に空です。`explain` も `expired` を載せますが、失効を確定しません(アプリは `explain` の `expired` を削除に使いません)。
 
@@ -536,9 +536,9 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 
 | 名前 | 真になるとき |
 | --- | --- |
-| `os.not_remote` | 接続相手の asid がコンソールのセッションのもの。判定は asid だけで行う(祖先の有無は double-fork で変えられるので使わない) |
+| `os.not_remote` | 対象のプロセス(列の先頭)の asid がコンソールのセッションのもの。判定は asid だけで行う(祖先の有無は double-fork で変えられるので使わない) |
 | `os.console_active` | 画面がロックされていない |
-| `os.login_session` | 接続相手のログインセッションが grant を作ったときと同じ(作成時の boot UUID と asid の組 `{boot_uuid, asid}` を pin 値に持つ。asid は起動ごとに再利用されるので boot UUID と組にする。ログアウトの検知は約束しない) |
+| `os.login_session` | 対象のプロセス(列の先頭)のログインセッションが grant を作ったときと同じ(作成時の boot UUID と asid の組 `{boot_uuid, asid}` を pin 値に持つ。asid は起動ごとに再利用されるので boot UUID と組にする。ログアウトの検知は約束しない) |
 | `time.window` | 指定の曜日・時間帯 |
 
 「自宅の Wi-Fi にいる間」のような場所の条件は、アプリが必要に応じて足します。
@@ -558,7 +558,7 @@ trait Condition {
     fn kind(&self) -> ConditionKind;                                   // Lifetime / State
     /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition と期間の外は Ok(None)(寿命型なら check が偽になり失効が確定する)。観測に失敗したとき(sysctl や IOKit の呼び出しの失敗)は Err で、その condition を使う grant はその評価で判定できない
     fn observe(&self) -> Result<Option<Value>, ObserveError>;
-    /// grant を作るときに 1 回。pin 値を返す。os.login_session の {boot_uuid, asid} のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、接続相手に依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
+    /// grant を作るときに 1 回。pin 値を返す。os.login_session の {boot_uuid, asid} のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、対象のプロセスに依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
     fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;
     /// 判定。副作用なし
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
@@ -579,12 +579,12 @@ struct ObserveError { reason: String }
 | `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
 | `uses` | None | args の N | pinned > 0 | pinned − 1 |
 | 状態型(`os.console_active` 等) | 今の状態(観測するものがあれば) | None | observed / args / chain を見る | None |
-| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain::boot_uuid()` と接続相手の asid) | chain の `{boot_uuid, asid}` == pinned | None |
+| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain::boot_uuid()` と対象のプロセスの asid) | chain の `{boot_uuid, asid}` == pinned | None |
 
 - `ConditionKind` は Lifetime / State の 2 値です。世代、`until`、`age`、`uses` は Lifetime で、`uses` も一度 0 になれば戻りません。
 - `EvalContext` は `now` と「key → `observe()` の結果(`Result<Option<Value>, ObserveError>`)」を持ちます。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡します(condition は自分の key を知らない)。結果が `Err` の key の condition を使う grant は、その評価で判定できないものとして `Decision.undecidable` に載ります(「評価」)。
 - 状態型の `check` には `args` が届くので、`time.window` の時間帯のような引数を判定に使えます。
-- 状態型も pin 値を持てます。接続相手に依存する値(`os.login_session` の `{boot_uuid, asid}`)を grant の作成時に固定するためです。寿命型の「偽になれば失効が確定する」は、観測値(世界の状態)と pin 値を比べる condition にだけ当てはまります。接続相手に依存する値が一致しないのは別の相手が来ただけで、世界の状態が変わったのではないので、状態型にします。
+- 状態型も pin 値を持てます。対象のプロセスに依存する値(`os.login_session` の `{boot_uuid, asid}`)を grant の作成時に固定するためです。寿命型の「偽になれば失効が確定する」は、観測値(世界の状態)と pin 値を比べる condition にだけ当てはまります。対象のプロセスに依存する値が一致しないのは対象が別のプロセスになっただけで、世界の状態が変わったのではないので、状態型にします。
 
 ### ルールの作成と強さの制約
 
@@ -658,7 +658,8 @@ JSON では、バイト列(証明書の DER など)を base64url(padding なし)
 // 収集(procline-macos)
 // procline コマンド(crates/procline-cli)は collect_pid で集めた列を JSON で出す(procline <pid>)
 // その JSON の文字列では、端末の状態・表示の向き・行を変える制御文字(DEL、C1、bidi の制御文字、U+2028、U+2029)を \uXXXX で書く
-let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
+// 入口は collect_pid(pid, &options) と collect_audit_token(token: AuditToken, &options)。対象のプロセスを pid か audit token で指す
+let chain: ProcessChain = collect_audit_token(token, &CollectOptions {
     env: EnvPolicy::Allowlist(vec!["PWD".into(), "SSH_CONNECTION".into()]),
     icon: true,
     digest: false,                                   // 実行ファイルの digest(既定は取らない)
@@ -747,7 +748,7 @@ for id in &decision.expired {
     // 保存先から消し、policy.remove_grant(id)
 }
 // decision.undecidable が空でないとき、判定できない grant を残して allow を通すかはアプリが決める
-// decision.trace は接続相手に返さない(どの条件で落ちたかが見える)
+// decision.trace は対象のプロセスに返さない(どの条件で落ちたかが見える)
 let shown = policy.explain(&tagged, &Target::key("github/token"), &ctx);      // advance なし(trace の表示用)。expired は載せるが失効を確定しない(アプリは explain の expired を削除に使わない)
 
 pub struct Decision {

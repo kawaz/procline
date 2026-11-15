@@ -5,7 +5,7 @@
 
 ## Context
 
-収集の内部では、1 つのプロセスを特定する識別子が 4 種ある(audit token、unique\_id、pid と起動時刻の組、asid)。どれが取れるかは OS と API の可用性で変わる(接続相手には audit token があるが祖先には無い、unique\_id は SPI なので取れないことがある、Linux では pidfd と starttime になる)。
+収集の内部では、1 つのプロセスを特定する識別子が 4 種ある(audit token、unique\_id、pid と起動時刻の組、asid)。どれが取れるかは OS と API の可用性で変わる(audit token で指した対象には audit token があるが祖先には無い、unique\_id は SPI なので取れないことがある、Linux では pidfd と starttime になる)。
 
 これらをルールの語彙に個別の項目として出すと、ルールを書く人に「どの識別子が取れる状況か」という収集の内部事情を学ばせることになる。また Linux の収集を足したときに、語彙そのものが変わる。
 

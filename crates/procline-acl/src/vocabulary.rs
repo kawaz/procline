@@ -323,7 +323,7 @@ pub trait Condition: Send + Sync {
     /// Checks the arguments written in the rule. Loading the list and `RuleBuilder::build` call it; `Err` holds the reason.
     fn validate_args(&self, args: Option<&serde_json::Value>) -> Result<(), String>;
 
-    /// Called once when a grant is made. `chain` is the chain being approved, for conditions that pin a value of the peer (the asid of `os.login_session`). State conditions return `Ok(None)`; a lifetime condition whose observation is `Ok(None)` or `Err` fails with `Unobservable`, so no grant is made.
+    /// Called once when a grant is made. `chain` is the chain being approved, for conditions that pin a value of the target process (the asid of `os.login_session`). State conditions return `Ok(None)`; a lifetime condition whose observation is `Ok(None)` or `Err` fails with `Unobservable`, so no grant is made.
     fn pin(
         &self,
         args: Option<&serde_json::Value>,

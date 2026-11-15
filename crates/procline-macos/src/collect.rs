@@ -2,14 +2,13 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::BorrowedFd;
 
 use procline_core::{
     AuditToken, CodeSigning, Credentials, Identity, NamedId, ProcessChain, ProcessIdentity,
     ProcessInfo, StartTime, Truncated,
 };
 
-use crate::sys::peer;
+use crate::sys::audit;
 use crate::sys::proc::{self as sys, KinfoProc, UniqueIds};
 use crate::sys::security::Guest;
 use crate::{CollectError, CollectOptions, file, path_meta, procargs, signing};
@@ -225,7 +224,7 @@ fn process_info(
     boot_uuid: &str,
     options: &CollectOptions,
     names: &mut Names,
-    peer_token: Option<AuditToken>,
+    target_token: Option<AuditToken>,
     code_signing: Option<CodeSigning>,
 ) -> ProcessInfo {
     let pid = record.pid;
@@ -246,9 +245,9 @@ fn process_info(
         (!comm.is_empty()).then_some(comm)
     });
     let mut identity = record.identity();
-    if let Some(token) = peer_token {
+    if let Some(token) = target_token {
         identity.audit_token = Some(token);
-        identity.asid = Some(peer::asid(token));
+        identity.asid = Some(audit::asid(token));
     }
     ProcessInfo {
         identity,
@@ -293,26 +292,20 @@ pub(crate) fn collect_pid(
     collect_recorded(target, &boot_uuid, options, None)
 }
 
-/// Capture the socket identity before reading any process attributes. The token's pid version ties the pid-based reads to the same executable image used by the audit-token-based signature lookup.
-pub(crate) fn collect_peer(
-    fd: BorrowedFd<'_>,
+/// The target is the process at the token's pid. Its recorded pid version must be the token's, which ties the pid-based reads to the image the audit-token-based signature lookup verifies.
+pub(crate) fn collect_audit_token(
+    token: AuditToken,
     options: &CollectOptions,
 ) -> Result<ProcessChain, CollectError> {
-    let token = peer::peer_token(fd).map_err(CollectError::Peer)?;
-    let pid = peer::pid(token);
     let boot_uuid = sys::boot_session_uuid().map_err(CollectError::BootUuid)?;
-    let target = read_target(pid)?;
+    let target = read_target(audit::pid(token))?;
     if target
         .ids
-        .is_some_and(|ids| ids.id_version != peer::pidversion(token))
+        .is_some_and(|ids| ids.id_version != audit::pidversion(token))
     {
         return Err(CollectError::IdentityChanged);
     }
-    let chain = collect_recorded(target, &boot_uuid, options, Some(token))?;
-    if peer::peer_token(fd).ok() != Some(token) {
-        return Err(CollectError::IdentityChanged);
-    }
-    Ok(chain)
+    collect_recorded(target, &boot_uuid, options, Some(token))
 }
 
 fn read_target(pid: i32) -> Result<Recorded, CollectError> {
@@ -329,20 +322,25 @@ fn collect_recorded(
     target: Recorded,
     boot_uuid: &str,
     options: &CollectOptions,
-    peer_token: Option<AuditToken>,
+    target_token: Option<AuditToken>,
 ) -> Result<ProcessChain, CollectError> {
     let (records, truncated) = walk(target, options.max_ancestors);
-    let signatures = signatures(&records, options, peer_token);
+    let signatures = signatures(&records, options, target_token);
     describe_and_recheck(
-        &records, truncated, signatures, boot_uuid, options, peer_token,
+        &records,
+        truncated,
+        signatures,
+        boot_uuid,
+        options,
+        target_token,
     )
 }
 
-/// The code signature of every recorded process, in order, or all `None` when signatures are not collected. The peer's signature is addressed by its audit token, so a process that took over its pid is not verified in its place.
+/// The code signature of every recorded process, in order, or all `None` when signatures are not collected. With the audit token the caller passed, the target's signature is addressed by it, so a process that took over its pid is not verified in its place.
 fn signatures(
     records: &[Recorded],
     options: &CollectOptions,
-    peer_token: Option<AuditToken>,
+    target_token: Option<AuditToken>,
 ) -> Vec<Option<CodeSigning>> {
     if !options.signature {
         return vec![None; records.len()];
@@ -350,7 +348,7 @@ fn signatures(
     let guests: Vec<Guest> = records
         .iter()
         .enumerate()
-        .map(|(index, record)| match peer_token {
+        .map(|(index, record)| match target_token {
             Some(token) if index == 0 => Guest::AuditToken(token),
             _ => Guest::Pid(record.pid),
         })
@@ -368,7 +366,7 @@ fn describe_and_recheck(
     signatures: Vec<Option<CodeSigning>>,
     boot_uuid: &str,
     options: &CollectOptions,
-    peer_token: Option<AuditToken>,
+    target_token: Option<AuditToken>,
 ) -> Result<ProcessChain, CollectError> {
     let mut names = Names::new(options.all_names);
     let mut processes: Vec<ProcessInfo> = records
@@ -381,24 +379,19 @@ fn describe_and_recheck(
                 boot_uuid,
                 options,
                 &mut names,
-                if index == 0 { peer_token } else { None },
+                if index == 0 { target_token } else { None },
                 code_signing,
             )
         })
         .collect();
 
-    // Everything except the peer signature was read by pid, which another process can take over once the recorded one exits; rechecking the identifiers rejects mixed-up data. An ancestor that exited ends the chain before it; an ancestor that is still the same individual but ran `exec` in between makes the whole result unusable, since its signature, path and arguments may describe different images.
+    // Everything except a signature addressed by audit token was read by pid, which another process can take over once the recorded one exits; rechecking the identifiers rejects mixed-up data. An ancestor that exited ends the chain before it; an ancestor that is still the same individual but ran `exec` in between makes the whole result unusable, since its signature, path and arguments may describe different images.
     for (index, record) in records.iter().enumerate() {
         let now = Recorded::read(record.pid);
         if index == 0 {
             match now {
-                Ok(now)
-                    if record.same_image(&now)
-                        && peer_token.is_none_or(|token| {
-                            now.ids
-                                .is_none_or(|ids| ids.id_version == peer::pidversion(token))
-                        }) => {}
-                Err(err) if is_no_such_process(&err) && peer_token.is_none() => {
+                Ok(now) if record.same_image(&now) => {}
+                Err(err) if is_no_such_process(&err) => {
                     return Err(CollectError::NoSuchProcess { pid: record.pid });
                 }
                 _ => return Err(CollectError::IdentityChanged),
@@ -447,8 +440,8 @@ mod tests {
     use super::{Recorded, describe_and_recheck, signatures, walk};
     use crate::sys::proc as sys;
     use crate::sys::test_support::{
-        Arrival, ProcessEvent, ProcessWatch, kill_process_group, make_fifo,
-        wait_connection_or_exit, wait_exited_unreaped,
+        Arrival, ProcessEvent, ProcessWatch, connected_process_token, kill_process_group,
+        make_fifo, wait_connection_or_exit, wait_exited_unreaped,
     };
     use crate::{CollectError, CollectOptions};
 
@@ -526,7 +519,7 @@ mod tests {
         wait_exited_unreaped(child.id()).unwrap();
     }
 
-    /// `/usr/bin/nc` connected to a socket this test listens on: a direct child of this test, so it stays a zombie when killed until it is reaped, and the accepted stream gives its audit token. The connection is made by nc itself, so its `exec` is done once it is accepted. Dropping the value kills and reaps it.
+    /// `/usr/bin/nc` connected to a socket this test listens on: a direct child of this test, so it stays a zombie when killed until it is reaped, and the accepted stream gives its audit token (the way this test, as a caller, gets a token to pass). The connection is made by nc itself, so its `exec` is done once it is accepted. Dropping the value kills and reaps it.
     struct Connected {
         child: Child,
         stream: std::os::unix::net::UnixStream,
@@ -695,26 +688,30 @@ mod tests {
         assert_eq!(chain.truncated(), Some(Truncated::AncestorExited));
     }
 
-    // 対象 (列の先頭) が収集の途中で zombie になったら、回収されて消えた時と同じエラー: pid で集めた時は NoSuchProcess (その pid のプロセスはもう無い)、接続相手は IdentityChanged (接続を記録した個体が、収集の終わりにはもういない)。生前の値で Ok を返さない。対象は nc で、このテストの直接の子なので、kill して waitid(WNOWAIT) で待てば回収されずに残る。時機は署名を検証した後・最後の確かめ直しの前。
+    // 対象 (列の先頭) が収集の途中で zombie になったら、回収されて消えた時と同じく NoSuchProcess (その pid のプロセスはもう無い)。生前の値で Ok を返さない。pid で集めた時も、呼び出し側が渡した audit token で集めた時も同じ: 最後の確かめ直しは対象の指し方によらず 1 つで、token が効くのは、対象の行の audit_token と asid、署名を引く先、記録の最初に比べる pid version だけ。対象は nc で、このテストの直接の子なので、kill して waitid(WNOWAIT) で待てば回収されずに残る。時機は署名を検証した後・最後の確かめ直しの前。
     #[test]
     fn a_target_that_became_a_zombie_is_gone() {
         let options = options();
         let boot_uuid = sys::boot_session_uuid().unwrap();
-        for peer in [false, true] {
+        for by_token in [false, true] {
             let mut connected = Connected::start();
             let pid = connected.pid();
-            let peer_token =
-                peer.then(|| crate::sys::peer::peer_token(connected.stream.as_fd()).unwrap());
+            let target_token =
+                by_token.then(|| connected_process_token(connected.stream.as_fd()).unwrap());
             let (records, truncated) = walk(Recorded::read(pid).unwrap(), 1);
-            let verified = signatures(&records, &options, peer_token);
+            let verified = signatures(&records, &options, target_token);
             zombify(&mut connected.child);
             let result = describe_and_recheck(
-                &records, truncated, verified, &boot_uuid, &options, peer_token,
+                &records,
+                truncated,
+                verified,
+                &boot_uuid,
+                &options,
+                target_token,
             );
-            match (peer, result) {
-                (false, Err(CollectError::NoSuchProcess { pid: gone })) => assert_eq!(gone, pid),
-                (true, Err(CollectError::IdentityChanged)) => {}
-                (peer, result) => panic!("peer {peer}: {}", outline(&result)),
+            match result {
+                Err(CollectError::NoSuchProcess { pid: gone }) => assert_eq!(gone, pid),
+                result => panic!("by token {by_token}: {}", outline(&result)),
             }
         }
     }

@@ -6,5 +6,6 @@ pub use procline_core::*;
 
 #[cfg(target_os = "macos")]
 pub use procline_macos::{
-    CollectError, CollectOptions, boot_session_uuid, collect_peer, collect_pid, wake_time_secs,
+    CollectError, CollectOptions, boot_session_uuid, collect_audit_token, collect_pid,
+    wake_time_secs,
 };

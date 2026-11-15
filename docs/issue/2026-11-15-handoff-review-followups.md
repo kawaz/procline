@@ -20,6 +20,7 @@ origin: 自リポ TODO (引き継いだコードのレビューから)
 4. **`SecCodeCopySigningInformation` に `kSecCSRequirementInformation` を渡しているが、それで増えるキーを読んでいない**。外しても 72 プロセスの `code_signing` の出力は同じだった (macOS 26.5.2 の 1 環境)。外すか、要る理由を確かめてコメントに書くか。**済み (外した)**: 増える key は requirement の情報で procline は読まず、外しても 1,016 プロセスの `code_signing` は同じだった (findings [`2026-11-15-requirement-information-flag.md`](../findings/2026-11-15-requirement-information-flag.md))。`crates/procline-macos/src/sys/security.rs` の `signing_information` は `kSecCSSigningInformation | kSecCSDynamicInformation` を渡す
 5. **収集の crate (procline-macos) に、実プロセスの entitlements と hardened runtime を読めていることを確かめるテストが無い**。保護の状態ごとのクラスの結合テストは ACL を使うので procline-acl-macos にある (`tests/protection_class.rs`)。workspace 全体のテストでは読み取りの壊れを検出できるが、収集の crate だけのテストでは検出できない。4 通りに署名したコピーを起こして、収集した entitlements の key と `runtime.hardened_runtime` だけを確かめるテストを procline-macos に足す
 6. **[DR-0014](../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md) と [DR-0015](../decisions/DR-0015-icon-outside-collection.md) (提案) の Context が、特定のアプリの都合を理由にしている箇所がある**。裁定を反映する時に、procline 自身の理由 (型と層の設計、利用者を特定しない) で書き直す。DR-0014 の分は**済み** (Context と不採用案の理由を、型と層の設計の理由で書き直した)。DR-0015 の分は、QUESTIONS の HO-Q4 の裁定を反映する時に直す
+7. **audit token で集めた対象の署名を、pid でなく audit token で参照して検証していることを固定するテストが無い**。参照を pid に変えても、今のテストは全部通る (どちらで参照しても同じ結果になる組しか無い)。参照している間に pid が別のプロセスになる組を作れるかを確かめ、作れるならテストを足す
 
 ## 受け入れ条件
 
@@ -29,3 +30,4 @@ origin: 自リポ TODO (引き継いだコードのレビューから)
 - [x] 5 のテストを足す (`crates/procline-macos/tests/signed_copies.rs`)
 - [x] 6 の DR-0014 の分を、裁定の反映と同じ変更で直す
 - [ ] 6 の DR-0015 の分を、HO-Q4 の裁定の反映と同じ変更で直す
+- [ ] 7 のテストを足す (作れる組があるかを先に確かめる)

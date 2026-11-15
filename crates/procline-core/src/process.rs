@@ -95,7 +95,7 @@ pub struct PathMeta {
 /// Identifiers that pin down one process stronger than a pid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Identity {
-    /// Present only for the connected peer.
+    /// Present only for the target collected by an audit token: the token the caller passed.
     pub audit_token: Option<AuditToken>,
     pub unique_id: Option<u64>,
     pub parent_unique_id: Option<u64>,
@@ -131,7 +131,7 @@ pub struct ProcessIdentity {
     pub start_time: Option<StartTime>,
 }
 
-/// Opaque audit token of a connected peer.
+/// Opaque audit token of a process (`audit_token_t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct AuditToken(pub [u32; 8]);
 

@@ -5,7 +5,7 @@
 
 ## Context
 
-ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入る静的な定義(誰が、何に、どんな条件で、どうなるか)で、条件は `{"os.session": "boot"}` や `{"age": "1h"}` のような記号のまま書く。もう 1 つは、それを承認の瞬間の接続相手に適用し、寿命型の条件にその時点の世代を記録したもので、評価が実際に見るのはこちら。
+ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入る静的な定義(誰が、何に、どんな条件で、どうなるか)で、条件は `{"os.session": "boot"}` や `{"age": "1h"}` のような記号のまま書く。もう 1 つは、それを承認の瞬間の対象のプロセスに適用し、寿命型の条件にその時点の世代を記録したもので、評価が実際に見るのはこちら。
 
 - 両者を同じ名前で呼ぶと、`uses`(残り回数)のように評価のたびに変わる値をどこが持つかが曖昧になる。静的な定義が持つなら、署名付きの一覧を評価のたびに書き換えることになる。
 - 適用して pin したものを 1 件ずつ永続化すれば、変わる値の更新はその 1 件の書き込みで済み、一覧の再署名が要らない。
@@ -18,7 +18,7 @@ ACL の許可には 2 つの層がある。1 つは署名付きの一覧に入�
 | 名前 | 中身 |
 | --- | --- |
 | rule | 静的な定義。effect、subject、targets、conditions を持つ。conditions は記号のまま。署名付きの一覧(subject、tag、rule)に入る |
-| grant | rule を実際のプロセス(承認の瞬間の接続相手)に適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの。評価の対象はこれ。永続化は 1 件ずつ |
+| grant | rule を実際のプロセス(承認の瞬間の対象、列の先頭)に適用し、subject の placeholder を実値に、各 condition を具体値に pin したもの。評価の対象はこれ。永続化は 1 件ずつ |
 
 - 保存した rule がそのまま再適用の対象になる。承認画面に rule の一覧を出し、選んで passkey を 1 回通せば grant ができる。
 - `RuleBuilder::build()` は静的な rule を返すだけで、世代は記録しない。
@@ -50,7 +50,7 @@ grant の形:
 }
 ```
 
-- `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には普通は無く、`os.login_session` のように接続相手に依存する値を固定するものだけが持つ)。`age` は grant を作るときに `until` の pin 値に直す(`key` も `until` にする)。
+- `conditions` の各要素は `key`、元の引数 `args`(必要なら)、`pinned`(pin 値。状態型には普通は無く、`os.login_session` のように対象のプロセスに依存する値を固定するものだけが持つ)。`age` は grant を作るときに `until` の pin 値に直す(`key` も `until` にする)。
 - `os.session` の pin 値は段階以下の世代を全部持つ([DR-0006](DR-0006-structured-values-instead-of-depends.md))。世代は事象固有の値(`awake` は起床の時刻、`unlocked` は解錠の時刻。[DR-0009](DR-0009-strength-class-as-specificity.md))。
 
 ### condition の実装: observe / pin / check / advance
@@ -68,7 +68,7 @@ trait Condition {
     fn kind(&self) -> ConditionKind;                                   // Lifetime / State
     /// 今の値を観測する (世代の uuid、画面ロックの状態など)。評価の最初に EvalContext::capture が全 condition に 1 回呼ぶ。観測するものが無い condition と期間の外は Ok(None)。観測に失敗したときは Err で、その condition を使う grant はその評価で判定できない(DR-0008)
     fn observe(&self) -> Result<Option<Value>, ObserveError>;
-    /// grant を作るときに 1 回。pin 値を返す。os.login_session の {boot_uuid, asid} のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、接続相手に依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
+    /// grant を作るときに 1 回。pin 値を返す。os.login_session の {boot_uuid, asid} のように chain から取るものは chain を見る。状態型は普通 Ok(None) で、対象のプロセスに依存する値を作成時に固定するもの(os.login_session)は pin 値を返す。寿命型で観測値が無ければ Err(PinError::Unobservable)。args が不正なら Err(PinError::InvalidArgs)
     fn pin(&self, args: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> Result<Option<Value>, PinError>;
     /// 判定。副作用なし
     fn check(&self, args: Option<&Value>, pinned: Option<&Value>, obs: &Observed, chain: &ProcessChain) -> bool;
@@ -89,13 +89,13 @@ struct ObserveError { reason: String }
 | `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
 | `uses` | None | args の N | pinned > 0 | pinned − 1 |
 | 状態型(`os.console_active` 等) | 今の状態(観測するものがあれば) | None | observed / args / chain を見る | None |
-| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain.boot_uuid` と接続相手の asid) | chain の `{boot_uuid, asid}` == pinned | None |
+| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain.boot_uuid` と対象のプロセスの asid) | chain の `{boot_uuid, asid}` == pinned | None |
 
 - 世代を返す専用の trait は持たない。世代の観測は `observe` が受け持ち、pin 値は JSON の値 (`serde_json::Value`) で表す。語彙への登録は `Item::condition` に統一する。
 - `ConditionKind` は Lifetime / State の 2 値。世代、`until`、`age`、`uses` は Lifetime で、`uses` も一度 0 になれば戻らない。
 - `EvalContext` は `now` と「key → `observe()` の結果(`Result<Option<Value>, ObserveError>`)」を持つ。`EvalContext::capture` が評価の最初に全 condition の `observe` を 1 回ずつ呼び、評価の途中で値は変わらない。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡す(condition は自分の key を知らない)。
 - 状態型の `check` には `args` が届くので、`time.window` の時間帯のような引数を判定に使える。
-- 状態型も pin 値を持てる(接続相手に依存する値を作成時に固定する。`os.login_session` の `{boot_uuid, asid}`)。寿命型の「偽 → 失効の確定」は観測値(世界の状態)と pin 値を比べる condition にだけ当てはまり、接続相手に依存する値の不一致は別の相手が来ただけなので、`os.login_session` は状態型。
+- 状態型も pin 値を持てる(対象のプロセスに依存する値を作成時に固定する。`os.login_session` の `{boot_uuid, asid}`)。寿命型の「偽 → 失効の確定」は観測値(世界の状態)と pin 値を比べる condition にだけ当てはまり、対象のプロセスに依存する値の不一致は対象が別のプロセスになっただけなので、`os.login_session` は状態型。
 
 ### 評価と grant の更新
 

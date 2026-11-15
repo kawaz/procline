@@ -1,16 +1,17 @@
 ---
 title: 接続相手の audit token は、読んだ時点で相手側の端を最後に使ったプロセスを表し、要求を書いたプロセスを表さない
-status: open
+status: resolved
 category: design
 created: 2026-11-15T18:12:25+09:00
 origin: 自リポ TODO (UNIX ドメインソケットの相手の観測から)
+close_reason: documented
 ---
 
 # 接続相手の audit token は、読んだ時点で相手側の端を最後に使ったプロセスを表し、要求を書いたプロセスを表さない
 
 ## 概要
 
-設計文書は、`collect_peer` が集める対象を「接続相手」と呼び、audit token を「強」の識別子として、接続相手のプロセスを特定するものとして扱っている。観測 ([findings](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)) では、`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` が表すのは「`getsockopt` した時点で、相手側の端を最後に送受信 (write / read / sendmsg / recvmsg) に使ったプロセスの、その時点の資格情報」だった。これは「接続相手のプロセス」より弱い。
+設計文書は、`collect_peer` が集める対象を「接続相手」と呼び、audit token を「強」の識別子として、接続相手のプロセスを特定するものとして扱っている。観測 ([findings](../../findings/2026-11-15-socketpair-peer-after-fork-exec.md)) では、`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` が表すのは「`getsockopt` した時点で、相手側の端を最後に送受信 (write / read / sendmsg / recvmsg) に使ったプロセスの、その時点の資格情報」だった。これは「接続相手のプロセス」より弱い。
 
 - 要求を書いた後に相手が exec すると、token は exec の後の実行イメージと資格情報になる (setuid root のプログラムなら euid 0、pid は同じ)
 - 相手側の端を持つ別のプロセス (fork で引き継いだ子、`SCM_RIGHTS` で受け取ったプロセス) が送受信すると、token はそのプロセスになる
@@ -48,11 +49,11 @@ DESIGN-ja (DESIGN.md も同じ箇所):
 
 DR:
 
-- [DR-0005](../decisions/DR-0005-process-identity-as-one-item.md): 接続相手には audit token がある、`process` 1 項目
-- [DR-0008](../decisions/DR-0008-evaluation-semantics.md): `os.not_remote` の判定を接続相手の asid だけで行う、`os.login_session`
-- [DR-0004](../decisions/DR-0004-rule-grant-split-and-condition-advance.md): grant は承認の瞬間の接続相手に適用する、`os.login_session` の pin
-- [DR-0011](../decisions/DR-0011-verified-signature-and-trust-mark.md): 接続相手の SecCode を audit token (`kSecGuestAttributeAudit`) で得る
-- [DR-0014](../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md): 送り手と受け渡しの経路、`collect_peer` を「アプリが決めること」の道具として挙げる箇所。Context の「同じ uid の別プロセスが評価に混ぜられるのは、アプリが外から受け取るバイト列だけ」
+- [DR-0005](../../decisions/DR-0005-process-identity-as-one-item.md): 接続相手には audit token がある、`process` 1 項目
+- [DR-0008](../../decisions/DR-0008-evaluation-semantics.md): `os.not_remote` の判定を接続相手の asid だけで行う、`os.login_session`
+- [DR-0004](../../decisions/DR-0004-rule-grant-split-and-condition-advance.md): grant は承認の瞬間の接続相手に適用する、`os.login_session` の pin
+- [DR-0011](../../decisions/DR-0011-verified-signature-and-trust-mark.md): 接続相手の SecCode を audit token (`kSecGuestAttributeAudit`) で得る
+- [DR-0014](../../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md): 送り手と受け渡しの経路、`collect_peer` を「アプリが決めること」の道具として挙げる箇所。Context の「同じ uid の別プロセスが評価に混ぜられるのは、アプリが外から受け取るバイト列だけ」
 
 コード:
 
@@ -82,13 +83,17 @@ DR:
 - 送り手に自分の識別子を書かせて token と照らす
 - `LOCAL_PEERCRED` と token の食い違いを印にする
 
+## 結果
+
+接続相手が誰かを知ることは procline の責務外 (kawaz 2026-11-16)。収集の入口は pid と audit token ([DR-0018](../../decisions/DR-0018-collect-by-pid-or-audit-token.md))。(a)〜(c) は、この決定で procline の問いでなくなった。
+
 ## 受け入れ条件
 
-- [ ] (a)〜(c) の採否を決める
-- [ ] 決めたことを DESIGN (ja/en) と DR に反映する
+- [x] (a)〜(c) の採否を決める
+- [x] 決めたことを DESIGN (ja/en) と DR に反映する
 
 ## 関連
 
-- [findings: UNIX ドメインソケットの相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
-- [findings: audit token と kSecGuestAttributeDynamicCode](../findings/2026-11-15-audit-token-dynamic-code.md) (token を読んだ後に相手が exec した場合の検証)
-- [DR-0014](../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)
+- [findings: UNIX ドメインソケットの相手](../../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
+- [findings: audit token と kSecGuestAttributeDynamicCode](../../findings/2026-11-15-audit-token-dynamic-code.md) (token を読んだ後に相手が exec した場合の検証)
+- [DR-0014](../../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)

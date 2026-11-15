@@ -1,6 +1,6 @@
 [package]
 name = "procline-macos"
-description = "Collect a peer process and its ancestors on macOS (audit token, unique IDs, code signature verification, icon) and read the epochs of the host (boot UUID, wake time)"
+description = "Collect a process and its ancestors on macOS (audit token, unique IDs, code signature verification, icon) and read the epochs of the host (boot UUID, wake time)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

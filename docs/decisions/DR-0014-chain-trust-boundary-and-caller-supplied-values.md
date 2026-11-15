@@ -56,7 +56,7 @@ Rust の可視性では、ある crate の型の構築を別の特定の crate (
 
 ### 保証の範囲
 
-- この DR が保証するのは chain の出どころ: 評価の入口に渡る `ProcessChain` は、収集の入口 (`collect_peer`、`collect_pid`) か、アプリのコードが呼ぶ `ProcessChain::from_collected` からしか作れない。`TaggedChain` は `Policy::tag` からしか作れない
+- この DR が保証するのは chain の出どころ: 評価の入口に渡る `ProcessChain` は、収集の入口 (`collect_pid`、`collect_audit_token`) か、アプリのコードが呼ぶ `ProcessChain::from_collected` からしか作れない。`TaggedChain` は `Policy::tag` からしか作れない
 - 止めるのは、外から受け取ったバイト列を読み込むだけで chain や収集した事実の値ができること (アプリの書き手の取り違え)。アプリのコードが `ProcessInfo` の field を書いて用意し、`from_collected` に渡すことは止めない。`from_collected` を呼ぶのはアプリ自身のコードで、評価するアプリ自身は脅威モデルの範囲外。呼び出し箇所は名前で探せる
 - 範囲外の入口 (アプリのコードが自分で値を選んで渡すもので、設計どおり): `EvalContext::new` / `with_observed` で与える観測値、`MatchTarget` と `Matcher` / `Vocabulary::class` に直接渡す `ProcessInfo`。どの観測値を渡すかはアプリの責務 (本番は `EvalContext::capture`)
 - 脅威モデルの上での位置づけ: 同じ uid の別プロセスに対する守りは、型の切り方では変わらない。アプリが外から受け取った値を評価に渡さない限り安全で、渡せば危ない。型で決めるのは、アプリの書き手が受け取った値と収集した値を取り違えにくいことと、型が表す意味
@@ -113,7 +113,7 @@ impl<'a> TaggedChain<'a> {
 ### 呼び出し元が渡す値
 
 - 収集の入口は、呼び出し元が渡す値 (argv、cwd など) を受け取らず、chain に入れない。値を受け取ったアプリが持ち、表示で「呼び出し元が渡した値」として出す。照合には使わない (強さのクラスを持たない)
-- procline に、渡された値を受ける入口は足さない。収集の入口は `collect_peer` と `collect_pid`
+- procline に、渡された値を受ける入口は足さない。収集の入口は `collect_pid` と `collect_audit_token`
 - 列の 2 番目以降の、別 uid のプロセスの argv と cwd は取れないまま (`None`) にする
 
 procline が保証すること / しないこと:
@@ -123,14 +123,7 @@ procline が保証すること / しないこと:
   - 識別子が取れなかった時の繋がりは、付け替えを、その後に exec したかどうかによらず途切れとして出さない (起動時刻の順は付け替え先の launchd でも満たす)。その行では、途切れの印 (`truncated`) が無いことは、どの行が期待する親であるかを示さない
   - 識別子が取れた時の、付け替えの後に exec したプロセスの区別は、1 つの版の macOS (26.5.2) での観測に基づく。他の版、launchd 自身が exec し直した後、pid version が一巡した時は観測していない
   - 渡された値がどの行のものか、送り手が誰か
-- アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出し、`collect_peer` (ソケットの相手を audit token で決めて集める入口。相手は、token を読んだ時点で相手側の端を最後に送受信に使ったプロセス) を持つ
-- 送り手と受け渡しの経路について言えること ([findings](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)):
-  - pipe でも socketpair でも、書き込み側の端を持てるのは、作ったプロセスと、それが fork で引き継がせたか fd を渡したプロセスだけ (fd の性質。観測はしていない)
-  - pipe の読み側からは、書き込み側のプロセスをカーネルに問えない (`LOCAL_PEERPID` が `ENOTSOCK`、観測)。送り手が誰かは、起動の手順から言うことになる
-  - UNIX ドメインソケット (socketpair と名前付き) の読み側が `LOCAL_PEERPID` / `LOCAL_PEERTOKEN` で読めるのは、`getsockopt` した時点で相手側の端を最後に送受信 (write / read / sendmsg / recvmsg) に使ったプロセスの pid と、その時点の資格情報 (euid、ruid、pidversion) (同じ uid で、3 種類のソケットと 12 の組で観測)。どのプロセスも送受信していない間は、作ったプロセス (名前付きでは connect したプロセス)。読み手が自分自身を exec しても変わらない
-  - そのため、相手の token は要求を書いたプロセスや書いた時の実行イメージと一致するとは限らない。書いた後に相手が exec すれば exec の後の実行イメージと資格情報 (setuid root のプログラムなら euid 0) になり、相手側の端を持つ別のプロセス (fork で引き継いだ子、`SCM_RIGHTS` で受け取ったプロセス) が送受信すればそのプロセスになる。作ったプロセスを後から名指す手段にはならない
-  - 相手側の端を持つプロセスが全部終わると、`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` は `ENOTCONN` で失敗する。`LOCAL_PEERCRED` の uid は接続の時の値のまま残る (SOCK_DGRAM の socketpair では取れない)
-  - 相手側の端を別のプロセスがまだ持っている間に、最後に送受信に使ったプロセスが終わると、`LOCAL_PEERPID` はその終わったプロセスの pid を返し続け、`LOCAL_PEERTOKEN` は `EINVAL` で失敗する。その pid が別のプロセスに割り当て直されると、`LOCAL_PEERTOKEN` はソケットで送受信していないそのプロセスの token を返す。pid の一巡は、権限の無いプロセスが 1 分以内に起こせた (SOCK_STREAM の socketpair と名前付きで観測。pid の再利用は socketpair でだけ観測)
+- アプリが決めること: 渡された値をどの行に添えるか、その行が期待する送り手であることをどう確かめるか (行の識別子との照合、照合に使う識別子を送り手に何まで渡させるか)、合わない時に進めるか。procline はそのための値 (行の識別子) を出す
 
 ### DESIGN に書くこと
 
@@ -162,7 +155,7 @@ procline が保証すること / しないこと:
 - 収集の結果の JSON (`ProcessChain`、`CodeSigning` の形) を読むのは procline の外の型。承認画面が評価と別のプロセスにあるアプリでは、ルールに実値を埋める `resolve_subject` と `Policy::grant` を chain を持つプロセスが呼び、画面の側は受け取った JSON を自分の型か `serde_json::Value` で読んで表示する。JSON の `mark` のキーだけを書き換えた値に、procline の側で気づく経路は無い
 - テスト: chain を組むテストは `from_collected` を使う。収集の結果と `CodeSigning` の JSON は、書き出した形を確かめる
 - `TaggedChain` は、作った Policy と別の Policy の `evaluate` に渡しても止まらない (語彙とタグの定義が違えば、付いたタグが評価する Policy のものと食い違う)。この DR では扱わない
-- 収集の入口は `collect_peer` と `collect_pid` で、足す入口は無い
+- 収集の入口は `collect_pid` と `collect_audit_token` で、足す入口は無い
 - 付け替えの後に exec したプロセスは、識別子が取れた時は launchd を親として繋ぐ時の `p_orig_ppidversion` の比較で `AncestorExited` になる ([issue](../issue/archive/2026-11-15-ancestry-reset-by-exec-after-reparent.md))。識別子が取れない環境では、付け替えだけでも、その後に exec しても、列は途切れずに launchd へ繋がる
 - 未観測の点:
   - 識別子 (SPI) が取れない macOS での walk (今の macOS では uid を問わず取れた)
@@ -171,7 +164,6 @@ procline が保証すること / しないこと:
   - root から別 uid のプロセスの argv と cwd が取れるか
   - hardened runtime の Developer ID 署名のプロセスが自分の pid で集めた時の所要時間と、列の先頭 (自分) の署名の検証の結果
   - 走っている `sudo` の子として起動されたプロセスが自分の pid で集めた列で、2 番目が `sudo` になること (同じ uid の親子では観測した。親が実効 uid 0 の組は、walk が使う値が uid を問わず読めることだけ観測済み)
-  - UNIX ドメインソケットの相手 (findings `2026-11-15-socketpair-peer-after-fork-exec.md` の未観測): root のプロセスが作り、降格して exec した子が読む組。委譲 (`LOCAL_PEEREPID` が別の pid になる設定)。名前付きのソケットでの pid の再利用と、pid を得たプロセスが相手側の端の fd を持たない組。観測した以外の syscall と他の版の macOS。`collect_peer` を通した照合
 
 ## 関連
 
@@ -181,4 +173,4 @@ procline が保証すること / しないこと:
 - [DR-0013](DR-0013-acl-layer-in-separate-crates.md): ACL の層を収集の層から crate で分ける
 - [DESIGN-ja の「脅威モデルの前提」「識別子」「収集する情報」「収集の整合性」「API の骨格」](../DESIGN-ja.md)
 - issue: [JSON から読み込んだ ProcessChain を評価が信用する](../issue/archive/2026-11-15-deserialized-chain-is-trusted-by-evaluate.md)、[呼び出し元が渡して補う入口](../issue/archive/2026-11-15-caller-supplied-own-info.md)、[付け替えの後の exec](../issue/archive/2026-11-15-ancestry-reset-by-exec-after-reparent.md)
-- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: p_orig_ppidversion で付け替えの後の exec を見分ける](../findings/2026-11-15-orig-ppidversion-tells-reparented-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: UNIX ドメインソケットの相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)
+- [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: p_orig_ppidversion で付け替えの後の exec を見分ける](../findings/2026-11-15-orig-ppidversion-tells-reparented-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)

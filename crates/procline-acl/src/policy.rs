@@ -747,7 +747,7 @@ pub struct Decision {
     pub effect: Effect,
     /// The adopted grant; `None` when the default effect of the policy applied.
     pub grant_id: Option<String>,
-    /// For display to the user; not for the peer, since it shows which condition failed.
+    /// For display to the user; not for the target process, since it shows which condition failed.
     pub trace: Trace,
     /// The new version of the adopted grant when `advance` changed it. The application signs and stores it before handing out the value.
     pub updated_grant: Option<Grant>,

@@ -1,9 +1,11 @@
-//! The system calls of the tests' scaffolding (waiting for a process to run `exec` or to exit, FIFOs, zombies, process groups), as safe functions, so the tests outside this module hold no `unsafe`.
+//! The system calls of the tests' scaffolding (waiting for a process to run `exec` or to exit, FIFOs, zombies, process groups, the audit token of a connected process), as safe functions, so the tests outside this module hold no `unsafe`.
 
 use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
+
+use procline_core::AuditToken;
 
 /// What a watched process did first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,29 @@ pub(crate) fn wait_connection_or_exit(listener: BorrowedFd<'_>, pid: i32) -> io:
     } else {
         Arrival::Exited
     })
+}
+
+/// The audit token of the process connected to `stream`, a UNIX domain socket (`getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`, `<sys/un.h>`). One way a caller gets a token to pass; not an entry point of procline.
+pub(crate) fn connected_process_token(stream: BorrowedFd<'_>) -> io::Result<AuditToken> {
+    let mut token = [0u32; 8];
+    let mut len = libc::socklen_t::try_from(size_of_val(&token)).map_err(io::Error::other)?;
+    // SAFETY: `stream` is borrowed and valid for the call, and `token` is a writable 32-byte `audit_token_t`; `len` initially states that size and receives the actual byte count.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            (&raw mut token).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(len).ok() != Some(size_of_val(&token)) {
+        return Err(io::Error::other(format!("audit token of {len} bytes")));
+    }
+    Ok(AuditToken(token))
 }
 
 /// `mkfifo(path, 0600)`.

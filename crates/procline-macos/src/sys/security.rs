@@ -52,7 +52,7 @@ unsafe extern "C" {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Guest {
     Pid(i32),
-    /// A socket peer, by its audit token, never by its reusable pid.
+    /// The target, by the audit token the caller passed, never by its reusable pid.
     AuditToken(AuditToken),
 }
 

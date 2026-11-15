@@ -480,7 +480,7 @@ fn is_terminal_control(c: char) -> bool {
     )
 }
 
-/// Writes every character of `json` (text written by `serde_json`) for which [`is_terminal_control`] holds as a JSON escape `\uXXXX` (4 lowercase hex digits, the form `serde_json` uses for U+0000 to U+001F). Read as JSON, the result holds the same values; every other character is kept.
+/// Writes every character of `json` (text written by `serde_json`) for which `is_terminal_control` holds as a JSON escape `\uXXXX` (4 lowercase hex digits, the form `serde_json` uses for U+0000 to U+001F). Read as JSON, the result holds the same values; every other character is kept.
 ///
 /// Design rationale: the text `serde_json` wrote is rewritten, rather than written through an own `serde_json::ser::Formatter`, because driving a serializer with a formatter needs the `serde` crate, which this crate does not depend on. The output is the same: outside strings `serde_json` writes only ASCII, so each such character in the text is inside a string.
 pub fn escape_terminal_controls(json: &str) -> String {
