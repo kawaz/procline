@@ -189,7 +189,7 @@ fn the_protection_of_a_running_copy_decides_the_class() {
             "{case}: binary"
         );
         let process = MatchValue::Process(Pinnable::Value(
-            info.identity.process_identity(&chain.boot_uuid),
+            info.identity.process_identity(chain.boot_uuid()),
         ));
         assert_eq!(
             vocab.class("process", &process, Some(info)),

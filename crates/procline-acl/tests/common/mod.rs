@@ -118,7 +118,7 @@ pub fn at_path(process: ProcessInfo, path: &str) -> ProcessInfo {
 
 /// A complete chain (it reached the root) collected in the boot `BOOT`.
 pub fn chain(processes: Vec<ProcessInfo>) -> ProcessChain {
-    ProcessChain::new(processes, BOOT.to_owned(), None)
+    ProcessChain::from_collected(processes, BOOT.to_owned(), None)
 }
 
 /// The process as a matcher sees it in a chain collected in the boot `BOOT`.

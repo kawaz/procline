@@ -410,7 +410,7 @@ fn describe_and_recheck(
             }
         }
     }
-    Ok(ProcessChain::new(
+    Ok(ProcessChain::from_collected(
         processes,
         boot_uuid.to_owned(),
         truncated,
@@ -619,7 +619,7 @@ mod tests {
         let (_, unchanged) = collect_with(&mut family, |_| {});
         let unchanged = unchanged.unwrap();
         assert_eq!(unchanged.processes().len(), 2);
-        assert_eq!(unchanged.truncated, Some(Truncated::MaxAncestors));
+        assert_eq!(unchanged.truncated(), Some(Truncated::MaxAncestors));
 
         let mut family = Family::start();
         let (verified, exec) = collect_with(&mut family, Family::exec_sh);
@@ -642,7 +642,7 @@ mod tests {
         let exit = exit.unwrap();
         assert_eq!(exit.processes().len(), 1);
         assert_eq!(exit.processes()[0].identity.pid, family.target);
-        assert_eq!(exit.truncated, Some(Truncated::AncestorExited));
+        assert_eq!(exit.truncated(), Some(Truncated::AncestorExited));
     }
 
     // 終了して親にまだ回収されていないプロセス (zombie) は、終わったプロセスとして扱う。カーネルは zombie についても kinfo_proc を返し、起動時刻は生前と同じなので、起動時刻で個体を見ると生きている祖先と区別できない (unique ID は読めず、SPI が無い時と同じ None になる)。kinfo_proc の p_stat が SZOMB なら「そのプロセスは無い」(ESRCH) とし、回収済みのプロセスと同じ分岐に乗せる: 祖先なら列をその手前で AncestorExited で終える (祖先は途中で終了していることがあり、途切れたと分かる形で列を終える)。
@@ -674,7 +674,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [family.target]
         );
-        assert_eq!(chain.truncated, Some(Truncated::AncestorExited));
+        assert_eq!(chain.truncated(), Some(Truncated::AncestorExited));
     }
 
     // 対象 (列の先頭) が収集の途中で zombie になったら、回収されて消えた時と同じエラー: pid で集めた時は NoSuchProcess (その pid のプロセスはもう無い)、接続相手は IdentityChanged (接続を記録した個体が、収集の終わりにはもういない)。生前の値で Ok を返さない。対象は nc で、このテストの直接の子なので、kill して waitid(WNOWAIT) で待てば回収されずに残る。時機は署名を検証した後・最後の確かめ直しの前。
@@ -711,7 +711,7 @@ mod tests {
                     .iter()
                     .map(|p| p.identity.pid)
                     .collect::<Vec<_>>(),
-                chain.truncated
+                chain.truncated()
             ),
             Err(err) => format!("Err({err:?})"),
         }

@@ -3,8 +3,6 @@
 | date | category | status | issue | blocked_by |
 |---|---|---|---|---|
 | 2026-11-15 | design | open | [親が終わった後に exec したプロセスは p_puniqueid が launchd になり、系譜が途切れずに消える](./2026-11-15-ancestry-reset-by-exec-after-reparent.md) |  |
-| 2026-11-15 | design | open | [ユーザ権限の収集で取れない対象の情報を、呼び出し元が渡して補う入口を決める](./2026-11-15-caller-supplied-own-info.md) |  |
-| 2026-11-15 | design | open | [JSON から読み込んだ ProcessChain を、評価がそのまま信用する](./2026-11-15-deserialized-chain-is-trusted-by-evaluate.md) |  |
 | 2026-11-15 | design | open | [署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる](./2026-11-15-grant-and-list-rollback.md) |  |
 | 2026-11-15 | design | open | [引き継いだコードのレビューで残した点 (裁定や設計の後で決めるもの)](./2026-11-15-handoff-review-followups.md) |  |
 | 2026-11-15 | design | open | [収集だけを使う利用者が、ACL とアイコンを持ち込まずに済む入口が要るか決める](./2026-11-15-minimal-collect-entry.md) |  |

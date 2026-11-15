@@ -112,7 +112,7 @@ fn fields(level: SessionLevel) -> &'static [&'static str] {
 
 /// `os.login_session`: the peer is in the login session it was in when the grant was made, a state condition without arguments.
 ///
-/// `pin` returns `{"boot_uuid": <ProcessChain.boot_uuid>, "asid": <asid of the target>}` (the asid is reused after a restart, so it is paired with the boot UUID), failing with `Unobservable` when the target's asid was not collected. `check` holds when the chain's boot UUID and the target's asid equal the pinned ones. Logging out is not detected; a new session gets a new asid.
+/// `pin` returns `{"boot_uuid": <ProcessChain::boot_uuid>, "asid": <asid of the target>}` (the asid is reused after a restart, so it is paired with the boot UUID), failing with `Unobservable` when the target's asid was not collected. `check` holds when the chain's boot UUID and the target's asid equal the pinned ones. Logging out is not detected; a new session gets a new asid.
 struct LoginSession;
 
 impl Condition for LoginSession {
@@ -157,7 +157,7 @@ impl Condition for LoginSession {
 /// `{boot_uuid, asid}` of the target of the chain; `None` without an asid.
 fn login_session(chain: &ProcessChain) -> Option<Value> {
     let asid = chain.processes().first()?.identity.asid?;
-    Some(json!({ "boot_uuid": chain.boot_uuid, "asid": asid }))
+    Some(json!({ "boot_uuid": chain.boot_uuid(), "asid": asid }))
 }
 
 fn no_args(args: Option<&Value>) -> Result<(), String> {

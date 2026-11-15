@@ -1,9 +1,10 @@
 ---
 title: JSON から読み込んだ ProcessChain を、評価がそのまま信用する
-status: open
+status: resolved
 category: design
 created: 2026-11-15T09:10:00+09:00
 origin: pam-passkey のセッションから (実装のレビューで見つかった)
+close_reason: implemented
 ---
 
 # JSON から読み込んだ ProcessChain を、評価がそのまま信用する
@@ -24,5 +25,9 @@ origin: pam-passkey のセッションから (実装のレビューで見つか�
 
 ## 受け入れ条件
 
-- [ ] 外から受け取った JSON を読み込むだけでは、評価に渡せる chain (`ProcessChain`) にならない (型で止まる)。chain を組むのは、収集の入口と、アプリのコードが「収集した値」と表明する 1 つの関数だけ
-- [ ] 信頼境界 (止めるのは外から受け取った値を読み込むだけで評価に渡すこと。アプリのコードが明示して組み立てる chain と、アプリが渡す観測値は範囲外) が DESIGN と DR に書かれている
+- [x] 外から受け取った JSON を読み込むだけでは、評価に渡せる chain (`ProcessChain`) にならない (型で止まる)。chain を組むのは、収集の入口と、アプリのコードが「収集した値」と表明する 1 つの関数だけ
+- [x] 信頼境界 (止めるのは外から受け取った値を読み込むだけで評価に渡すこと。アプリのコードが明示して組み立てる chain と、アプリが渡す観測値は範囲外) が DESIGN と DR に書かれている
+
+## 結果
+
+[DR-0014](../../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md) で、列の型 (`ProcessChain`) と収集した事実の型から `Deserialize` を外し、chain の構築を収集の入口と `ProcessChain::from_collected` に限った。`TaggedChain` は `Policy::tag` だけが作る。他のプロセスの収集の結果を procline の型で読む使い方は支えないので、chain に署名を付けて検証する入口も持たない。信頼境界は DESIGN の「脅威モデルの前提」と DR-0014 の「保証の範囲」にある。

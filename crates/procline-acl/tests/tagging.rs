@@ -68,7 +68,7 @@ fn tag(name: &str, subject: Subject) -> Tag {
 /// The tags carried by each process, as names.
 fn carried<'t>(tagged: &'t TaggedChain<'_>) -> Vec<Vec<&'t str>> {
     tagged
-        .tags
+        .tags()
         .iter()
         .map(|tags| tags.iter().map(String::as_str).collect())
         .collect()
@@ -91,7 +91,7 @@ fn terminal_chain() -> ProcessChain {
 }
 
 fn truncated(processes: Vec<ProcessInfo>) -> ProcessChain {
-    ProcessChain::new(processes, BOOT.to_owned(), Some(Truncated::MaxAncestors))
+    ProcessChain::from_collected(processes, BOOT.to_owned(), Some(Truncated::MaxAncestors))
 }
 
 // ---------- match ----------
@@ -111,7 +111,7 @@ fn tag_on_match_attaches_to_each_matching_process() {
         carried(&tagged),
         vec![vec!["shell"], vec![], vec![], vec!["shell"], vec![], vec![]]
     );
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // match の項目と tags はすべて AND。片方だけ満たすプロセスには付かない。
@@ -171,9 +171,9 @@ fn ancestors_in_the_wrong_order_do_not_match() {
     let policy = policy(&vocab, Vec::new(), vec![tag("reversed", subject)]);
     let chain = terminal_chain();
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.iter().all(BTreeSet::is_empty));
+    assert!(tagged.tags().iter().all(BTreeSet::is_empty));
     // 列は完全なので、当たらないことは確定している。
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // 同じ祖先を 2 つの要素で使い回さない: 要素 2 は要素 1 が当たった祖先より上から探す。zsh が 1 つしかいない列で [zsh, zsh] は当たらない。
@@ -186,7 +186,7 @@ fn each_entry_takes_a_distinct_ancestor() {
     };
     let policy = policy(&vocab, Vec::new(), vec![tag("nested-zsh", subject)]);
     let single = terminal_chain();
-    assert!(policy.tag(&single).tags.iter().all(BTreeSet::is_empty));
+    assert!(policy.tag(&single).tags().iter().all(BTreeSet::is_empty));
     let nested = chain(vec![named(3, "sh"), named(2, "zsh"), named(1, "zsh")]);
     assert_eq!(
         carried(&policy.tag(&nested)),
@@ -325,8 +325,8 @@ fn undefined_tag_is_carried_by_no_process() {
     let policy = policy(&vocab, Vec::new(), vec![tag("needs-nowhere", subject)]);
     let chain = terminal_chain();
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.iter().all(BTreeSet::is_empty));
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.tags().iter().all(BTreeSet::is_empty));
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // 循環するタグの定義は読み込み時に弾かれる前提だが、照合側に届いても再帰が止まり、どちらのタグも付けない。付いているとも付いていないとも言えないので undecidable_tags に入れる (付いていない扱いにすると、そのタグを条件にした deny が黙って効かなくなる)。
@@ -344,8 +344,8 @@ fn tag_cycle_stops_and_is_undecidable() {
     let policy = policy(&vocab, Vec::new(), vec![tag("a", a), tag("b", b)]);
     let chain = terminal_chain();
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.iter().all(BTreeSet::is_empty));
-    assert_eq!(tagged.undecidable_tags, set(&["a", "b"]));
+    assert!(tagged.tags().iter().all(BTreeSet::is_empty));
+    assert_eq!(tagged.undecidable_tags(), &set(&["a", "b"]));
 }
 
 // ---------- 途切れた列と undecidable_tags ----------
@@ -363,11 +363,11 @@ fn unmatched_ancestor_tag_on_a_truncated_chain_is_undecidable() {
     let policy = policy(&vocab, Vec::new(), vec![tag("under-claude", subject)]);
     let chain = truncated(vec![named(2, "sh"), named(1, "zsh")]);
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.iter().all(BTreeSet::is_empty));
-    assert_eq!(tagged.undecidable_tags, set(&["under-claude"]));
+    assert!(tagged.tags().iter().all(BTreeSet::is_empty));
+    assert_eq!(tagged.undecidable_tags(), &set(&["under-claude"]));
     // 同じタグでも完全な列なら、当たらないことは確定している。
     let complete = chain_of(&chain);
-    assert!(policy.tag(&complete).undecidable_tags.is_empty());
+    assert!(policy.tag(&complete).undecidable_tags().is_empty());
 }
 
 fn chain_of(truncated: &ProcessChain) -> ProcessChain {
@@ -387,7 +387,7 @@ fn matched_or_self_failing_tag_on_a_truncated_chain_is_decided() {
     let chain = truncated(vec![named(2, "sh"), named(1, "zsh")]);
     let tagged = policy.tag(&chain);
     assert_eq!(carried(&tagged), vec![vec!["sh-in-zsh"], vec![]]);
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // 祖先への条件を持たないタグは、列が途切れていても取れた範囲だけで決まる。当たらなくても判定できなかったことにはならない。
@@ -401,8 +401,8 @@ fn tag_without_ancestors_is_decided_on_a_truncated_chain() {
     let policy = policy(&vocab, Vec::new(), vec![tag("bash", subject)]);
     let chain = truncated(vec![named(2, "sh"), named(1, "zsh")]);
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.iter().all(BTreeSet::is_empty));
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.tags().iter().all(BTreeSet::is_empty));
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // 祖先への条件は推移的に辿る: 自身の条件が ancestors を持たなくても、判定できないタグを要求するタグは判定できない。自身の条件が確かに偽のプロセスでは、要求するタグによらず判定できている。
@@ -433,10 +433,10 @@ fn undecidable_propagates_through_required_tags() {
     );
     let chain = truncated(vec![named(2, "sh"), named(1, "zsh")]);
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.iter().all(BTreeSet::is_empty));
+    assert!(tagged.tags().iter().all(BTreeSet::is_empty));
     assert_eq!(
-        tagged.undecidable_tags,
-        set(&["ancestor-under-claude", "claude-shell", "under-claude"])
+        tagged.undecidable_tags(),
+        &set(&["ancestor-under-claude", "claude-shell", "under-claude"])
     );
 }
 
@@ -456,7 +456,7 @@ fn ancestors_found_within_a_truncated_chain_match() {
         carried(&tagged),
         vec![vec!["sh-under-claude"], vec![], vec![]]
     );
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // ---------- 境界 ----------
@@ -472,8 +472,8 @@ fn empty_chain_has_no_tags() {
     let policy = policy(&vocab, Vec::new(), vec![tag("under-claude", subject)]);
     let chain = chain(Vec::new());
     let tagged = policy.tag(&chain);
-    assert!(tagged.tags.is_empty());
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.tags().is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // 登録されていない key を match に持つタグはどのプロセスにも付かない (読み込みは未登録の項目をエラーにするので、ここは防御)。
@@ -489,5 +489,5 @@ fn unregistered_key_never_matches() {
     };
     let policy = policy(&vocab, Vec::new(), vec![tag("unknown", subject)]);
     let chain = terminal_chain();
-    assert!(policy.tag(&chain).tags.iter().all(BTreeSet::is_empty));
+    assert!(policy.tag(&chain).tags().iter().all(BTreeSet::is_empty));
 }

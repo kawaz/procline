@@ -70,7 +70,7 @@ fn chain_with_asid(boot_uuid: &str, asid: Option<u32>) -> ProcessChain {
         env: None,
         icon_png: None,
     };
-    ProcessChain::new(vec![process], boot_uuid.to_owned(), None)
+    ProcessChain::from_collected(vec![process], boot_uuid.to_owned(), None)
 }
 
 fn observed(value: &Value) -> Observed<'_> {

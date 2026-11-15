@@ -27,6 +27,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 - 署名と保護の状態は、その code が差し込みや改変なしに動いていることまでを示し、その code が何を実行するか(インタプリタが読むスクリプト、AI エージェントの操作)は表しません。
 - 保護の無い署名済みのバイナリ(hardened runtime が無い、保護を緩める entitlement がある)は、同じ uid のプロセスが自分で起動してライブラリを差し込むだけで、そのコードの署名由来の条件を満たすプロセスを作れます。同じ身元の別のビルドでも同じです。そのため、`binary`、`path`、`process` のクラスは照合したプロセスの保護の状態で決め、評価のたびに確かめ直します(決定の記録: [DR-0012](decisions/DR-0012-strength-class-from-protection.md))。
 - 一覧と grant の保存先と署名鍵の保護(同じ uid のプロセスから使えない鍵)はアプリの責務です。cw は Secure Enclave の鍵で担います。
+- 評価に渡す chain は、評価するプロセスが自分で収集したものです。収集した事実の型(`ProcessChain`、`ProcessInfo`、`CodeSigning` など)は JSON から読めず、chain を組めるのは収集の入口と、アプリのコードが「収集した値」と表明する `ProcessChain::from_collected` だけです。タグ付きの列(`TaggedChain`)を作れるのは `Policy::tag` だけです。他のプロセスから受け取った値は表示にだけ使います。条件の観測値(`EvalContext`)と、項目に直接渡す `ProcessInfo`(`MatchTarget`、`Vocabulary::class`)はアプリの責務です(決定の記録: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 ## 構成
 
@@ -44,7 +45,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 ## 収集する情報
 
-収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。列は収集した起動の boot UUID(`kern.bootsessionuuid`、`ProcessChain.boot_uuid`)も持ちます。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は、その項目を照合に使ったときのクラスで、その条件が承認した個体・コードをどれだけ特定するかで決まります(「強さ: クラスと深さ」)。
+収集結果は、対象のプロセス(多くは接続相手)を先頭に launchd までの祖先を並べた列です。列は収集した起動の boot UUID(`kern.bootsessionuuid`、`ProcessChain::boot_uuid()`)も持ちます。各プロセスが下の項目を持ち、取れなかった項目は空にします。表の「強さ」は、その項目を照合に使ったときのクラスで、その条件が承認した個体・コードをどれだけ特定するかで決まります(「強さ: クラスと深さ」)。
 
 ### 識別子
 
@@ -72,6 +73,8 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | アイコン | `NSWorkspace.icon(forFile:)` を 64px PNG に縮小 | 表示専用(照合に使わない) |
 
 BSD の情報(pid、ppid、uid / gid、起動時刻、名前、tty)は、`sysctl(KERN_PROC_PID)` の `kinfo_proc` から取ります。uid を問わず読めるので、別 uid の祖先(launchd など)も辿れます。`proc_pidinfo(PROC_PIDTBSDINFO)` は別 uid のプロセスには `EPERM` で失敗するので、同じ uid のときに名前を 32 バイトの `pbi_name` で補うのにだけ使います(`kinfo_proc` の `p_comm` はそれより短い)。
+
+argv と cwd を取れない対象(ユーザ権限から見た別 uid のプロセス)では、その項目は空(`None`)のままです。呼び出し元が自分の argv や cwd を渡してくる場合も、収集の入口はその値を受け取らず、列に入れません。値は受け取ったアプリが持ち、表示で「呼び出し元が渡した値」として出し、照合には使いません。呼び出し元が自分について主張する値で、procline が収集したものではないためです(決定の記録: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 SPI や私的 API に依存する項目は、取れなければ空にするだけで、収集全体は止めません。実機では自分が使う最新の macOS だけで確かめます。古い版で取れなくても空になるだけで、安全側に倒れるためです。
 
@@ -143,7 +146,7 @@ argv、パス、env の値など、相手が自由に決められる文字列を
 1. 接続相手は audit token、祖先は unique\_id(なければ pid と起動時刻)を、収集の最初に記録する。
 2. 署名は、接続相手を audit token で参照して検証する(pid で参照すると、その間に別のプロセスになり得る)。
 3. 収集の最後に、記録した識別子が変わっていないことを確かめる。変わっていれば結果を捨て、エラーを返す。対象でも祖先でも、同じ個体のまま exec していれば(pid version が変わる)同じく結果を捨てる(署名は exec の前のイメージ、実行パスや argv は後のイメージのもの、という混ざった結果になり得るため)。エラーは `IdentityChanged` で、利用側は集め直す。unique\_id を取る SPI が使えない時は pid version も取れないので、exec は検出できない。対象が終了していれば(親に回収されていないものを含む)収集は失敗する(pid で集めた時は `NoSuchProcess`。接続相手では、audit token を読む前に終わっていれば `Peer`(`ENOTCONN`)、読んだ後・記録する前なら `NoSuchProcess`、記録した後なら `IdentityChanged`)。
-4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。終了して親にまだ回収されていないプロセス(zombie)も終了したものとして扱う(カーネルの状態 `SZOMB` で判定する)。親が終了して launchd に付け替えられたプロセスは、ppid が 1 になっても `p_puniqueid` は元の親の値のままなので、列はそこで `ancestor_exited` として終わる(launchd を親として繋ぐと、実在しない親子関係になる)。
+4. 祖先は途中で終了していることがある。その場合は「ここで途切れた」と分かる形で列を終える。終了して親にまだ回収されていないプロセス(zombie)も終了したものとして扱う(カーネルの状態 `SZOMB` で判定する)。隣り合う行は、unique\_id が親と子の両方で取れた時は、子の `p_puniqueid` と親の `p_uniqueid` の一致で親子として繋ぐ。親が終了して launchd に付け替えられたプロセスは、ppid が 1 になっても `p_puniqueid` は元の親の値のままなので、列はそこで `ancestor_exited` として終わる(launchd を親として繋ぐと、実在しない親子関係になる)。unique\_id が取れなかった時は、ppid と、親の起動時刻が子の起動時刻以前であることで繋ぐ。親の pid を後から使い回したプロセス(子より後に起動したもの)は外れるが、付け替えられたプロセスは launchd に繋がり、途切れの印は付かない。どちらで繋いだかは、行の識別子(`Identity.unique_id`、`parent_unique_id`)が `Some` か `None` かで分かる。どちらで繋いだ時も、親が終了して付け替えられた後に exec したプロセスは、`p_puniqueid` がその時の親(launchd)の値に書き換わるので launchd の子として繋がり、途切れの印は付かない。これは列のどの行の間でも起きうる。途切れの印が無いことは、どの行が期待する親であるかを示さない(決定の記録: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 ## ACL ルールの形と評価
 
@@ -241,7 +244,7 @@ tag は名前の付いた subject です。収集のたびに、列の各プロ�
 - タグの定義に placeholder(`true`)は書けません(「rule」)。
 - タグの定義もルールと同じ署名付きの一覧に入れます。同じ uid のプロセスが定義を書き換えられると、そのタグを条件にしたルールが全部広がるためです。
 - タグの定義が別のタグを参照してもよく、循環は読み込み時にエラーにします。循環は名前単位で見て、同名の定義のどれかが循環すれば不正です。
-- 列が途切れていると、祖先への条件を持つタグは有無を判定できないことがあります。そうしたタグは `TaggedChain.undecidable_tags` に入り、承認画面は「付いていない」と区別して見せます(「評価」)。
+- 列が途切れていると、祖先への条件を持つタグは有無を判定できないことがあります。そうしたタグは `TaggedChain::undecidable_tags()` に入り、承認画面は「付いていない」と区別して見せます(「評価」)。
 
 同じタグ名の定義を複数置けます。プロセスは、どれかの定義に当たればそのタグを持ちます。定義の重複は正常で、エラーにしません。項目をまたぐ選択肢を 1 つの名前にまとめるのに使います。
 
@@ -475,7 +478,7 @@ register(key, impl)
    - 寿命型の `check` が偽になった grant は、その評価でその場で失効を確定し、`Decision.expired` に id を載せる。失効は一度確定したら戻らない(時計の巻き戻しや観測の回復で復活しない)。
    - targets が対象に当たらない grant を除く。
    - 各 grant の subject を照合し、状態型の `check` を取る。subject の `match` と `tags` は対象自身と、`ancestors` は列を近い側から貪欲に部分列として照合する。
-   - 列が途切れている(`ProcessChain.truncated` が `Some`)とき: subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、対象自身への条件 (`match` と `tags` の自身の部分) は当たったのに、祖先の条件が途切れた列の中で見つからなかった grant は判定できない (自身への条件で外れた grant は全列でも外れるので、判定できなかったとは扱わない)。その id を `Decision.undecidable` に載せ、効果の決定には使わない。subject は当たったが状態型の `check` が偽の grant は、全列でも偽なので判定できなかったとは扱わない。
+   - 列が途切れている(`ProcessChain::truncated()` が `Some`)とき: subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、対象自身への条件 (`match` と `tags` の自身の部分) は当たったのに、祖先の条件が途切れた列の中で見つからなかった grant は判定できない (自身への条件で外れた grant は全列でも外れるので、判定できなかったとは扱わない)。その id を `Decision.undecidable` に載せ、効果の決定には使わない。subject は当たったが状態型の `check` が偽の grant は、全列でも偽なので判定できなかったとは扱わない。
    - subject が当たり状態型の `check` も真の `allow` の grant は、自身への条件のクラスを対象のプロセス(保護の状態)で決め直し、その grant の scope が制約の表のそのクラスの条件を満たさなければ採用しない。id を `Decision.too_weak` に載せ、trace に `strength` の項目を残す(決定の記録: [DR-0012](decisions/DR-0012-strength-class-from-protection.md))。保護のあるビルドで作った grant に、持ち込まれた保護の無い同じ身元のビルドが当たるのを止める。`UntilWithin` の基準時刻は grant の `created_at`。当たらなかった grant は採否の対象でないので載せない。
 2. effect を決める。順序は deny > allow > ask。
    - `deny` が 1 つでも当たれば拒否。
@@ -582,7 +585,7 @@ struct ObserveError { reason: String }
 | `age` | None | obs.now + args の期間(`until` の pin 値になる) | obs.now < pinned | None |
 | `uses` | None | args の N | pinned > 0 | pinned − 1 |
 | 状態型(`os.console_active` 等) | 今の状態(観測するものがあれば) | None | observed / args / chain を見る | None |
-| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain.boot_uuid` と接続相手の asid) | chain の `{boot_uuid, asid}` == pinned | None |
+| 状態型 `os.login_session` | None | chain の `{boot_uuid, asid}`(`ProcessChain::boot_uuid()` と接続相手の asid) | chain の `{boot_uuid, asid}` == pinned | None |
 
 - `ConditionKind` は Lifetime / State の 2 値です。世代、`until`、`age`、`uses` は Lifetime で、`uses` も一度 0 になれば戻りません。
 - `EvalContext` は `now` と「key → `observe()` の結果(`Result<Option<Value>, ObserveError>`)」を持ちます。Policy が condition ごとに `Observed { now, value: ctx.observed(key) }` を組んで渡します(condition は自分の key を知らない)。結果が `Err` の key の condition を使う grant は、その評価で判定できないものとして `Decision.undecidable` に載ります(「評価」)。
@@ -648,7 +651,7 @@ struct ObserveError { reason: String }
 
 収集、評価、rule の作成、grant の発行が入口です。語彙の拡張は、matcher の項目、scope、条件を同じ `register` で登録します。
 
-JSON では、バイト列(証明書の DER など)を base64url(padding なし)で書き、enum の値を snake\_case で書きます。`code_signing` は `state`(`verified` / `failed` / `unsigned` / `not_checked`)で分けた型の形をそのまま写し、`mark`(信頼の印)を添えます。当てはまらない要素はキーごと無く、読み込みは `mark` を事実から決め直して一致しなければエラーにします([DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md))。
+JSON では、バイト列(証明書の DER など)を base64url(padding なし)で書き、enum の値を snake\_case で書きます。`code_signing` は `state`(`verified` / `failed` / `unsigned` / `not_checked`)で分けた型の形をそのまま写し、`mark`(信頼の印)を添えます。当てはまらない要素はキーごと無い形です([DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md))。収集の結果の JSON は書き出しの形で、procline の型には読み戻せません。収集した事実の型(`ProcessChain`、`ProcessInfo`、`CodeSigning` など)は `Serialize` だけを持ち、`Deserialize` を持ちません。他のプロセスが受け取った JSON を読むのは、そのプロセスの型か `serde_json::Value` です([DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 ```json
 {"state": "verified", "mark": "developer_id_notarized", "identifier": "com.example.app", "cdhash": "36e6…",
@@ -667,9 +670,11 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     max_ancestors: 32,
     redaction: Redaction::default(),                 // env の伏せ字(対象の判定と伏せ方の 2 関数)の差し替え
 })?;
+// ProcessChain は Serialize だけを持ち、JSON から読めない。field は非公開で、中身はアクセサで読む
 // chain.processes()[0] が対象、以降が祖先
-// chain.truncated: Option<Truncated>。列が途切れた理由 enum Truncated { MaxAncestors, AncestorExited, Unavailable }
-// chain.boot_uuid: String。収集側が kern.bootsessionuuid を取る
+// chain.truncated() -> Option<Truncated>。列が途切れた理由 enum Truncated { MaxAncestors, AncestorExited, Unavailable }
+// chain.boot_uuid() -> &str。収集側が kern.bootsessionuuid を取る
+// ProcessChain::from_collected(processes, boot_uuid, truncated): 収集の入口以外で chain を組む唯一の関数。アプリのコードが「このプロセスが OS から収集した値」と表明する。外から受け取った値から組むのには使わない
 // p.code_signing: Option<CodeSigning>(None は収集しなかった)。CodeSigning { Verified(VerifiedSignature), Failed(FailureReason), Unsigned, NotChecked }。FailureReason { Replaced, Missing, Other }
 // VerifiedSignature { identifier, cdhash, signer: Signer, runtime: RuntimeState, entitlements, bundle_id, verified_from: VerifiedFrom }。Signer { AdHoc { linker_signed }, Certificate { chain, root: Root } }。Root { Apple { team_id }, AppleIssued { team_id, kind: CertificateKind }, Other }。CertificateKind { DeveloperId { notarized }, MacAppStore, Development, Other }。RuntimeState { hardened_runtime, platform_binary, debugged }(カーネルの動的な status)。VerifiedFrom { Disk, RunningCode }
 // code_signing.mark(): Apple / DeveloperIdNotarized / DeveloperId / MacAppStore / Development / AppleIssuedOther / OtherCertificate / Adhoc / Failed / Unsigned / NotChecked。VerifiedSignature::team_id() は根が Apple か AppleIssued の時だけ値を返す
@@ -677,7 +682,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // ProcessInfo は digest: Option<String> と path_meta: Option<PathMeta> を持つ。PathMeta { owner_uid: u32, writable_by_user: bool }(path のクラスの判定に使う)
 // ProcessInfo.responsible: Option<ProcessIdentity>。責任プロセスは pid でなく個体の識別で持つ
 // VerifiedSignature.bundle_id: Option<String>(kSecCodeInfoPList 由来。照合に使い、BinaryPin.bundle_id の照合元)。ProcessInfo.bundle(実行パスから .app を遡って読む)は表示用
-// ProcessIdentity(process の pin 値)は boot_uuid: String を持つ。Identity::process_identity(&self, boot_uuid) で作り、boot_uuid は ProcessChain.boot_uuid を渡す
+// ProcessIdentity(process の pin 値)は boot_uuid: String を持つ。Identity::process_identity(&self, boot_uuid) で作り、boot_uuid は chain.boot_uuid() を渡す
 
 // 強さ(procline-core の共有型)。どの項目がどのクラスかは Vocabulary が持ち、ProcessInfo の項目は持たない。深さは UI の概念で、型は持たない
 enum Strength { Strong, Medium, Weak }               // クラス(項目が値から決める)
@@ -733,8 +738,9 @@ policy.add_grant(saved);                             // メモリ上の Policy �
 // policy.remove_grant(id) / policy.grants() -> impl Iterator<Item = &Grant>: 掃除に使う
 
 // 評価
-let tagged = policy.tag(&chain);                     // 各プロセスに付いたタグ(画面の表示にも使う)。TaggedChain は語彙と chain だけを借り、policy を借りない
-// tagged.undecidable_tags: BTreeSet<String>。途切れた列で有無を判定できなかったタグ(承認画面は「付いていない」と区別して見せる)
+let tagged = policy.tag(&chain);                     // 各プロセスに付いたタグ(画面の表示にも使う)。TaggedChain は chain だけを借り、policy を借りない。作れるのは Policy::tag だけで、field は非公開
+// tagged.chain() -> &ProcessChain。tagged.tags() -> &[BTreeSet<String>](chain.processes() と添字が揃う)
+// tagged.undecidable_tags() -> &BTreeSet<String>。途切れた列で有無を判定できなかったタグ(承認画面は「付いていない」と区別して見せる)
 let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // 採用された grant に advance をかけ、新版を返す(メモリは変えない)。アプリは evaluate → 永続化 → add_grant を直列化する(同時に走らせると上限を超えて uses を消費できる)
 if let Some(grant) = &decision.updated_grant {
     // 署名して永続化し、書けてから policy.add_grant(grant.clone()) で差し替え、値を渡す

@@ -150,7 +150,7 @@ impl<'v> Policy<'v> {
                 value: ctx.observed(key),
             };
             let pinned = condition
-                .pin(args.as_ref(), &obs, tagged.chain)
+                .pin(args.as_ref(), &obs, tagged.chain())
                 .map_err(|error| GrantError::Pin {
                     key: key.clone(),
                     error,
@@ -170,7 +170,7 @@ impl<'v> Policy<'v> {
             });
         }
         if rule.effect == Effect::Allow {
-            let class = self.own_class(&subject, tagged.chain.processes().first());
+            let class = self.own_class(&subject, tagged.chain().processes().first());
             let met = self
                 .constraints
                 .requirement(class)
@@ -204,7 +204,7 @@ impl<'v> Policy<'v> {
         let subject = self
             .expand(subject)
             .map_err(|name| GrantError::UnknownSubject { name })?;
-        let chain = tagged.chain;
+        let chain = tagged.chain();
         let r#match = self.resolve_entries(&subject.r#match, chain, Some(0))?;
         let ancestors = if subject
             .ancestors
@@ -248,13 +248,10 @@ impl<'v> Policy<'v> {
         })
     }
 
-    /// Attaches the tags each process of the chain carries. The result borrows the vocabulary and the chain, not the policy.
+    /// Attaches the tags each process of the chain carries. The result borrows the chain, not the policy.
     ///
     /// A tag whose definition requires other tags is decided after them, whatever the order of the definitions. On a truncated chain, a tag with conditions on the ancestors (directly, or through the tags it requires) that does not match a process for want of the missing ancestors goes into `undecidable_tags`; a tag that matches is attached, since it also matches the whole chain.
-    pub fn tag<'c>(&self, chain: &'c ProcessChain) -> TaggedChain<'c>
-    where
-        'v: 'c,
-    {
+    pub fn tag<'c>(&self, chain: &'c ProcessChain) -> TaggedChain<'c> {
         tag_chain(self.vocab, &self.subjects, &self.tags, chain)
     }
 
@@ -385,7 +382,7 @@ impl<'v> Policy<'v> {
                         value,
                         MatchTarget {
                             info: process,
-                            boot_uuid: &chain.boot_uuid,
+                            boot_uuid: chain.boot_uuid(),
                         },
                     )
                     .map_err(|ResolveError::ValueUnavailable { field }| {
@@ -481,7 +478,7 @@ impl<'v> Policy<'v> {
         tags: &mut ChainTags<'_>,
         trace: &mut Trace,
     ) -> Verdict {
-        let chain = tagged.chain;
+        let chain = tagged.chain();
         let mut record = |key: String, process: Option<usize>, matched: bool| {
             trace.entries.push(TraceEntry {
                 grant_id: grant.id.clone(),
@@ -546,7 +543,7 @@ impl<'v> Policy<'v> {
         if let Some(process) = chain.processes().first() {
             let own = MatchTarget {
                 info: process,
-                boot_uuid: &chain.boot_uuid,
+                boot_uuid: chain.boot_uuid(),
             };
             for (key, value) in &grant.subject.r#match {
                 let hit = self
@@ -708,13 +705,40 @@ fn grant_meets(conditions: &[PinnedCondition], from: SystemTime, option: &ScopeO
     }
 }
 
-/// A chain with the tags of each process, index-aligned with `chain.processes()`.
+/// A chain with the tags of each process. Only `Policy::tag` makes one, so the tags are the ones the policy's definitions attach.
 pub struct TaggedChain<'a> {
-    pub vocab: &'a Vocabulary,
-    pub chain: &'a ProcessChain,
-    pub tags: Vec<BTreeSet<String>>,
+    chain: &'a ProcessChain,
+    tags: Vec<BTreeSet<String>>,
+    undecidable_tags: BTreeSet<String>,
+}
+
+impl<'a> TaggedChain<'a> {
+    pub(crate) fn new(
+        chain: &'a ProcessChain,
+        tags: Vec<BTreeSet<String>>,
+        undecidable_tags: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            chain,
+            tags,
+            undecidable_tags,
+        }
+    }
+
+    /// The chain the tags were attached to.
+    pub fn chain(&self) -> &'a ProcessChain {
+        self.chain
+    }
+
+    /// The tags each process carries, index-aligned with `chain().processes()`.
+    pub fn tags(&self) -> &[BTreeSet<String>] {
+        &self.tags
+    }
+
     /// The tags whose presence could not be decided because the chain is truncated. An approval screen shows them apart from the tags a process does not carry.
-    pub undecidable_tags: BTreeSet<String>,
+    pub fn undecidable_tags(&self) -> &BTreeSet<String> {
+        &self.undecidable_tags
+    }
 }
 
 /// Result of an evaluation.

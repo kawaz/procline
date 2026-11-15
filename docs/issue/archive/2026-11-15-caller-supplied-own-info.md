@@ -1,9 +1,10 @@
 ---
 title: ユーザ権限の収集で取れない対象の情報を、呼び出し元が渡して補う入口を決める
-status: open
+status: resolved
 category: design
 created: 2026-11-15T08:32:54+09:00
 origin: 自リポ TODO (pam-passkey のセッションからの起票)
+close_reason: documented
 ---
 
 # ユーザ権限の収集で取れない対象の情報を、呼び出し元が渡して補う入口を決める
@@ -14,9 +15,9 @@ pam-passkey は、祖先の収集と署名の検証を root の PAM モジュー
 
 ## 背景 (事実)
 
-- argv (`KERN_PROCARGS2`) と cwd (`PROC_PIDVNODEPATHINFO`) は同じ uid か root からしか取れない (DESIGN-ja「収集する情報」、[findings](../findings/2026-11-09-collect-pid-observations.md): 別 uid では `EPERM`)
+- argv (`KERN_PROCARGS2`) と cwd (`PROC_PIDVNODEPATHINFO`) は同じ uid か root からしか取れない (DESIGN-ja「収集する情報」、[findings](../../findings/2026-11-09-collect-pid-observations.md): 別 uid では `EPERM`)
 - 観測 (2026-11-15): 走っている `sudo` (uid 0 / ruid 501 / svuid 0) をユーザ権限から `dump` で集めると、argv と cwd は取れず、署名も取れなかった。`codesign -dv <pid>` も `Permission denied`
-- 署名は、通常の方法では SecCode が得られない (100013) が、`kSecGuestAttributeDynamicCode` を足した検証 (カーネルが持つ署名を使う) ならユーザ権限から `anchor apple` まで評価できた (別リポ pam-passkey の findings `2026-11-15-running-code-identity.md`)。[DR-0011](../decisions/DR-0011-verified-signature-and-trust-mark.md) の手順はこれを使う
+- 署名は、通常の方法では SecCode が得られない (100013) が、`kSecGuestAttributeDynamicCode` を足した検証 (カーネルが持つ署名を使う) ならユーザ権限から `anchor apple` まで評価できた (別リポ pam-passkey の findings `2026-11-15-running-code-identity.md`)。[DR-0011](../../decisions/DR-0011-verified-signature-and-trust-mark.md) の手順はこれを使う
 - `kinfo_proc` (ppid、uid、起動時刻、名前)、`PROC_PIDUNIQIDENTIFIERINFO`、`proc_pidpath` は uid を問わず読める (findings)
 - 呼び出し元が渡す値は、呼び出し元が自分について主張するもので、procline が収集したものではない
 
@@ -27,8 +28,18 @@ pam-passkey は、祖先の収集と署名の検証を root の PAM モジュー
 - 強さのクラス: 渡された argv と cwd は、どちらにしても弱 (今の `argv` と `cwd` と同じ) で足りるか
 - 列の 2 番目以降 (root の祖先) の argv と cwd は取れないままでよいか
 
+## 結果
+
+[DR-0014](../../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md) の「呼び出し元が渡す値」で、上の確かめることは全部決まった。
+
+- 入口の形: procline に入口は足さない。収集の入口 (`collect_peer`、`collect_pid`) は呼び出し元が渡す値を受け取らず、chain に入れない
+- 渡された値と収集した値の区別: 渡された値は受け取ったアプリが持ち、表示で「呼び出し元が渡した値」として出す。照合には使わない
+- 強さのクラス: 照合に使わないので、クラスを持たない
+- 列の 2 番目以降: 別 uid のプロセスの argv と cwd は取れないまま (`None`)
+- 渡された値をどの行に添え、送り手をどう確かめるかはアプリが決める。procline はそのための行の識別子と、親子をどう繋いだか (識別子の有無で分かる) を出す
+
 ## 関連
 
 - DESIGN-ja「収集する情報」「収集の整合性」
-- [DR-0011](../decisions/DR-0011-verified-signature-and-trust-mark.md): ユーザ権限から走っている `sudo` の署名を検証する手順
+- [DR-0011](../../decisions/DR-0011-verified-signature-and-trust-mark.md): ユーザ権限から走っている `sudo` の署名を検証する手順
 - pam-passkey (別リポ kawaz/pam-passkey) の helper の方針

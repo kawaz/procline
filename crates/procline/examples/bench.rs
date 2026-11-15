@@ -84,7 +84,7 @@ fn main() -> std::process::ExitCode {
         let chain = collect_pid(pid, options)?;
         let elapsed = start.elapsed();
         let count = chain.processes().len();
-        let truncated = chain.truncated;
+        let truncated = chain.truncated();
         std::hint::black_box(chain);
         Ok((elapsed, count, truncated))
     }

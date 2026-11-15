@@ -36,7 +36,7 @@ procline は 2 つの層からなる。
 - `os.*` の語彙 (`os_items()` とその実装) を新しい crate procline-acl-macos に置く。依存は procline-acl、procline-core、procline-macos (と JSON の値の `serde_json`)。`#![forbid(unsafe_code)]`
 - 収集の crate (procline-core、procline-macos、入口の procline) は procline-acl に依存しない。feature は使わない
 - procline-macos は、語彙が使う OS の観測を普通の公開関数として出す
-  - `procline_macos::boot_session_uuid() -> io::Result<String>`: 起動の UUID (`kern.bootsessionuuid`)。同じ起動の間の収集の `ProcessChain.boot_uuid` と同じ値
+  - `procline_macos::boot_session_uuid() -> io::Result<String>`: 起動の UUID (`kern.bootsessionuuid`)。同じ起動の間の収集の `ProcessChain::boot_uuid()` と同じ値
   - `procline_macos::wake_time_secs() -> io::Result<i64>`: 直近の起床の時刻 (`kern.waketime`、epoch からの秒)
   - `unsafe` は引き続き procline-macos の `sys/` の中だけ。procline-acl-macos は公開関数を呼ぶだけ
 - 入口の procline は収集だけを再公開する (core の型と、ビルドターゲットの OS の collect)

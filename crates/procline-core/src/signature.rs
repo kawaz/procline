@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Only a verified signature carries an identity (identifier, cdhash, certificates, Team ID, bundle ID, entitlements): when the verification fails, what the Security framework reports may describe another file (the one that replaced the executable), not the running code.
 ///
-/// JSON: the variant is `state` (`verified`, `failed`, `unsigned`, `not_checked`), beside the `mark` of `CodeSigning::mark`; a verified signature adds the fields of `VerifiedSignature`, a failed one `failure`. Reading the JSON decides the mark again from the facts and rejects a `mark` that differs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "Wire", try_from = "Wire")]
+/// JSON: the variant is `state` (`verified`, `failed`, `unsigned`, `not_checked`), beside the `mark` of `CodeSigning::mark`; a verified signature adds the fields of `VerifiedSignature`, a failed one `failure`. Only the process that verified the signature makes this value: the JSON is written (`Serialize`), not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "Wire")]
 pub enum CodeSigning {
     Verified(VerifiedSignature),
     Failed(FailureReason),
@@ -47,7 +47,7 @@ impl CodeSigning {
 }
 
 /// Why the verification failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureReason {
     /// The executable was updated or replaced while the process ran.
@@ -106,8 +106,8 @@ impl VerifiedSignature {
 }
 
 /// Who signed the code.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Signer {
     /// No certificate. `linker_signed`: the signature the linker adds (`kSecCodeSignatureLinkerSigned`).
     AdHoc { linker_signed: bool },
@@ -116,8 +116,8 @@ pub enum Signer {
 }
 
 /// Where the certificate chain ends, as the requirements decided it. The Team ID is kept only under Apple's roots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Root {
     /// `anchor apple`: Apple's own code.
     Apple { team_id: Option<String> },
@@ -132,8 +132,8 @@ pub enum Root {
 }
 
 /// The kind of a certificate Apple issued, from the extension OIDs together with `anchor apple generic`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CertificateKind {
     /// `notarized`: the requirement `notarized` holds, evaluated without the network.
     DeveloperId {
@@ -146,8 +146,7 @@ pub enum CertificateKind {
 }
 
 /// The protection of the running code, from the kernel's dynamic status (`kSecCodeInfoStatus`), not the code directory flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct RuntimeState {
     /// `CS_RUNTIME` (0x10000).
     pub hardened_runtime: bool,
@@ -158,7 +157,7 @@ pub struct RuntimeState {
 }
 
 /// What was verified: the executable on disk (the usual way), or the signature the kernel keeps for the running code (`kSecGuestAttributeDynamicCode`, used only when the usual way could not read the executable or found it changed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifiedFrom {
     Disk,
@@ -166,7 +165,7 @@ pub enum VerifiedFrom {
 }
 
 /// The trust mark (`CodeSigning::mark`). The words and colors are the application's; this is the value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mark {
     Apple,
@@ -183,10 +182,8 @@ pub enum Mark {
 }
 
 /// The JSON form of `CodeSigning`: the shape of the type with its mark beside it.
-///
-/// Design rationale: the variant's fields are listed here instead of flattening `VerifiedSignature`, since serde cannot reject unknown keys of a flattened struct, and an unknown key in a signature is rejected rather than dropped.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 enum Wire {
     Verified {
         mark: Mark,
@@ -238,64 +235,6 @@ impl From<CodeSigning> for Wire {
         }
     }
 }
-
-impl TryFrom<Wire> for CodeSigning {
-    type Error = MarkMismatch;
-
-    fn try_from(wire: Wire) -> Result<Self, Self::Error> {
-        let (written, signing) = match wire {
-            Wire::Verified {
-                mark,
-                identifier,
-                cdhash,
-                signer,
-                runtime,
-                entitlements,
-                bundle_id,
-                verified_from,
-            } => (
-                mark,
-                Self::Verified(VerifiedSignature {
-                    identifier,
-                    cdhash,
-                    signer,
-                    runtime,
-                    entitlements,
-                    bundle_id,
-                    verified_from,
-                }),
-            ),
-            Wire::Failed { mark, failure } => (mark, Self::Failed(failure)),
-            Wire::Unsigned { mark } => (mark, Self::Unsigned),
-            Wire::NotChecked { mark } => (mark, Self::NotChecked),
-        };
-        let decided = signing.mark();
-        if written == decided {
-            Ok(signing)
-        } else {
-            Err(MarkMismatch { written, decided })
-        }
-    }
-}
-
-/// The `mark` of a `code_signing` in JSON is not the one its facts decide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MarkMismatch {
-    pub written: Mark,
-    pub decided: Mark,
-}
-
-impl fmt::Display for MarkMismatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the mark {:?} does not follow from the signature, which gives {:?}",
-            self.written, self.decided
-        )
-    }
-}
-
-impl std::error::Error for MarkMismatch {}
 
 /// Code directory hash. Serialized as a lowercase hex string (the form `codesign -dvvv` prints).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -362,13 +301,12 @@ impl<'de> Deserialize<'de> for CdHash {
 }
 
 /// One certificate of the signer chain.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Certificate {
     /// The subject summary the Security framework makes from the certificate, for display only (the signer writes the subject, so it proves nothing); `None` when it makes none (a certificate with an empty subject).
     pub summary: Option<String>,
     /// DER bytes; JSON carries them as base64url without padding.
-    #[serde(with = "base64url")]
+    #[serde(serialize_with = "base64url")]
     pub der: Vec<u8>,
 }
 
@@ -383,23 +321,13 @@ impl fmt::Debug for Certificate {
 }
 
 /// serde adapter: `Vec<u8>` as a base64url (no padding) string, the form every byte string in the JSON takes.
-mod base64url {
+fn base64url<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
     use base64::Engine as _;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        URL_SAFE_NO_PAD.decode(s).map_err(serde::de::Error::custom)
-    }
+    serializer.serialize_str(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// App bundle found by walking up from the executable path. For display only; matching uses `VerifiedSignature.bundle_id`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Bundle {
     pub id: Option<String>,
     pub version: Option<String>,
@@ -428,7 +356,7 @@ mod tests {
         assert!(serde_json::from_str::<CdHash>(&format!("\"{}\"", "zz".repeat(20))).is_err());
     }
 
-    // 証明書の要約は、Security framework が作れなかった時 (subject が空の証明書で観測) は無い。JSON では null で書き、null を読んで None に戻す (entitlements や bundle_id の「無い」と同じ形)。空の文字列には丸めない (「要約が無い」と「空の要約」を区別する)。
+    // 証明書の要約は、Security framework が作れなかった時 (subject が空の証明書で観測) は無い。JSON では null で書く (entitlements や bundle_id の「無い」と同じ形)。空の文字列には丸めない (「要約が無い」と「空の要約」を区別する)。
     #[test]
     fn certificate_without_summary_is_null_in_json() {
         let certificate = Certificate {
@@ -437,9 +365,13 @@ mod tests {
         };
         let json = serde_json::to_string(&certificate).unwrap();
         assert_eq!(json, r#"{"summary":null,"der":"MII"}"#);
+        let empty = Certificate {
+            summary: Some(String::new()),
+            ..certificate
+        };
         assert_eq!(
-            serde_json::from_str::<Certificate>(&json).unwrap(),
-            certificate
+            serde_json::to_string(&empty).unwrap(),
+            r#"{"summary":"","der":"MII"}"#
         );
     }
 
@@ -715,61 +647,98 @@ mod tests {
             serde_json::to_value(CodeSigning::NotChecked).unwrap(),
             serde_json::json!({"state": "not_checked", "mark": "not_checked"})
         );
-        let back: CodeSigning =
-            serde_json::from_value(serde_json::to_value(&signing).unwrap()).unwrap();
-        assert_eq!(back, signing);
     }
 
-    // 書き出した JSON を読むと元の値に戻る (全 state、全 signer / root / 種類)。保存した収集結果を読み直しても事実が変わらないこと。
+    // 書き出しの形を、印の表にない組 (Apple の根の Team ID あり、Developer ID の公証なし、Development、Apple が発行した他の種類、ad-hoc の linker_signed なし、検証の失敗の残り 2 つの理由) でも確かめる。どの state も state と mark を並べ、検証に成功した署名だけが身元 (identifier、cdhash、signer、runtime、entitlements、bundle_id、verified_from) を持ち、失敗した署名は failure だけを持つ。JSON は書き出すだけで読み戻さない (署名を検証したプロセスだけがこの値を作る) ので、形の全体を値で固定する。
     #[test]
-    fn json_round_trips_every_shape() {
+    fn json_writes_every_shape() {
+        let identity = |mark: &str, signer: serde_json::Value| {
+            serde_json::json!({
+                "state": "verified", "mark": mark,
+                "identifier": "com.example.tool", "cdhash": "36".repeat(20),
+                "signer": signer,
+                "runtime": {"hardened_runtime": true, "platform_binary": false, "debugged": false},
+                "entitlements": null,
+                "bundle_id": null,
+                "verified_from": "disk"
+            })
+        };
+        let chain = serde_json::json!([{"summary": "Developer ID Application: Example (ABCDE12345)", "der": "MII"}]);
+        let issued_root = |kind: serde_json::Value| {
+            serde_json::json!({"kind": "certificate", "chain": chain,
+                "root": {"kind": "apple_issued", "team_id": "ABCDE12345", "certificate_kind": kind}})
+        };
         let shapes = [
-            certificate(Root::Apple {
-                team_id: Some("59GAB85EFG".to_owned()),
-            }),
-            issued(CertificateKind::DeveloperId { notarized: false }),
-            issued(CertificateKind::Development),
-            issued(CertificateKind::Other),
-            certificate(Root::Other),
-            verified(Signer::AdHoc {
-                linker_signed: false,
-            }),
-            CodeSigning::Failed(FailureReason::Missing),
-            CodeSigning::Failed(FailureReason::Other),
-            CodeSigning::Unsigned,
-            CodeSigning::NotChecked,
+            (
+                certificate(Root::Apple {
+                    team_id: Some("59GAB85EFG".to_owned()),
+                }),
+                identity(
+                    "apple",
+                    serde_json::json!({"kind": "certificate", "chain": chain,
+                        "root": {"kind": "apple", "team_id": "59GAB85EFG"}}),
+                ),
+            ),
+            (
+                issued(CertificateKind::DeveloperId { notarized: false }),
+                identity(
+                    "developer_id",
+                    issued_root(serde_json::json!({"kind": "developer_id", "notarized": false})),
+                ),
+            ),
+            (
+                issued(CertificateKind::Development),
+                identity(
+                    "development",
+                    issued_root(serde_json::json!({"kind": "development"})),
+                ),
+            ),
+            (
+                issued(CertificateKind::Other),
+                identity(
+                    "apple_issued_other",
+                    issued_root(serde_json::json!({"kind": "other"})),
+                ),
+            ),
+            (
+                certificate(Root::Other),
+                identity(
+                    "other_certificate",
+                    serde_json::json!({"kind": "certificate", "chain": chain, "root": {"kind": "other"}}),
+                ),
+            ),
+            (
+                verified(Signer::AdHoc {
+                    linker_signed: false,
+                }),
+                identity(
+                    "adhoc",
+                    serde_json::json!({"kind": "ad_hoc", "linker_signed": false}),
+                ),
+            ),
+            (
+                CodeSigning::Failed(FailureReason::Missing),
+                serde_json::json!({"state": "failed", "mark": "failed", "failure": "missing"}),
+            ),
+            (
+                CodeSigning::Failed(FailureReason::Other),
+                serde_json::json!({"state": "failed", "mark": "failed", "failure": "other"}),
+            ),
+            (
+                CodeSigning::Unsigned,
+                serde_json::json!({"state": "unsigned", "mark": "unsigned"}),
+            ),
+            (
+                CodeSigning::NotChecked,
+                serde_json::json!({"state": "not_checked", "mark": "not_checked"}),
+            ),
         ];
-        for signing in shapes {
-            let json = serde_json::to_string(&signing).unwrap();
-            let back: CodeSigning = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, signing, "{json}");
+        for (signing, expected) in shapes {
+            assert_eq!(
+                serde_json::to_value(&signing).unwrap(),
+                expected,
+                "{signing:?}"
+            );
         }
-    }
-
-    // 読み込みは印を事実から決め直し、書かれた印と違えばエラーにする。印は表示の元なので、JSON を書き換えて ad-hoc の署名に apple の印を付けても、そのまま通さない。印が無い JSON も、未知のキーを持つ JSON も読まない (黙って補ったり捨てたりしない)。
-    #[test]
-    fn reading_rejects_a_mark_the_facts_do_not_give() {
-        let mut json = serde_json::to_value(verified(Signer::AdHoc {
-            linker_signed: true,
-        }))
-        .unwrap();
-        json["mark"] = serde_json::json!("apple");
-        let err = serde_json::from_value::<CodeSigning>(json).unwrap_err();
-        assert!(err.to_string().contains("Adhoc"), "{err}");
-
-        let mismatched = serde_json::json!({"state": "unsigned", "mark": "not_checked"});
-        assert!(serde_json::from_value::<CodeSigning>(mismatched).is_err());
-
-        let without_mark = serde_json::json!({"state": "failed", "failure": "missing"});
-        assert!(serde_json::from_value::<CodeSigning>(without_mark).is_err());
-
-        let unknown_key =
-            serde_json::json!({"state": "unsigned", "mark": "unsigned", "team_id": "X"});
-        assert!(serde_json::from_value::<CodeSigning>(unknown_key).is_err());
-
-        let mut identity_on_failure =
-            serde_json::to_value(CodeSigning::Failed(FailureReason::Replaced)).unwrap();
-        identity_on_failure["identifier"] = serde_json::json!("com.example.tool");
-        assert!(serde_json::from_value::<CodeSigning>(identity_on_failure).is_err());
     }
 }

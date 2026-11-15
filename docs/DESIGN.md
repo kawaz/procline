@@ -27,6 +27,7 @@ The adversary is another process with the same uid. root and impersonation of th
 - The signature and the protection state show that the code runs without injection or modification, and no more; they do not represent what that code executes (a script read by an interpreter, the operations of an AI agent).
 - An unprotected signed binary (no hardened runtime, or an entitlement that relaxes the protection) lets a process with the same uid launch it itself with a library injected, which makes a process that satisfies the signature-derived conditions of that code. Another build with the same identity does the same. So the class of `binary`, `path` and `process` is decided by the protection state of the matched process, and checked again at every evaluation (decision record: [DR-0012](decisions/DR-0012-strength-class-from-protection.md)).
 - Protecting the storage of the list and grants and the signing key (a key that processes with the same uid cannot use) is the app's responsibility. cw handles it with a Secure Enclave key.
+- The chain passed to evaluation is one the evaluating process collected itself. The types of collected facts (`ProcessChain`, `ProcessInfo`, `CodeSigning` and so on) cannot be read from JSON, and a chain can be built only by the collect entry points and by `ProcessChain::from_collected`, through which the app's code states that the values were collected. Only `Policy::tag` can create a tagged sequence (`TaggedChain`). Values received from other processes are used only for display. The observed values of conditions (`EvalContext`) and a `ProcessInfo` passed directly to an item (`MatchTarget`, `Vocabulary::class`) are the app's responsibility (decision record: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)).
 
 ## Structure
 
@@ -44,7 +45,7 @@ Apps use only what they need. An app that uses only collection depends on procli
 
 ## Collected Information
 
-The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. The sequence also holds the boot UUID of the boot it was collected in (`kern.bootsessionuuid`, `ProcessChain.boot_uuid`). Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the class when the item is used for matching, determined by how much the condition pins down the approved individual process or code ("Strength: Class and Depth").
+The collection result is a sequence that starts with the target process (usually the peer) followed by its ancestors up to launchd. The sequence also holds the boot UUID of the boot it was collected in (`kern.bootsessionuuid`, `ProcessChain::boot_uuid()`). Each process has the items below; items that could not be obtained are left empty. The "Strength" column in the tables is the class when the item is used for matching, determined by how much the condition pins down the approved individual process or code ("Strength: Class and Depth").
 
 ### Identifiers
 
@@ -72,6 +73,8 @@ These identifiers are an internal classification of collection: in the rule voca
 | Icon | `NSWorkspace.icon(forFile:)` scaled down to a 64px PNG | Display only (not used for matching) |
 
 BSD information (pid, ppid, uid / gid, start time, name, tty) is taken from `kinfo_proc` via `sysctl(KERN_PROC_PID)`. It is readable regardless of uid, so ancestors with a different uid (such as launchd) can be traced too. `proc_pidinfo(PROC_PIDTBSDINFO)` fails with `EPERM` for processes with a different uid, so it is used only to supplement the name with the 32-byte `pbi_name` for the same uid (`p_comm` in `kinfo_proc` is shorter).
+
+For a target whose argv and cwd cannot be obtained (a process with a different uid, seen with user privileges), those items stay empty (`None`). Even when the caller hands over its own argv or cwd, the collect entry points do not take those values and do not put them in the sequence. The app that received them holds them, shows them on screen as "values handed over by the caller", and does not use them for matching. They are claims the caller makes about itself, not something procline collected (decision record: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)).
 
 Items that depend on SPIs or private APIs are simply left empty if unavailable; collection as a whole does not stop. On real hardware, they are verified only on the latest macOS in use. If an older version cannot provide them, they just end up empty, which fails safe.
 
@@ -143,7 +146,7 @@ Collection takes time, and processes may be replaced in the meantime.
 1. At the start of collection, record the audit token for the peer and the unique\_id (or pid and start time if unavailable) for ancestors.
 2. Verify the signature by referring to the peer via its audit token (referring by pid could hit a different process in the meantime).
 3. At the end of collection, confirm that the recorded identifiers have not changed. If they have, discard the result and return an error. The same applies when the target or an ancestor is still the same individual but has run exec (its pid version changes), because the result could mix images: the signature from before the exec, the executable path and argv from after it. The error is `IdentityChanged`, and the caller collects again. When the SPI that gives the unique\_id is unavailable, the pid version is unavailable too, so an exec cannot be detected. If the target has exited (including one not yet reaped by its parent), the collection fails (`NoSuchProcess` when collecting by pid; for a peer, `Peer` (`ENOTCONN`) if it exited before its audit token is read, `NoSuchProcess` if after that and before it is recorded, and `IdentityChanged` if after it is recorded).
-4. An ancestor may have exited partway through. In that case, end the sequence in a form that shows "it was cut off here". A process that has exited but has not yet been reaped by its parent (a zombie) is also treated as exited (judged by the kernel state `SZOMB`). For a process reparented to launchd after its parent exited, the ppid becomes 1 but `p_puniqueid` keeps the original parent's value, so the sequence ends there as `ancestor_exited` (linking launchd as the parent would record a parent-child relationship that does not exist).
+4. An ancestor may have exited partway through. In that case, end the sequence in a form that shows "it was cut off here". A process that has exited but has not yet been reaped by its parent (a zombie) is also treated as exited (judged by the kernel state `SZOMB`). When unique\_id is obtained for both the parent and the child, adjacent rows are linked as parent and child by the child's `p_puniqueid` matching the parent's `p_uniqueid`. For a process reparented to launchd after its parent exited, the ppid becomes 1 but `p_puniqueid` keeps the original parent's value, so the sequence ends there as `ancestor_exited` (linking launchd as the parent would record a parent-child relationship that does not exist). When unique\_id is not obtained, they are linked by the ppid and by the parent's start time being no later than the child's. A process that later reused the parent's pid (one started after the child) is rejected, but a reparented process is linked to launchd and gets no cut-off mark. Which way a row was linked shows in whether the row's identifiers (`Identity.unique_id`, `parent_unique_id`) are `Some` or `None`. Either way, a process that execs after its parent exited and it was reparented has its `p_puniqueid` rewritten to the value of its parent at that moment (launchd), so it is linked as a child of launchd and gets no cut-off mark. This can happen between any rows of the sequence. The absence of the cut-off mark does not show which row is the expected parent (decision record: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)).
 
 ## ACL Rule Shape and Evaluation
 
@@ -241,7 +244,7 @@ With this, a rule's subject only needs `{"tags": ["claude-pj1"]}`. The UI shows 
 - Placeholders (`true`) cannot be written in a tag definition ("rule").
 - Tag definitions go into the same signed list as rules. If a process with the same uid could rewrite a definition, every rule conditioned on that tag would widen.
 - A tag definition may refer to another tag; cycles are an error at load time. Cycles are checked per name: if any of the definitions with the same name is part of a cycle, it is invalid.
-- When the sequence is cut off, whether a tag with conditions on ancestors is attached may not be decidable. Such tags go into `TaggedChain.undecidable_tags`, and the approval UI shows them distinguished from "not attached" ("Evaluation").
+- When the sequence is cut off, whether a tag with conditions on ancestors is attached may not be decidable. Such tags go into `TaggedChain::undecidable_tags()`, and the approval UI shows them distinguished from "not attached" ("Evaluation").
 
 Several definitions with the same tag name may be placed. A process carries the tag if any of the definitions matches it. Duplicate definitions are normal and are not an error. They are used to gather alternatives that span items under one name.
 
@@ -475,7 +478,7 @@ The target of evaluation is grants (decision record: [DR-0008](decisions/DR-0008
    - A grant whose lifetime `check` became false has its expiry settled on the spot in that evaluation, and its id is put in `Decision.expired`. Once settled, an expiry never comes back (it is not revived by the clock going backwards or by an observation recovering).
    - Exclude grants whose targets do not match the target.
    - Match each grant's subject and take the state `check`. The subject's `match` and `tags` are matched against the target itself, and `ancestors` is matched against the sequence as a subsequence, greedily from the near side.
-   - When the sequence is cut off (`ProcessChain.truncated` is `Some`): the subject's conditions (`match` ∧ `tags` ∧ the `ancestors` subsequence) are all positive conditions, and extending the sequence never turns "matched" into "did not match" (monotone). So a grant that matched on the cut-off sequence also matches on the full sequence, and it is used in deciding the effect. A grant that has conditions on ancestors (`ancestors`, or a tag whose definition has `ancestors`; when a tag refers to another tag, this is followed transitively) whose conditions on the target itself (`match` and the own part of `tags`) matched but whose ancestor conditions were not found within the cut-off sequence is undecidable (a grant whose own conditions failed fails on the full sequence too, so it is not treated as undecidable). Its id is put in `Decision.undecidable`, and it is not used in deciding the effect. A grant whose subject matched but whose state `check` is false is false on the full sequence too, so it is not treated as undecidable.
+   - When the sequence is cut off (`ProcessChain::truncated()` is `Some`): the subject's conditions (`match` ∧ `tags` ∧ the `ancestors` subsequence) are all positive conditions, and extending the sequence never turns "matched" into "did not match" (monotone). So a grant that matched on the cut-off sequence also matches on the full sequence, and it is used in deciding the effect. A grant that has conditions on ancestors (`ancestors`, or a tag whose definition has `ancestors`; when a tag refers to another tag, this is followed transitively) whose conditions on the target itself (`match` and the own part of `tags`) matched but whose ancestor conditions were not found within the cut-off sequence is undecidable (a grant whose own conditions failed fails on the full sequence too, so it is not treated as undecidable). Its id is put in `Decision.undecidable`, and it is not used in deciding the effect. A grant whose subject matched but whose state `check` is false is false on the full sequence too, so it is not treated as undecidable.
    - For an `allow` grant whose subject matched and whose state `check` is true, decide the class of its own conditions again with the target process (its protection state). If the grant's scopes do not meet the constraint table's condition for that class, the grant is not adopted: its id is put in `Decision.too_weak`, and the trace keeps a `strength` entry (decision record: [DR-0012](decisions/DR-0012-strength-class-from-protection.md)). This stops an unprotected build with the same identity, brought in by an attacker, from matching a grant made with a protected build. `UntilWithin` is measured from the grant's `created_at`. A grant that did not match is not up for adoption, so it is not listed.
 2. Decide the effect. The order is deny > allow > ask.
    - If even one `deny` matches, reject.
@@ -582,7 +585,7 @@ struct ObserveError { reason: String }
 | `age` | None | obs.now + the duration in args (becomes the pinned value of `until`) | obs.now < pinned | None |
 | `uses` | None | N from args | pinned > 0 | pinned − 1 |
 | State (`os.console_active`, etc.) | The current state (if there is something to observe) | None | Looks at observed / args / chain | None |
-| State `os.login_session` | None | `{boot_uuid, asid}` from chain (`ProcessChain.boot_uuid` and the peer's asid) | `{boot_uuid, asid}` from chain == pinned | None |
+| State `os.login_session` | None | `{boot_uuid, asid}` from chain (`ProcessChain::boot_uuid()` and the peer's asid) | `{boot_uuid, asid}` from chain == pinned | None |
 
 - `ConditionKind` has two values, Lifetime / State. Epochs, `until`, `age`, and `uses` are Lifetime; `uses` too never comes back once it reaches 0.
 - `EvalContext` holds `now` and "key → the result of `observe()` (`Result<Option<Value>, ObserveError>`)". The Policy builds `Observed { now, value: ctx.observed(key) }` per condition and passes it (a condition does not know its own key). A grant that uses a condition whose key's result is `Err` is treated as undecidable in that evaluation and put in `Decision.undecidable` ("Evaluation").
@@ -648,7 +651,7 @@ Cleanup (deleting grants that are no longer needed) is the app's responsibility,
 
 The entry points are collection, evaluation, rule creation, and grant issuance. Vocabulary extension registers matcher items, scopes, and conditions with the same `register`.
 
-In JSON, byte strings (such as certificate DER) are written as base64url (without padding), and enum values are written in snake\_case. `code_signing` copies the shape of the type, split by `state` (`verified` / `failed` / `unsigned` / `not_checked`), and adds `mark` (the trust mark). Elements that do not apply have no key, and loading decides `mark` again from the facts and fails when it differs ([DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md)).
+In JSON, byte strings (such as certificate DER) are written as base64url (without padding), and enum values are written in snake\_case. `code_signing` copies the shape of the type, split by `state` (`verified` / `failed` / `unsigned` / `not_checked`), and adds `mark` (the trust mark). Elements that do not apply have no key ([DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md)). The JSON of a collection result is a written form, and cannot be read back into procline's types. The types of collected facts (`ProcessChain`, `ProcessInfo`, `CodeSigning` and so on) have only `Serialize`, not `Deserialize`. Another process that receives the JSON reads it with its own types or `serde_json::Value` ([DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)).
 
 ```json
 {"state": "verified", "mark": "developer_id_notarized", "identifier": "com.example.app", "cdhash": "36e6…",
@@ -667,9 +670,11 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     max_ancestors: 32,
     redaction: Redaction::default(),                 // replaces env redaction (the two functions: target predicate and redaction)
 })?;
+// ProcessChain has only Serialize and cannot be read from JSON. Its fields are private; read its contents through the accessors
 // chain.processes()[0] is the target, the rest are ancestors
-// chain.truncated: Option<Truncated>. The reason the sequence was cut off: enum Truncated { MaxAncestors, AncestorExited, Unavailable }
-// chain.boot_uuid: String. The collection side obtains kern.bootsessionuuid
+// chain.truncated() -> Option<Truncated>. The reason the sequence was cut off: enum Truncated { MaxAncestors, AncestorExited, Unavailable }
+// chain.boot_uuid() -> &str. The collection side obtains kern.bootsessionuuid
+// ProcessChain::from_collected(processes, boot_uuid, truncated): the only function that builds a chain outside the collect entry points. The app's code states "these values were collected from the OS by this process". Not for building a chain from values received from outside
 // p.code_signing: Option<CodeSigning> (None: not collected). CodeSigning { Verified(VerifiedSignature), Failed(FailureReason), Unsigned, NotChecked }. FailureReason { Replaced, Missing, Other }
 // VerifiedSignature { identifier, cdhash, signer: Signer, runtime: RuntimeState, entitlements, bundle_id, verified_from: VerifiedFrom }. Signer { AdHoc { linker_signed }, Certificate { chain, root: Root } }. Root { Apple { team_id }, AppleIssued { team_id, kind: CertificateKind }, Other }. CertificateKind { DeveloperId { notarized }, MacAppStore, Development, Other }. RuntimeState { hardened_runtime, platform_binary, debugged } (the kernel's dynamic status). VerifiedFrom { Disk, RunningCode }
 // code_signing.mark(): Apple / DeveloperIdNotarized / DeveloperId / MacAppStore / Development / AppleIssuedOther / OtherCertificate / Adhoc / Failed / Unsigned / NotChecked. VerifiedSignature::team_id() returns a value only when the root is Apple or AppleIssued
@@ -677,7 +682,7 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // ProcessInfo holds digest: Option<String> and path_meta: Option<PathMeta>. PathMeta { owner_uid: u32, writable_by_user: bool } (used for deciding the class of path)
 // ProcessInfo.responsible: Option<ProcessIdentity>. The responsible process is held as the identification of the individual process rather than a pid
 // VerifiedSignature.bundle_id: Option<String> (from kSecCodeInfoPList. Used for matching; what BinaryPin.bundle_id is matched against). ProcessInfo.bundle (read by walking up from the executable path to the .app) is for display
-// ProcessIdentity (the pinned value of process) holds boot_uuid: String. Created with Identity::process_identity(&self, boot_uuid), passing ProcessChain.boot_uuid as boot_uuid
+// ProcessIdentity (the pinned value of process) holds boot_uuid: String. Created with Identity::process_identity(&self, boot_uuid), passing chain.boot_uuid() as boot_uuid
 
 // Strength (shared types in procline-core). Which item has which class is held by Vocabulary, not by ProcessInfo items. depth is a UI concept and has no type
 enum Strength { Strong, Medium, Weak }               // class (decided by the item from the value)
@@ -733,8 +738,9 @@ policy.add_grant(saved);                             // puts it into the in-memo
 // policy.remove_grant(id) / policy.grants() -> impl Iterator<Item = &Grant>: used for cleanup
 
 // Evaluation
-let tagged = policy.tag(&chain);                     // tags attached to each process (also used for display). TaggedChain borrows only the vocabulary and the chain, not the policy
-// tagged.undecidable_tags: BTreeSet<String>. Tags whose presence could not be decided on a cut-off sequence (the approval UI shows them distinguished from "not attached")
+let tagged = policy.tag(&chain);                     // tags attached to each process (also used for display). TaggedChain borrows only the chain, not the policy. Only Policy::tag can create it, and its fields are private
+// tagged.chain() -> &ProcessChain. tagged.tags() -> &[BTreeSet<String>] (indexed in step with chain.processes())
+// tagged.undecidable_tags() -> &BTreeSet<String>. Tags whose presence could not be decided on a cut-off sequence (the approval UI shows them distinguished from "not attached")
 let decision = policy.evaluate(&tagged, &Target::key("github/token"), &ctx);  // applies advance to the adopted grant and returns the new version (does not change memory). The app serializes evaluate → persisting → add_grant (running them concurrently can consume uses beyond the limit)
 if let Some(grant) = &decision.updated_grant {
     // sign and persist, and after the write succeeds replace it with policy.add_grant(grant.clone()), then hand over the value

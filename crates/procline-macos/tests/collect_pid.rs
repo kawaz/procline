@@ -99,7 +99,7 @@ fn own_process_has_the_always_collected_items() {
     // The kernel lists the effective gid first in the credential's groups.
     assert_eq!(credentials.groups.first().map(|g| g.id), Some(egid));
     assert_eq!(
-        chain.boot_uuid,
+        chain.boot_uuid(),
         command_output("/usr/sbin/sysctl", &["-n", "kern.bootsessionuuid"])
     );
     // `EnvPolicy::None` (the default) collects no environment at all.
@@ -129,7 +129,7 @@ fn parent_is_second_and_linked_by_unique_id() {
 fn chain_reaches_launchd_or_ends_where_the_lineage_breaks() {
     let chain = collect_pid(own_pid(), &options()).unwrap();
     let last = chain.processes().last().unwrap();
-    match chain.truncated {
+    match chain.truncated() {
         None => assert_eq!(last.identity.pid, 1),
         Some(Truncated::AncestorExited) => {
             let ppid: i32 = command_output(
@@ -155,7 +155,7 @@ fn chain_reaches_launchd_or_ends_where_the_lineage_breaks() {
 fn launchd_is_the_root() {
     let chain = collect_pid(1, &options()).unwrap();
     assert_eq!(chain.processes().len(), 1);
-    assert_eq!(chain.truncated, None);
+    assert_eq!(chain.truncated(), None);
     let launchd = target(&chain);
     assert!(launchd.identity.unique_id.is_some());
     assert_eq!(launchd.path.as_deref(), Some(Path::new("/sbin/launchd")));
@@ -189,7 +189,7 @@ fn max_ancestors_bounds_the_ancestors() {
         opts.max_ancestors = max;
         let chain = collect_pid(own_pid(), &opts).unwrap();
         assert_eq!(chain.processes().len(), max + 1);
-        assert_eq!(chain.truncated, Some(Truncated::MaxAncestors));
+        assert_eq!(chain.truncated(), Some(Truncated::MaxAncestors));
     }
 }
 
@@ -448,11 +448,81 @@ fn platform_binary_env_is_not_readable() {
     assert_eq!(info.env, None);
 }
 
-// 収集結果は JSON に書き出して読み戻すと元と等しい (承認画面やルールの保存に JSON で渡しても情報が落ちない)。署名の証明書や entitlements を含む実データで確かめる。
+// 収集結果を JSON に書き出した形 (表示、ログ、他のプロセスへの受け渡しに使う形) を、署名の証明書を含む実データで確かめる。列は processes / boot_uuid / truncated の 3 つのキーだけを持ち、processes は列と同じ数と順で、各行は ProcessInfo の全 field をキーに持つ (取れなかった項目も null で書き、キーを落とさない)。署名は state と mark を並べ、証明書の連なりは収集した枚数のまま、DER は文字列 (base64url) で書く。ProcessChain は JSON から読めない (評価に渡す chain は評価するプロセスが自分で収集したものに限る) ので、書き出した値を収集した値と突き合わせる。失敗のメッセージに env や証明書のバイト列を出さないよう、比べるのはキー、識別子、印、枚数だけにする。
 #[test]
-fn chain_round_trips_through_json() {
+fn chain_is_written_to_json_in_the_shape_of_the_type() {
+    const PROCESS_KEYS: [&str; 14] = [
+        "argv",
+        "bundle",
+        "code_signing",
+        "credentials",
+        "cwd",
+        "digest",
+        "env",
+        "icon_png",
+        "identity",
+        "name",
+        "path",
+        "path_meta",
+        "responsible",
+        "tty",
+    ];
+    let keys = |value: &serde_json::Value| -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
     let chain = collect_pid(own_pid(), &options()).unwrap();
-    let json = serde_json::to_string(&chain).unwrap();
-    let back: ProcessChain = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, chain);
+    let json = serde_json::to_value(&chain).unwrap();
+    assert_eq!(keys(&json), ["boot_uuid", "processes", "truncated"]);
+    assert_eq!(json["boot_uuid"], chain.boot_uuid());
+    assert_eq!(
+        json["truncated"],
+        serde_json::to_value(chain.truncated()).unwrap()
+    );
+    let written = json["processes"].as_array().expect("processes is an array");
+    assert_eq!(written.len(), chain.processes().len());
+    let mut certificates = 0;
+    for (index, (row, info)) in written.iter().zip(chain.processes()).enumerate() {
+        assert_eq!(keys(row), PROCESS_KEYS, "process {index}");
+        assert_eq!(row["identity"]["pid"], info.identity.pid, "process {index}");
+        let Some(signing) = &info.code_signing else {
+            assert_eq!(
+                row["code_signing"],
+                serde_json::Value::Null,
+                "process {index}"
+            );
+            continue;
+        };
+        assert_eq!(
+            row["code_signing"]["mark"],
+            serde_json::to_value(signing.mark()).unwrap(),
+            "process {index}"
+        );
+        assert!(row["code_signing"]["state"].is_string(), "process {index}");
+        if let CodeSigning::Verified(signature) = signing
+            && let Signer::Certificate {
+                chain: collected, ..
+            } = &signature.signer
+        {
+            let chain_json = row["code_signing"]["signer"]["chain"]
+                .as_array()
+                .expect("the certificate chain is an array");
+            assert_eq!(chain_json.len(), collected.len(), "process {index}");
+            assert!(
+                chain_json
+                    .iter()
+                    .all(|certificate| certificate["der"].is_string()),
+                "process {index}"
+            );
+            certificates += collected.len();
+        }
+    }
+    // 祖先には Apple の証明書で署名されたもの (launchd、シェル) が入るので、証明書の形を少なくとも 1 枚は確かめている。
+    assert!(certificates > 0);
 }

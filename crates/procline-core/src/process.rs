@@ -6,18 +6,20 @@ use serde::{Deserialize, Serialize};
 use crate::signature::{Bundle, CodeSigning};
 
 /// The target process first, followed by its ancestors up to launchd.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Evaluation takes what a chain holds as facts, so a chain is only built from values the evaluating process collected itself: by the collect entry points, or by `ProcessChain::from_collected` in the application's code. It cannot be read from JSON; it is written to JSON (`Serialize`) for display, logs, dumps and handing to another process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessChain {
     processes: Vec<ProcessInfo>,
-    /// The boot UUID (`kern.bootsessionuuid`) of the system the chain was collected on; `Identity::process_identity` takes it.
-    pub boot_uuid: String,
-    /// Why the ancestor walk stopped before reaching the root; `None` when it reached the root. On a truncated chain, a grant with conditions on the ancestors that does not match cannot be decided; one that matches also matches the whole chain.
-    pub truncated: Option<Truncated>,
+    boot_uuid: String,
+    truncated: Option<Truncated>,
 }
 
 impl ProcessChain {
-    /// Builds a chain from the target and its ancestors in order, with the boot UUID of the system they run on.
-    pub fn new(
+    /// Builds a chain from the target and its ancestors in order, with the boot UUID of the system they run on and why the walk stopped before the root.
+    ///
+    /// The caller states that these values were collected from the OS by this process: the collect entry points and tests use it. Do not use it to build a chain from values received from outside.
+    pub fn from_collected(
         processes: Vec<ProcessInfo>,
         boot_uuid: String,
         truncated: Option<Truncated>,
@@ -33,10 +35,20 @@ impl ProcessChain {
     pub fn processes(&self) -> &[ProcessInfo] {
         &self.processes
     }
+
+    /// The boot UUID (`kern.bootsessionuuid`) of the system the chain was collected on; `Identity::process_identity` takes it.
+    pub fn boot_uuid(&self) -> &str {
+        &self.boot_uuid
+    }
+
+    /// Why the ancestor walk stopped before reaching the root; `None` when it reached the root. On a truncated chain, a grant with conditions on the ancestors that does not match cannot be decided; one that matches also matches the whole chain.
+    pub fn truncated(&self) -> Option<Truncated> {
+        self.truncated
+    }
 }
 
 /// Why the ancestor walk of a chain stopped before reaching the root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Truncated {
     /// The walk reached `max_ancestors` of the collect options.
@@ -48,7 +60,7 @@ pub enum Truncated {
 }
 
 /// What was collected about one process. Items that could not be collected are empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessInfo {
     pub identity: Identity,
     pub credentials: Option<Credentials>,
@@ -73,7 +85,7 @@ pub struct ProcessInfo {
 }
 
 /// Attributes of the file at the executable path that decide how much the path pins down the code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct PathMeta {
     pub owner_uid: u32,
     /// The user running the process can replace the file: it can write the file itself or any directory on the path to it.
@@ -81,7 +93,7 @@ pub struct PathMeta {
 }
 
 /// Identifiers that pin down one process stronger than a pid.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Identity {
     /// Present only for the connected peer.
     pub audit_token: Option<AuditToken>,
@@ -93,7 +105,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// The identifiers that make up the pin value of the `process` matcher item, with the boot UUID of the chain (`ProcessChain.boot_uuid`).
+    /// The identifiers that make up the pin value of the `process` matcher item, with the boot UUID of the chain (`ProcessChain::boot_uuid`).
     pub fn process_identity(&self, boot_uuid: &str) -> ProcessIdentity {
         ProcessIdentity {
             boot_uuid: boot_uuid.to_owned(),
@@ -120,7 +132,7 @@ pub struct ProcessIdentity {
 }
 
 /// Opaque audit token of a connected peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct AuditToken(pub [u32; 8]);
 
 /// Process start time.
@@ -131,7 +143,7 @@ pub struct StartTime {
 }
 
 /// uid / gid / groups. Matching uses the numbers, names are for display.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Credentials {
     pub uid: NamedId,
     pub gid: NamedId,
@@ -139,7 +151,7 @@ pub struct Credentials {
 }
 
 /// A numeric ID, its representative name, and every name that resolves to the ID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NamedId {
     pub id: u32,
     /// The representative name from `getpwuid_r` or `getgrgid_r`, if the ID resolves.

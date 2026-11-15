@@ -52,7 +52,7 @@ impl fmt::Debug for CollectOptions {
     }
 }
 
-/// The boot UUID of the running system (`kern.bootsessionuuid`): a new value at every boot. The same value as `ProcessChain.boot_uuid` of the collections made during this boot.
+/// The boot UUID of the running system (`kern.bootsessionuuid`): a new value at every boot. The same value as `ProcessChain::boot_uuid` of the collections made during this boot.
 pub fn boot_session_uuid() -> io::Result<String> {
     sys::proc::boot_session_uuid()
 }

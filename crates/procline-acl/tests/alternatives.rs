@@ -98,7 +98,7 @@ fn policy(vocab: &Vocabulary, tags: Vec<Tag>) -> Policy<'_> {
 /// The tags carried by each process, as names.
 fn carried<'t>(tagged: &'t TaggedChain<'_>) -> Vec<Vec<&'t str>> {
     tagged
-        .tags
+        .tags()
         .iter()
         .map(|tags| tags.iter().map(String::as_str).collect())
         .collect()
@@ -112,7 +112,7 @@ fn with_argv(process: ProcessInfo, argv: &[&str]) -> ProcessInfo {
 }
 
 fn truncated(processes: Vec<ProcessInfo>) -> ProcessChain {
-    ProcessChain::new(processes, BOOT.to_owned(), Some(Truncated::MaxAncestors))
+    ProcessChain::from_collected(processes, BOOT.to_owned(), Some(Truncated::MaxAncestors))
 }
 
 fn invalid<T: std::fmt::Debug>(result: Result<T, BuildError>, key: &str) {
@@ -422,7 +422,7 @@ fn a_tag_with_several_definitions_is_carried_when_one_matches() {
         carried(&tagged),
         vec![vec![], vec!["terminal-app"], vec!["terminal-app"], vec![]]
     );
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
     // 同名のタグを要求する subject も、どちらの定義で付いたかを問わない。
     let in_terminal = Subject {
         ancestors: vec![AncestorMatch {
@@ -468,12 +468,15 @@ fn several_definitions_combine_in_three_values() {
     let cut = truncated(vec![named(2, "sh"), named(1, "zsh")]);
     let tagged = policy.tag(&cut);
     assert_eq!(carried(&tagged), vec![vec!["tool"], vec![]]);
-    assert_eq!(tagged.undecidable_tags, BTreeSet::from(["tool".to_owned()]));
+    assert_eq!(
+        tagged.undecidable_tags(),
+        &BTreeSet::from(["tool".to_owned()])
+    );
     // 完全な列なら claude がいないことは確定し、zsh には付かないと決まる。
     let complete = chain(vec![named(2, "sh"), named(1, "zsh")]);
     let tagged = policy.tag(&complete);
     assert_eq!(carried(&tagged), vec![vec!["tool"], vec![]]);
-    assert!(tagged.undecidable_tags.is_empty());
+    assert!(tagged.undecidable_tags().is_empty());
 }
 
 // タグを条件にしたときの強さは定義のうち最も弱いもの。強 (署名) と中 (digest) の定義なら中、強と ancestors だけの定義なら弱 (その定義は自身を縛らずにタグを付ける)。強だけなら強。

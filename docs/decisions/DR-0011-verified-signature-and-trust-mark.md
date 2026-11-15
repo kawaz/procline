@@ -170,7 +170,8 @@ pub enum Mark {
 {"state": "not_checked", "mark": "not_checked"}
 ```
 
-- 型の形をそのまま写す (state で分け、当てはまらない要素はキーごと無い)。`mark` は `CodeSigning::mark()` の値を書き出し、読み込みは事実から決め直して一致しなければエラーにする
+- 型の形をそのまま写す (state で分け、当てはまらない要素はキーごと無い)。`mark` は `CodeSigning::mark()` の値を書き出す
+- これは書き出しの形で、`CodeSigning` は JSON から読めない (収集した事実の型は `Deserialize` を持たない。[DR-0014](DR-0014-chain-trust-boundary-and-caller-supplied-values.md))
 - バイト列は base64url (padding なし)、enum の値は snake_case (今の決まりと同じ)
 - 証明書の `summary` は、Security framework が証明書から作る subject の要約 (`SecCertificateCopySubjectSummary`) で、表示専用 (subject は署名する側が書けるので判定に使わない)。要約を作れない証明書 (subject が空のもので観測) では null (`Certificate.summary: Option<String>`)
 

@@ -151,7 +151,7 @@ impl Matching<'_> {
                 }
             }
             let Some(hit) = found else {
-                let truth = if saw_unknown || self.chain.truncated.is_some() {
+                let truth = if saw_unknown || self.chain.truncated().is_some() {
                     Truth::Unknown
                 } else {
                     Truth::False
@@ -171,7 +171,7 @@ impl Matching<'_> {
         };
         let target = MatchTarget {
             info: &self.chain.processes()[index],
-            boot_uuid: &self.chain.boot_uuid,
+            boot_uuid: self.chain.boot_uuid(),
         };
         let matcher = matcher.as_ref();
         match self.placeholders {
@@ -188,7 +188,7 @@ impl Matching<'_> {
 ///
 /// A tag that is `Unknown` at some process (the chain is truncated and the missing ancestors could make it match) goes into `undecidable_tags`.
 pub(crate) fn tag_chain<'c>(
-    vocab: &'c Vocabulary,
+    vocab: &Vocabulary,
     subjects: &[(String, Subject)],
     definitions: &[Tag],
     chain: &'c ProcessChain,
@@ -211,12 +211,7 @@ pub(crate) fn tag_chain<'c>(
             }
         }
     }
-    TaggedChain {
-        vocab,
-        chain,
-        tags,
-        undecidable_tags,
-    }
+    TaggedChain::new(chain, tags, undecidable_tags)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -328,9 +323,9 @@ impl<'a> ChainTags<'a> {
         tagged: &'a TaggedChain<'_>,
     ) -> Self {
         Self {
-            tags: &tagged.tags,
-            undecidable: &tagged.undecidable_tags,
-            tagger: Tagger::new(vocab, subjects, definitions, tagged.chain),
+            tags: tagged.tags(),
+            undecidable: tagged.undecidable_tags(),
+            tagger: Tagger::new(vocab, subjects, definitions, tagged.chain()),
         }
     }
 }
@@ -425,7 +420,7 @@ mod tests {
     }
 
     fn chain(processes: Vec<ProcessInfo>, truncated: Option<Truncated>) -> ProcessChain {
-        ProcessChain::new(processes, "BOOT".to_owned(), truncated)
+        ProcessChain::from_collected(processes, "BOOT".to_owned(), truncated)
     }
 
     fn named(name: &str) -> AncestorMatch {

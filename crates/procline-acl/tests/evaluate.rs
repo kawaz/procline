@@ -476,7 +476,7 @@ fn a_false_state_condition_only_misses() {
 }
 
 fn truncated(processes: Vec<procline_core::ProcessInfo>) -> ProcessChain {
-    ProcessChain::new(
+    ProcessChain::from_collected(
         processes,
         common::BOOT.to_owned(),
         Some(Truncated::AncestorExited),
@@ -592,7 +592,7 @@ fn a_tag_with_ancestors_is_undecidable_only_where_it_is() {
     let cut = truncated(vec![named(3, "sh"), named(2, "zsh")]);
     let tagged = policy.tag(&cut);
     // zsh-in-claude は zsh (index 1) で判定できないが、対象 (sh) では自身の条件で外れる。
-    assert!(tagged.undecidable_tags.contains("zsh-in-claude"));
+    assert!(tagged.undecidable_tags().contains("zsh-in-claude"));
     let decision = policy.evaluate(&tagged, &target(), &now());
     assert_eq!(decision.undecidable, vec!["sh".to_owned()]);
     assert_eq!(decision.effect, Effect::Allow);

@@ -24,8 +24,8 @@ kawaz の提案 (2026-11-15): `procline <pid>` で収集の結果がそのまま
 
 ## 決めること
 
-- **置き場**: 入口の crate (`procline`) に bin を足すと、収集だけを使うアプリにも ACL の crate が入る (提案中の DR-0013 と逆向き)。CLI は別の crate (`procline-cli`、コマンド名は `procline`) にして、`procline` と `procline-acl` に依存させる案
-- **照合の対象**: CLI が自分で集めた列だけにするか、保存した JSON の列にも照合できるようにするか。後者は「評価に渡せる列は自分で収集したものに限る」(提案中の DR-0014、QUESTIONS の HO-Q1 / HO-Q2) と衝突する。前者なら収集した型の読み込みは要らない
+- **置き場**: 入口の crate (`procline`) に bin を足すと、収集だけを使うアプリにも ACL の crate が入る (DR-0013 と逆向き)。CLI は別の crate (`procline-cli`、コマンド名は `procline`) にして、`procline` と `procline-acl` に依存させる案
+- **照合の対象**: CLI が自分で集めた列だけにするか、保存した JSON の列にも照合できるようにするか。後者は [DR-0014](../decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md) (評価に渡せる列は自分で収集したものに限り、収集した事実の型は JSON から読めない) と衝突する。前者なら収集した型の読み込みは要らない
 - **CLI の形**: サブコマンド、`--help`、補完は reference の `cli-design/preferences` に従う。`procline <pid>` を既定の動作にするか、`procline collect <pid>` にするか
 - **出力**: 既定で env を出さない、証明書の DER を出すか要約だけにするか、`--digest` / `--all-names` / `--no-signature` の扱い
 - **配り方**: 署名 (hardened runtime) と配布 (homebrew tap) をいつ入れるか
