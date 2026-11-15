@@ -1,5 +1,6 @@
 //! The code signature of running processes: the Security framework calls `procline_core::verify` needs, for one process each.
 
+use std::cell::OnceCell;
 use std::time::{Duration, Instant};
 
 use procline_core::verify::{self, Lookup, Requirement, SigningCalls, SigningInfo};
@@ -8,24 +9,21 @@ use security_framework::os::macos::code_signing::{SecCode, SecRequirement};
 
 use crate::sys::security::{self, Guest};
 
-/// Every requirement of `Requirement::ALL`, compiled once per collection. A requirement that failed to compile keeps the status of its compilation, which its checks return.
-struct Requirements(Vec<(Requirement, Result<SecRequirement, i32>)>);
+/// The requirements of `Requirement::ALL` (in that order), each compiled the first time a check needs it and kept for the rest of the collection, so a collection compiles each at most once and none when nothing is verified (a budget already used up, ad-hoc code only). A requirement that failed to compile keeps the status of its compilation, which its checks return.
+#[derive(Default)]
+struct Requirements([OnceCell<Result<SecRequirement, i32>>; Requirement::ALL.len()]);
 
 impl Requirements {
-    fn compile() -> Self {
-        Self(
-            Requirement::ALL
-                .into_iter()
-                .map(|requirement| (requirement, security::requirement(requirement.text())))
-                .collect(),
-        )
-    }
-
     fn get(&self, requirement: Requirement) -> Result<&SecRequirement, i32> {
-        self.0
+        Requirement::ALL
             .iter()
-            .find(|(r, _)| *r == requirement)
-            .map_or(Err(-1), |(_, compiled)| compiled.as_ref().map_err(|s| *s))
+            .position(|r| *r == requirement)
+            .map_or(Err(-1), |index| {
+                self.0[index]
+                    .get_or_init(|| security::requirement(requirement.text()))
+                    .as_ref()
+                    .map_err(|s| *s)
+            })
     }
 }
 
@@ -75,10 +73,10 @@ impl SigningCalls for Calls<'_> {
     }
 }
 
-/// Verifies the processes in order, with the requirements compiled once. With a `budget`, the processes not yet verified when it runs out (measured from the start of this call) are `NotChecked`.
+/// Verifies the processes in order, each requirement compiled at most once. With a `budget`, the processes not yet verified when it runs out (measured from the start of this call) are `NotChecked`.
 pub(crate) fn verify_chain(guests: &[Guest], budget: Option<Duration>) -> Vec<CodeSigning> {
     let started = Instant::now();
-    let requirements = Requirements::compile();
+    let requirements = Requirements::default();
     let calls: Vec<Calls<'_>> = guests
         .iter()
         .map(|&guest| Calls {
@@ -94,13 +92,52 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::path::{Path, PathBuf};
     use std::process::{Child, ChildStdin, Command, Stdio};
+    use std::time::Duration;
 
     use procline_core::verify::{Lookup, Requirement, SigningCalls, SigningInfo};
-    use procline_core::{CodeSigning, VerifiedFrom};
+    use procline_core::{CodeSigning, Mark, VerifiedFrom};
     use security_framework::os::macos::code_signing::SecCode;
 
     use super::{Calls, Requirements};
     use crate::sys::security::Guest;
+
+    /// The requirements compiled so far, in the order of `Requirement::ALL`.
+    fn compiled(requirements: &Requirements) -> Vec<Requirement> {
+        Requirement::ALL
+            .into_iter()
+            .zip(&requirements.0)
+            .filter(|(_, cell)| cell.get().is_some())
+            .map(|(requirement, _)| requirement)
+            .collect()
+    }
+
+    // requirement のコンパイルは、検証がその requirement を初めて問う時まで遅らせ、収集の残りでは使い回す。検証しない収集がコンパイルの同期の費用を払わないため。
+    // - 予算が 0: どのプロセスも検証しない (NotChecked) ので、1 本もコンパイルしない。
+    // - ad-hoc のコード (このテストのバイナリ。linker の署名): 証明書が無いので requirement を 1 本も問わず、コンパイルもしない。
+    // - Apple 自身のコード (launchd): 根の最初の問い anchor apple が成り立つので、それだけをコンパイルする。同じ Requirements でもう 1 度検証しても増えない (1 本を 2 度コンパイルしない)。
+    #[test]
+    fn a_requirement_is_compiled_when_a_check_first_needs_it() {
+        let own = Guest::Pid(i32::try_from(std::process::id()).unwrap());
+        let launchd = Guest::Pid(1);
+
+        let requirements = Requirements::default();
+        let calls = [own, launchd].map(|guest| Calls {
+            guest,
+            requirements: &requirements,
+        });
+        let results =
+            procline_core::verify::verify_chain(&calls, Some(Duration::ZERO), || Duration::ZERO);
+        assert_eq!(results, [CodeSigning::NotChecked, CodeSigning::NotChecked]);
+        assert_eq!(compiled(&requirements), []);
+
+        assert_eq!(procline_core::verify::verify(&calls[0]).mark(), Mark::Adhoc);
+        assert_eq!(compiled(&requirements), []);
+
+        for _ in 0..2 {
+            assert_eq!(procline_core::verify::verify(&calls[1]).mark(), Mark::Apple);
+            assert_eq!(compiled(&requirements), [Requirement::AnchorApple]);
+        }
+    }
 
     /// Set in the environment of a copy of this test binary that `wait_helper` keeps running.
     const WAIT: &str = "PROCLINE_SIGNING_TEST_WAIT";
@@ -254,7 +291,7 @@ mod tests {
     // macOS 26.5.2 での観測: 3 通りとも、差し替えの前に開いた SecCode は検証した静的なコードを持ち続け、署名の情報は差し替える前のもの (Verified、verified_from は disk、身元は走っているコード) だった。開き直すと、置き換えた 2 通りは running_code に切り替えて Verified、削除は Failed(Missing)。時機は検証の呼び出しの間に差し替えを挟んで作る (時間待ちをしない)。
     #[test]
     fn replacement_between_the_check_and_the_signing_information() {
-        let requirements = Requirements::compile();
+        let requirements = Requirements::default();
         let own = procline_core::verify::verify(&Calls {
             guest: Guest::Pid(i32::try_from(std::process::id()).unwrap()),
             requirements: &requirements,
