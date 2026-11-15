@@ -17,9 +17,11 @@
 - 自動で grant にする基準 ([DR-0008](DR-0008-evaluation-semantics.md)) の「pin に chain や観測値を要する condition」を、`Condition` trait から見分けられない
 - 読み込みと builder で検査を共有する形、エラーが場所を持つかが決まっていない
 
-コードを開いて確かめたこと (findings が推論とした点を含む):
+コードを開いて、または実行して確かめたこと (findings が推論とした点を含む):
 
-- `StartTime` は `deny_unknown_fields` を持たず、`ProcessIdentity` は持つ (`crates/procline-core/src/process.rs`)。serde の derive は、この属性が無い構造体の未知の field を読み飛ばす
+- `StartTime` は `deny_unknown_fields` を持たず、`ProcessIdentity` は持つ (`crates/procline-core/src/process.rs`)。`StartTime` が未知の field を読み飛ばすことは、JSON を読ませて確認した
+- `serde_json::Value` や通常の map に読むと、重複したキーは後のものが残り、読んだ後では重複があったことが分からない (`{"x":1,"x":2}` が `x=2` になることを実行して確認した)
+- `Option<serde_json::Value>` を derive の既定で読み書きすると、`Some(Null)` は `null` と書かれ、読むと `None` になる (serde_json 1.0.154 で実行して確認した)。`ConditionUse.args`、`PinnedCondition.args`、`PinnedCondition.pinned` がこの型
 - procline-acl の依存に `serde` は無いが、procline-core が `serde` に依存するので、procline-acl に足してもビルドに入る crate は増えない
 - `Pinnable` と `BinaryPin` に serde の実装は無い。doc は JSON の形 (`true` が `Pin`、未知の field は拒む) を書いている
 - `Policy` には rule・subject・tag を変える入口も読む入口も無い。一覧を変えるには、新しい一覧を `load_verified` で読み直す
@@ -42,7 +44,7 @@
 | 署名の形式、鍵、保存先、書き込みの原子性 | アプリ (DESIGN-ja「脅威モデルの前提」「保存」) |
 | 保存したものの新しさ (差し戻しの検出) | アプリ。`PolicyVerifier` の実装で行う (Decision の「差し戻し」) |
 | 一覧から消えた rule を指す grant、終わったプロセスを指す grant の削除 | アプリの掃除 ([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md)) |
-| 項目の引数と pin 値 (`serde_json::Value`) の中身の形 | 項目の実装 ([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md)、[DR-0006](DR-0006-structured-values-instead-of-depends.md)) |
+| 項目の引数と pin 値 (`serde_json::Value`) の中身の形 | 項目の実装 ([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md)、[DR-0006](DR-0006-structured-values-instead-of-depends.md))。重複したキーだけは JSON の層の話で、crate が拒む (Decision の 5) |
 | subject 1 つだけを署名なしで読む入口 (CLI の `match`) | CLI の設計 ([issue](../issue/2026-11-15-procline-cli.md))。一覧に包めば今の入口で読める |
 | 収集の結果の JSON | [DR-0014](DR-0014-chain-trust-boundary-and-caller-supplied-values.md) (書き出しだけで、読み戻さない) |
 
@@ -59,43 +61,37 @@
 - 読む入口は今の 2 つ (`Policy::load_verified`、`Policy::load_grant`) で、引数は変えない
 - 書き出しは 2 つ: grant 1 件をバイト列にするものと、一覧 (subject の列、tag の列、rule の列) をバイト列にするもの。一覧を表す型は足さず、3 つの列を受け取る
 - 書き出したバイト列を、同じ語彙・一覧・制約で読むと、書き出す前と同じ値になる (rule、tag、subject、grant のどれも)。テストで保つ
+  - 「同じ値」は列の順序を含む。subject の列、tag の列、rule の列、`conditions`、`targets`、`ancestors` は、書き出した順で読む
+  - 引数と pin 値の「無い」と「JSON の null」の区別も含む (下の 2 と 3)
 - 読み込んだ一覧を取り出す口を `Policy` に置く (rule、名前付きの subject、tag の定義を読むアクセサ)
   - 出典: DESIGN-ja「grant」(承認画面に rule の一覧を出し、選んで grant にする) と [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) (保存した rule も `Policy::grant` に渡す)。今は `Policy` から `&Rule` を得られない
 - 一覧を変える流れ: アプリが、取り出した列に rule (`RuleBuilder::build` の結果) などを足して書き出し、署名して保存し、`load_verified` で読み直す。その後に保存した grant を `load_grant` で検査し直す (DESIGN-ja「保存」)。`Policy` に rule を足す入口は持たない
 
 #### 2. 一覧の JSON
 
-```json
-{
-  "subjects": [ … ],
-  "tags": [ { "tag": "terminal-app", "subject": { … } } ],
-  "rules": [ { "id": "…", "effect": "allow", "subject": { … }, "targets": [ … ], "conditions": [ … ] } ]
-}
-```
+一覧全体の入れ物の形と、名前付きの subject の形は、既存の文書からは決まらない (J1)。J1 のどの案でも変わらないのは次のこと。
 
-- 全体は、種類ごとのキー `subjects` / `tags` / `rules` を持つオブジェクトで、それぞれが配列。要素が何であるかは置かれた場所で決まる
-  - 出典: DESIGN-ja「名前と参照」(「参照が現れる場所ごとに、何を指すかが 1 つに決まっていて、種類が混ざる場所がない」)。要素ごとにキーで種類を見分ける 1 本の配列は、同じ場所に種類の違うものが入る形になる
-  - `tags` が配列なのは、同じ名前の定義を複数置けるため ([DR-0010](DR-0010-or-in-values-and-tag-definitions.md))。`rules` は DESIGN-ja「rule」の形 (`id` を中に持つオブジェクト) の配列
-  - `subjects` の要素の形は J1
+- tag の定義は `{"tag": 名前, "subject": …}`、rule は `id` を中に持つオブジェクト (DESIGN-ja「tag」「rule」)。同じ名前の tag の定義は複数置ける ([DR-0010](DR-0010-or-in-values-and-tag-definitions.md))
 - 形式の版の field は持たない。未知のキーをエラーにする (下の 6) ので、形の違う一覧を黙って読むことは無い
 - 省いた field は、builder で指定しなかった時と同じ値になる
 
   | 場所 | 必須 | 省ける (省いた時の値) |
   |---|---|---|
-  | 一覧 | なし | `subjects`、`tags`、`rules` (空) |
   | subject | なし (ただし全部が空の subject は不正。下の 6) | `match` (空)、`tags` (空)、`ancestors` (空)、`include_self` (`false`) |
   | `ancestors` の要素 | なし (同上) | `match`、`tags` |
   | tag | `tag`、`subject` | なし |
   | rule | `id`、`effect`、`subject` | `targets` (空 = 全対象。DESIGN-ja「rule」)、`conditions` (空) |
 
 - `conditions` の要素は、文字列 (引数なし) か、キーが 1 つだけのオブジェクト (キーが項目の名前、値が引数)。キーが 0 個か 2 個以上のオブジェクトは不正 (DESIGN-ja「名前と参照」の形。1 要素が 1 つの条件)
+  - 引数が無い (`ConditionUse.args` が `None`) なら文字列で書き、引数があるならオブジェクトで書く。引数が JSON の null (`Some(Null)`) の時は `{"名前": null}` と書き、読む時も引数ありとして読む。アプリの項目は null を引数に使えるので、文字列の形 (引数なし) と読み分ける
 
 #### 3. grant の JSON と時刻
 
 - 形は [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md)「grant の形」のとおり。`id`、`rule_id`、`effect`、`subject`、`targets`、`conditions`、`created_at` は必須で、`created_from` は省ける。`conditions` の要素は `key` が必須、`args` と `pinned` は省ける
+- `args` と `pinned` は、キーが無いこと (`None`) と、キーがあって値が null であること (`Some(Null)`) を読み分ける。書き出しは、`None` ならキーを書かず、`Some(Null)` なら `null` を書く。アプリの項目は JSON の null を引数や pin 値として使えるので、読み書きで「無い」に変えない。型に制限は足さない
 - `created_at` は RFC 3339 の文字列。書き出しは UTC で、秒未満は値が持つ分だけ付け、丸めない。読む時は時刻帯の付いた RFC 3339 を受ける。`until` の pin 値と同じ書き方 (`crates/procline-acl/src/conditions.rs`) で、時刻の書き方を 1 つにする
   - 精度を落とさない理由: 読み直した grant の `UntilWithin` は `created_at` を基準に判定する (DESIGN-ja「ルールの作成と強さの制約」)。`created_at` を丸めると、作った時に制約ちょうどだった `until` が、読み直しで制約を超える。採用の順 (作成の古い順、[DR-0008](DR-0008-evaluation-semantics.md)) も変わりうる
-- `created_from` は、grant が作られた経路を表すアプリの語彙の文字列。crate は読まず、付けない (`Policy::grant` は空で返す)。アプリが、返った grant に書いてから署名する
+- `created_from` は、grant が作られた経路を表すアプリの語彙の文字列。crate は意味を解釈せず、`Policy::grant` は付けない (空で返す)。読み込みと書き出しは、文字列としてそのまま運ぶ。アプリが、返った grant に書いてから署名する
   - 出典: [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) の形 (例の値は `approval-ui`) と、経路の語彙はアプリのものであること
 - `rule_id` の rule が一覧に無い grant も受け付ける。grant は自己完結で、`rule_id` は表示と掃除のためのもの ([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))
 
@@ -127,7 +123,9 @@
 - procline-core の `Pinnable<T>` と `BinaryPin` に `Serialize` と `Deserialize` を置く。`BinaryPin` は未知の field を拒む
   - 出典: [DR-0014](DR-0014-chain-trust-boundary-and-caller-supplied-values.md)「rule と grant の値や設定として外から書く型は `Deserialize` を持つ」。同じ分類の `ProcessIdentity`、`StartTime`、`CdHash`、`SessionLevel` は core にあり、core は JSON の形を持つ crate (DESIGN-ja「構成」)。2 つの型の doc も JSON の形を書いている
 - `StartTime` は未知の field を拒む ([DR-0006](DR-0006-structured-values-instead-of-depends.md)「未知の field がある値は不正。`process` の値も同じ」。`start_time` は `process` の値の一部)
-- 未知の field、重複したキー、型の違い、必須の field の欠けを検出するのは、JSON を型に変える読み取りの段 (crate)。項目の実装は、型になった値の規則を検査する
+- 重複したキーは、バイト列を JSON として読む最初の段で、全部の階層について拒む。`serde_json::Value` や通常の map に読んだ後では後のキーだけが残って検出できないので、重複を拒む読み方を crate が持ち、`serde_json::Value` にする前に通す
+  - 項目に `serde_json::Value` のまま渡す引数と pin 値の中も、同じ段を通るので同じく拒む。重複は JSON の層の話で、項目の値の形の知識は要らない
+- 未知の field、型の違い、必須の field の欠けを検出するのは、JSON を型に変える読み取りの段 (crate)。項目の実装は、型になった値の規則を検査する
   - 出典: [DR-0006](DR-0006-structured-values-instead-of-depends.md) の「誰が何をする」の表は、未知の field をエラーにする主体を読み込みとしている
 - procline-acl の型の JSON との行き来は procline-acl が持つ。依存に `serde` を足してよい。derive で書くか手で書くかは実装に任せる (公開の `Deserialize` を持つかは J3)
 
@@ -137,7 +135,7 @@
 
 | 検査 | 出典 |
 |---|---|
-| 一覧・subject・tag・rule・値の中の未知のキーと、重複したキーはエラー | DESIGN-ja「アプリが足す語彙」(「黙って無視すると、そこから作る grant が意図より長く効く」) と同じ理由。`targets` や `conditions` の誤記を読み飛ばすと、条件が落ちて rule が広がる |
+| 一覧・subject・tag・rule・値の中の未知のキーはエラー。重複したキーは、項目の引数の中を含むどの階層でもエラー (上の 5) | DESIGN-ja「アプリが足す語彙」(「黙って無視すると、そこから作る grant が意図より長く効く」) と同じ理由。`targets` や `conditions` の誤記を読み飛ばすと、条件が落ちて rule が広がる |
 | subject の名前の重複、rule の `id` の重複はエラー。tag の名前の重複は正常 | 名前が指すものが 1 つに決まること (DESIGN-ja「名前と参照」)、grant が `rule_id` で rule を指すこと ([DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))、タグの複数定義 ([DR-0010](DR-0010-or-in-values-and-tag-definitions.md)) |
 | 条件が 1 つも無い subject と `ancestors` の要素はエラー | DESIGN-ja「ルールの作成と強さの制約」は、空を builder が検査する値の妥当性に数える。読み込みは同じ値の妥当性を検査する |
 | `targets` の glob が不正ならエラー | builder と同じ検査。評価では不正な glob は何にも当たらないので、`deny` が黙って効かなくなる |
@@ -150,7 +148,7 @@
 順序は、署名の検証 (`SignedKind::Grant`) → 読み取り → 検査。
 
 - subject: inline だけ (文字列の名前は不正)。placeholder が残っていれば不正。項目の登録、値の妥当性、タグ名が一覧にあることは一覧と同じ ([DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md)、[DR-0008](DR-0008-evaluation-semantics.md))
-- `targets` の glob、未知のキー、重複したキーは一覧と同じ
+- `targets` の glob、未知のキー、重複したキー (引数と pin 値の中を含む) は一覧と同じ
 - conditions: `key` が語彙にあること。`age` の key を持つ grant は不正 (`age` は grant を作る時に `until` に直る。[DR-0004](DR-0004-rule-grant-split-and-condition-advance.md))。引数と pin 値の検査は J4
 - `allow` の制約: クラスは上限で、`UntilWithin` の基準時刻は `created_at` (DESIGN-ja「ルールの作成と強さの制約」)
 - 読み込んだ grant の `id` が `Policy` の中の grant と重なっても、`load_grant` はエラーにしない。`add_grant` は同じ `id` を置き換える ([DR-0008](DR-0008-evaluation-semantics.md))。同じ `id` の保存物のどれが新しいかは保存先の話で、アプリの責務
@@ -178,8 +176,8 @@
 
 - 公開のエラーの型は分けたまま (`BuildError`、`LoadError`、`GrantError`)。検査の実装は 1 つを共有し、結果をそれぞれの型に写す
   - 出典: [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md)・[DR-0008](DR-0008-evaluation-semantics.md)・[DR-0009](DR-0009-strength-class-as-specificity.md) が variant を型ごとに名指しする (`LoadError::InvalidValue`、`BuildError::ScopeTooWeak` / `LoadError::ScopeTooWeak` / `GrantError::ScopeTooWeak` など)。「同じ検査をする」は DESIGN-ja「ルールの作成と強さの制約」
-- 読み取りの段 (JSON を型に変える) の失敗は `LoadError::Parse`: JSON の構文、未知のキー、重複したキー、型の違い、必須の field の欠け、4 の「どれにも当たらない値」。`serde_json::Error` が行と桁を持つ
-- 検査の段 (語彙・一覧・制約との照合) の失敗は今の variant。足すのは 2 つ: 名前の重複 (subject の名前、rule の `id`) と、空 (`BuildError::Empty` と同じ名前)
+- 読み取りの段の失敗は `LoadError::Parse`。バイト列を JSON として読む段 (JSON の構文、どの階層でも重複したキー) と、JSON を型に変える段 (未知のキー、型の違い、必須の field の欠け、4 の「どれにも当たらない値」) の両方。`serde_json::Error` が行と桁を持つ
+- 検査の段 (語彙・一覧・制約との照合) の失敗は今の variant。足すのは 2 つ: 名前の重複 (rule の `id`。J1 の b と c では subject の名前も) と、空 (`BuildError::Empty` と同じ名前)
 - `LoadError::InvalidValue` は、項目の規則に反する値と、placeholder を書けない場所の `true`。placeholder を含む rule は自動で grant にならないだけで、エラーではない ([DR-0008](DR-0008-evaluation-semantics.md))
 - `load_grant` の `ScopeTooWeak` の `rule_id` には、grant の `rule_id` を入れる。`load_grant` は 1 件ずつ読むので、どの grant かは呼び出し側が知っている
 - 返すのは最初に見つけた 1 つ
@@ -188,14 +186,28 @@
 
 推奨は 1 つずつ示すが、決定ではない。J2・J4・J5 は既存の DR が書いた型や trait の形に触れるので、採る案によってその DR を改める。
 
-#### J1: 名前付きの subject の形
+#### J1: 一覧の入れ物と、名前付きの subject の形
+
+一覧全体をどんな入れ物にするかと、名前付きの subject をどう書くかは、既存の文書に無い。DESIGN-ja「名前と参照」は、参照が現れる場所ごとに名前の種類が 1 つに決まるという規則で、保存の入れ物の形を決めるものではない。
 
 | 案 | 形 | 意味と帰結 |
 |---|---|---|
-| a | `"subjects": {"名前": { subject }}` (オブジェクト) | 名前が JSON のキーになる。同じ名前を 2 回書くと JSON の重複したキーになり、読み取りの段のエラー (`Parse`) になる |
-| b (推奨) | `"subjects": [{"name": "名前", "subject": { subject }}]` (配列) | tag の定義 (`{"tag": 名前, "subject": …}`) と同じ形に揃う。同じ名前の重複は、読んだ後の検査のエラーになる。`Policy` が持つ形 (名前と subject の組の列) と同じ |
+| a | 種類ごとのキー `subjects` / `tags` / `rules` を持つオブジェクト。`tags` と `rules` は配列で、`subjects` は名前をキーにしたオブジェクト (`{"名前": { subject }}`) | 要素の種類は置かれた場所で決まる。subject の名前が JSON のキーになり、同じ名前を 2 回書くと JSON の重複したキーとして読み取りの段のエラーになる。`Policy` が持つ subject の並び (名前と subject の組の列) の順序を保ちにくい (通常の map はキーの順になる) ので、書いて読むと同じ順になることを別に保証する必要がある |
+| b (推奨) | 種類ごとのキーを持つオブジェクトで、3 つとも配列。subject は `{"name": "名前", "subject": { subject }}` | 要素の種類は置かれた場所で決まる。3 つの種類がどれも「オブジェクトの配列」で、tag の定義 (`{"tag": 名前, "subject": …}`) と同じ形に揃う。順序は配列の順。同じ名前の重複は、読んだ後の検査のエラーになる |
+| c | 要素の配列 1 本で、各要素が `tag` / `rule` / `subject` のどのキーを持つかで種類を示す | tag の今の形と揃い、種類をまたいで書いた順に並べられる。種類の判定が要素ごとに要り、キーを 2 つ持つ要素やどれも持たない要素の扱いを決める必要がある |
 
-- 推奨の理由: 一覧の 3 つの種類が、どれも「オブジェクトの配列」になり、読み方が 1 つで済む。名前の重複を、JSON の構文の扱いに頼らずに値として検査できる
+b の例:
+
+```json
+{
+  "subjects": [ { "name": "…", "subject": { … } } ],
+  "tags": [ { "tag": "terminal-app", "subject": { … } } ],
+  "rules": [ { "id": "…", "effect": "allow", "subject": { … }, "targets": [ … ], "conditions": [ … ] } ]
+}
+```
+
+- 推奨の理由 (提案の理由で、既存の決定からの導出ではない): 要素が何であるかを置き場所だけで決められ、要素ごとの種類の判定が要らない。3 つの種類の読み方が 1 つで済み、列の順序と名前の重複を、JSON の構文の扱いに頼らずに値として扱える
+- a と b では、種類ごとのキーは省ける (省いた時は空)
 
 #### J2: placeholder (`true`) をどの `MatchValue` にするか
 
@@ -242,6 +254,7 @@ rule の引数の検査 (`Condition::validate_args`) は grant には使えな�
 | c | trait を変えず、自動の対象を「condition を 1 つも持たない rule」に狭める | trait は変わらない。**[DR-0008](DR-0008-evaluation-semantics.md) の基準と衝突する**: 状態型の condition だけを持つ手書きの `deny` (時間帯だけの拒否など) が、承認を経ないと効かなくなる |
 
 - 推奨の理由: 見分けたい 2 つは「この condition が grant にどんな pin 値を持つか」という 1 つの性質から決まる。1 つの method で、読み込みと評価の両方から組み込みの名前の名指しが消える。b は同じ trait を 2 回に分けて変えることになる
+- a の制約: 「採用のたびに変わる」は項目ごとに決まった分類で、pin 値を見ない。`Condition::advance` の結果が pin 値によって変わる項目 (ある値では変わり、ある値では変わらない) では、採用の順に対して近似になる。pin 値を受け取って答える形の method にすれば grant ごとに正確になるが、評価のたびに、採用しない grant についても項目を呼ぶことになり、自動の対象の判定 (読み込みの時で、pin 値がまだ無い) には使えない
 - a と b に共通の帰結: 引数だけから pin 値を作る状態型の condition (組み込みには無い) は、自動の対象から外れる。[DR-0008](DR-0008-evaluation-semantics.md) の文言「pin に chain や観測値を要する condition」より対象がわずかに狭くなるので、文言を「pin 値を持つ condition」に改める
 - この分岐は `Condition` trait の変更で、JSON の形 (J1〜J3) とは独立に裁定できる
 
@@ -271,7 +284,6 @@ rule の引数の検査 (`Condition::validate_args`) は grant には使えな�
 
 | 案 | 不採用理由 |
 |---|---|
-| 一覧を要素の配列 1 本にし、各要素が `tag` / `rule` / `subject` のどのキーを持つかで種類を見分ける | 同じ場所に種類の違うものが入る形になる (DESIGN-ja「名前と参照」が避けている形)。種類の判定が要素ごとに要る |
 | 一覧に形式の版の field を置く | 未知のキーをエラーにするので、形の違う一覧を黙って読むことは無い。今の要件に、版で読み方を変える場面が無い |
 | 項目が JSON の値を自分で読む (`Matcher` に JSON を受け取る method を足す) | `MatchValue` は閉じた集合なので、項目に読ませても書ける形は増えない。同じ JSON が key ごとに別の意味に読まれうる。trait の method とアプリの実装の義務が増える |
 | `MatchValue` に、項目が自由に使える値 (`serde_json::Value`) を持つ variant を足す | アプリの項目が独自の構造を書けるようになるが、型が増え、その variant の列・placeholder・クラスの規則を決める必要がある。今それを要する項目は無い |
@@ -293,16 +305,14 @@ rule の引数の検査 (`Condition::validate_args`) は grant には使えな�
 - 保存したものの新しさを確かめるかどうかと、その方法は、アプリの `PolicyVerifier` の実装で決まる。crate の入口と JSON は、それに関わる値を持たない
 - 一覧を手で書く時、未知のキー、重複したキー、条件の無い subject、重複した名前はエラーになる。読み取りの段のエラーは行と桁を持つ
 - 値の形を足す時は、オブジェクトのキーが既存の形と重ならないことが条件になる
-- 項目の引数と pin 値 (`serde_json::Value`) の中の重複したキーは、crate は検出しない (項目が読む値で、crate は形を知らない)
-- テストで保つ性質: 書き出して読むと同じ値になる。未知のキー・重複・空を含む一覧と grant を拒む。自動の grant が、同じ一覧の読み直しで同じ値になる
+- 重複したキーを拒む読み方を crate が持つ。項目の引数と pin 値 (`serde_json::Value`) の中の重複したキーも、項目に渡る前に拒まれる
+- テストで保つ性質: 書き出して読むと同じ値になる (列の順序と、引数・pin 値の「無い」と null の区別を含む)。未知のキー・空を含む一覧と grant を拒む。重複したキーを、項目の引数と pin 値の中を含むどの階層でも拒む。自動の grant が、同じ一覧の読み直しで同じ値になる
 - 採られた時に直す所:
   - コード: `crates/procline-acl/src/policy.rs` (2 つの入口、アクセサ、書き出し、`LoadError`、`rules` の未使用の印)、`crates/procline-core/src/pin.rs` と `binary.rs` (serde)、`process.rs` (`StartTime`)、`crates/procline-acl/Cargo.toml` (`serde`)。J2 の a なら `subject.rs`・`matchers.rs`・`builder.rs`。J4 の b と J5 の a・b なら `vocabulary.rs`・`conditions.rs`・`crates/procline-acl-macos/src/os_items.rs`、J5 の a なら `policy.rs` の採用の順
   - DESIGN-ja / DESIGN: 「保存」(一覧の形、書き出し、自動の grant、新しさの責務)、「項目の登録」(未知の field を検出する段を読み取りにし、エラーを `Parse` にする)、「matcher」(`responsible` の値の形、アプリの項目が書ける値)、「grant」(`created_at` の書き方、`created_from` の意味)、「API の骨格」
   - DR: [DR-0014](DR-0014-chain-trust-boundary-and-caller-supplied-values.md) の「外から書く型」の列挙に `Pinnable` と `BinaryPin` を足す。J2 の a なら [DR-0007](DR-0007-pin-placeholders-and-ordered-ancestors.md) の「型の形」、J4 の b と J5 の a・b なら [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) の trait、J5 の a・b なら [DR-0008](DR-0008-evaluation-semantics.md) の基準の文言、J7 の a なら variant を書いている各所
   - issue: [差し戻し](../issue/2026-11-15-grant-and-list-rollback.md) の crate の論点は Decision の 9 で決まる。[消費型の印](../issue/2026-11-09-consumable-condition-marker.md) の 1 つ目の受け入れ条件は J5 の a で決まる。[CLI](../issue/2026-11-15-procline-cli.md) の段 2 は、この読み込みが入った後に形を決める
-- 未決・未観測:
-  - `serde_json::Value` に読んだオブジェクトの重複したキーがどう扱われるか (後のキーが残ると読んでいるが、実行して確かめていない)
-  - `StartTime` が今、未知の field を読み飛ばすこと (derive の属性から読んだもので、実行して確かめていない)
+- 未決:
   - 書き出しの関数とアクセサの名前・署名は、実装の時に決める
   - 一覧を読み直している間の評価を、古い `Policy` で続けるか止めるかは、アプリが決める
 

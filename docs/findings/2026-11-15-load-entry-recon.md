@@ -292,7 +292,14 @@
    - `BuildError` と `LoadError` を分けたまま変換するか、共通の検査エラーを持つか
    - エラーに場所 (どの rule / tag / subject / grant か) を持たせるか
 
+## serde の挙動の観測
+
+リポの外に置いた小さな試験プログラムで実行して確かめた (serde_json 1.0.154、serde の derive)。
+
+- `Option<serde_json::Value>` の field は、`Some(Null)` を書き出すと `null` になり、derive の既定で読み戻すと `None` になる (`None` はキーを書かない設定でも同じ)。キーの省略と null は、既定の読み方では区別できない
+- 重複したキーを持つオブジェクト (`{"x":1,"x":2}`) を `serde_json::Value` や map に読むと、エラーにならず後のキーが残る (`x` は 2)。読んだ後の値からは、重複があったことは分からない
+- `StartTime` は、未知の field を持つ JSON をエラーにせず読む (未知の field は捨てられる)
+
 ## 未観測
 
-- `StartTime` が未知の field を黙って捨てることは、derive の属性から読んだもので、JSON を読ませて確かめてはいない
 - `rule_id` の rule が一覧に無い grant を受け付けてよいかは、文書からの推論で、文書に明記はない
