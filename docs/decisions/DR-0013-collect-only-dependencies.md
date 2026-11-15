@@ -17,11 +17,13 @@ pam-passkey は、祖先の収集と署名の検証を root の PAM モジュー
 |---|---|---|
 | 通常の依存の crate の数 (`cargo tree -e normal`、重複を除く) | 53 | 42 |
 | ビルドの時間 (2 回、wall / user) | 10.49 s / 58.6 s、9.93 s / 57.9 s | 6.81 s / 27.3 s、6.16 s / 26.9 s |
-| バイナリの大きさ | 904,752 バイト | 904,912 バイト |
 | バイナリの中の ACL 側のシンボル (`nm` で `regex`、`globset`、`chrono`、`procline_acl` を含むもの) | 0 (procline-macos と procline-core のものは 304) | 0 |
+| バイナリの大きさ (最初の測定) | 904,752 バイト | 904,912 バイト |
+| バイナリの大きさ (別の commit での再測) | 887,984 バイト | 905,520 バイト |
 
 - A にだけ入る crate は 11: procline-acl と、その依存の regex、regex-automata、regex-syntax、aho-corasick、globset、bstr、log、chrono、iana-time-zone、num-traits。procline-acl 自身は約 4,000 行
-- 収集だけを呼ぶバイナリでは、ACL のコードはリンクの段で落ち、走るコードは A と B で変わらない。違いはビルドの時間と、ビルドに入る (監査の対象になる) crate の数
+- 収集だけを呼ぶバイナリには ACL 側のシンボルが 1 つも無く、ACL のコードはリンクの段で落ちる。走るコードは A と B で変わらない (根拠はシンボルの有無)。違いはビルドの時間と、ビルドに入る (監査の対象になる) crate の数
+- バイナリの大きさは、測った commit によって数 KB〜十数 KB 変わり、ACL の有無による一定の差は見られない。最初の測定は、commit e0b74620 の上の作業コピーを複製したもの (別の worker が編集中だった crates の未 commit の変更を含んでいた可能性があり、どれを含んでいたかは記録していない)。再測は確認の専任が後の commit で行ったもの。大きさが変わった原因は調べていない
 
 アイコンを AppKit 無しで取れるかも観測した。
 

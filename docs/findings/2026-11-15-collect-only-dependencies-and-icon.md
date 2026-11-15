@@ -9,7 +9,8 @@
 - 収集だけを呼ぶ試験用のバイナリで、procline-macos が procline-acl に依存する今の形 (A) と、外した形 (B) を比べた
   - 通常の依存の crate の数は A が 53、B が 42。A にだけ入るのは procline-acl、regex、regex-automata、regex-syntax、aho-corasick、globset、bstr、log、chrono、iana-time-zone、num-traits の 11
   - release で冷えた状態からのビルドは、A が 10.49 s / 9.93 s (wall)、58.6 s / 57.9 s (user)、B が 6.81 s / 6.16 s (wall)、27.3 s / 26.9 s (user)
-  - バイナリの大きさは A が 904,752 バイト、B が 904,912 バイトで、A のバイナリに ACL 側のシンボルは 0 個 (procline-macos と procline-core のシンボルは 304 個)。収集だけを呼ぶバイナリでは ACL のコードはリンクの段で落ちる
+  - A のバイナリに ACL 側のシンボルは 0 個 (procline-macos と procline-core のシンボルは 304 個)。収集だけを呼ぶバイナリでは ACL のコードはリンクの段で落ちる
+  - バイナリの大きさは、最初の測定で A が 904,752 バイト、B が 904,912 バイト、後の commit での再測 (確認の専任) で A が 887,984 バイト、B が 905,520 バイト。測った commit によって数 KB〜十数 KB 変わり、ACL の有無による一定の差は見られない (変わった原因は調べていない)。最初の測定は、commit e0b74620 の上の作業コピーを複製したもので、別の worker が編集中だった crates の未 commit の変更を含んでいた可能性がある (どれを含んでいたかは記録していない)
 - procline-macos の procline-acl を optional にして feature `acl` の後ろに `os_items` を置き、入口 procline の feature `acl` / `icon` から `procline-macos/acl` / `procline-macos/icon` に渡す形 (C) は、target ごとの依存 (`[target.'cfg(target_os = "macos")'.dependencies]`) のままビルドでき、入口から `os_items()` と `icon_png()` を呼べた。feature を指定しない試験用のバイナリの依存は 42 で、両方を指定したものは 53
   - C で `acl` を外すと、`os.*` だけが使う `sys::wake_time_secs` が未使用の警告になった
 - ImageIO (`CGImageSourceCreateWithURL`、`CGImageDestinationCreateWithURL`) だけで、app bundle の `.icns` を PNG にできた (9 回、5 種類の `.icns`)。試験プログラムがリンクしたのは CoreFoundation、ImageIO、CoreGraphics、libSystem だけで、走らせた時に dyld は AppKit を読み込まなかった (UIFoundation は読み込んだ後に遅延に回された)
@@ -19,7 +20,7 @@
 
 ## 実用的な示唆
 
-- ACL の crate を外して得るのは、ビルドの時間 (wall で約 1.5 倍、CPU 時間で約 2 倍の差) と、ビルドに入る crate の数。走るコードは変わらない
+- ACL の crate を外して得るのは、ビルドの時間 (wall で約 1.5 倍、CPU 時間で約 2 倍の差) と、ビルドに入る crate の数。走るコードは変わらない (根拠は ACL 側のシンボルが 0 であること。大きさは commit で揺れるので根拠にしない)
 - feature の受け渡しは、入口の crate から target ごとの依存へそのまま書ける。`acl` を外した時に未使用になる内部の関数にも `cfg` が要る
 - アイコンの取り出しに AppKit は要らない。最初の 1 回は 10〜27 ms かかるので、収集のたびに取るより、アプリのキャッシュに無い時だけ取る形が向く
 
@@ -44,7 +45,8 @@
 | 通常の依存の crate の数 | 53 | 42 |
 | ビルド 1 回目 (wall / user / sys) | 10.49 / 58.61 / 4.97 s | 6.81 / 27.25 / 3.00 s |
 | ビルド 2 回目 (wall / user / sys) | 9.93 / 57.93 / 4.41 s | 6.16 / 26.93 / 2.92 s |
-| バイナリ | 904,752 バイト | 904,912 バイト |
+| バイナリ (最初の測定。commit e0b74620 の上の作業コピー) | 904,752 バイト | 904,912 バイト |
+| バイナリ (後の commit での再測。確認の専任) | 887,984 バイト | 905,520 バイト |
 | ACL 側のシンボル | 0 | 0 |
 
 B の試験用のバイナリを走らせ、自分の列が JSON で出ることを確かめた (列の先頭は自分、親子は unique ID で繋がった)。
