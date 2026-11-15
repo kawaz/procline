@@ -1,6 +1,6 @@
 # DR-0011: コード署名は requirement で検証した事実だけを持ち、検証に成功した時だけ身元を持つ型にする。信頼の印は事実から core の 1 か所で決める
 
-- Status: Accepted
+- Status: Active
 - Date: 2026-11-15
 
 ## Context
@@ -132,7 +132,7 @@ pub enum Mark {
 1. SecCode を得る。接続相手は audit token (`kSecGuestAttributeAudit`)、祖先は pid
 2. requirement 無しの `SecCodeCheckValidity`。`errSecCSUnsigned` (-67062) なら `Unsigned`
 3. 2 か 1 が「実行ファイルを読めない」(100013) か「ディスク上の実行ファイルが走っているものと違う」(-67034) で失敗したら、pid ベース (同じ参照に `kSecGuestAttributeDynamicCode` を足す) で 1 と 2 をやり直す。それも失敗したら `Failed` で、理由は通常の方法の戻り値で分類する (-67034 → `Replaced`、100002 → `Missing`、それ以外 → `Other`)。その他の失敗は pid ベースに切り替えず `Failed`
-4. 成功したら、`SecCodeCopySigningInformation` (署名と動的な情報) で identifier、cdhash (`kSecCodeInfoUnique`)、証明書の連なり、flags、動的な status、entitlements、Info.plist を取る。identifier・cdhash・flags・status のどれかが取れなければ `Failed(Other)`
+4. 成功したら、`SecCodeCopySigningInformation` (署名と動的な情報) で identifier、cdhash (`kSecCodeInfoUnique`)、証明書の連なり、flags、動的な status、entitlements、Info.plist を取る。identifier・cdhash・flags・status のどれかが取れなければ `Failed(Other)`。entitlements の blob (`kSecCodeInfoEntitlements`) があるのに dict の形 (`kSecCodeInfoEntitlementsDict`) で取れない時も `Failed(Other)` (保護を緩める entitlement の有無を確かめられないまま「無い」と言わない。[DR-0012](DR-0012-strength-class-from-protection.md) の保護の状態はこれで決まる)
 5. 証明書が無ければ `AdHoc` (flags の `kSecCodeSignatureLinkerSigned` で linker が付けたものか)。あれば根を `anchor apple` → `anchor apple generic` の順に評価し、`AppleIssued` の時だけ種類を Mac App Store → Developer ID → 開発用の順に評価し、Developer ID の時だけ `notarized` を評価する。requirement の文字列は次に固定する
    - Mac App Store: `anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.9] exists`
    - Developer ID: `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists`

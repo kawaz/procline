@@ -6,7 +6,7 @@
 
 ## ドキュメント
 
-- [DESIGN-ja.md](./docs/DESIGN-ja.md) — 設計 (収集する情報、署名の信頼度、ACL ルールの形と評価、scope)
+- [DESIGN-ja.md](./docs/DESIGN-ja.md) — 設計 (収集する情報、署名の検証と信頼の印、ACL ルールの形と評価、強さのクラスと保護の状態、scope)
 
 ## ライセンス
 

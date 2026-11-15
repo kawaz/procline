@@ -6,7 +6,7 @@ Rust crates that collect information about a process and its ancestors (lineage)
 
 ## Documentation
 
-- [DESIGN.md](./docs/DESIGN.md) — design (collected items, signature trust, ACL rule shape and evaluation, scopes). Japanese original: [DESIGN-ja.md](./docs/DESIGN-ja.md)
+- [DESIGN.md](./docs/DESIGN.md) — design (collected items, signature verification and the trust mark, ACL rule shape and evaluation, strength classes and the protection state, scopes). Japanese original: [DESIGN-ja.md](./docs/DESIGN-ja.md)
 
 ## License
 

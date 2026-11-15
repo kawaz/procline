@@ -9,8 +9,8 @@ procline/
   justfile                  # task runner (lint / test / build / ci / push)
   crates/
     procline/               # 入口。core の型と、ビルドターゲットの OS の collect を再公開する (examples/ に dump と bench)
-    procline-core/          # 収集結果の型、Strength、env の方針と伏せ字、表示用の無害化 (OS 非依存)
-    procline-macos/         # macOS での接続相手と祖先の収集、os.* の語彙 (os_items)
+    procline-core/          # 収集結果の型、Strength、署名の検証の手順と信頼の印 (verify)、env の方針と伏せ字、表示用の無害化 (OS 非依存)
+    procline-macos/         # macOS での接続相手と祖先の収集、Security framework の呼び出し、os.* の語彙 (os_items)
     procline-acl/           # Vocabulary、subject / tag / rule / grant、評価、ルールの作成
   docs/
     DESIGN-ja.md            # 設計の正本

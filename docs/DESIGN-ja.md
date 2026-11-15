@@ -85,9 +85,9 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 1. SecCode を得て(接続相手は audit token、祖先は pid)、requirement 無しで `SecCodeCheckValidity` を呼ぶ。
 2. 実行ファイルを読めない(走っている `sudo` のような setuid のプロセスをユーザ権限から見る時)か、ディスク上の実行ファイルが走っているものと違う時だけ、`kSecGuestAttributeDynamicCode` を足して、カーネルが持つ署名で検証し直す。それも失敗したら `Failed` で、理由は最初の戻り値で決める。
 3. 証明書の根を requirement `anchor apple`(Apple 自身のコード)→ `anchor apple generic`(Apple が発行した証明書)の順に確かめ、Apple が発行した証明書の時だけ、種類を証明書の拡張の OID(`anchor apple generic` と組の requirement)で Mac App Store → Developer ID → 開発用の順に確かめ、Developer ID の時だけ `notarized` を確かめる。
-4. hardened runtime、platform binary、debugged は、カーネルの動的な status(`kSecCodeInfoStatus`)から取る。CodeDirectory の flags には hardened runtime が無いのにカーネルが hardened として扱うコードがある(走っている `sudo` など)ためです。
+4. hardened runtime、platform binary、debugged は、カーネルの動的な status(`kSecCodeInfoStatus`)から取る。CodeDirectory の flags には hardened runtime が無いのにカーネルが hardened として扱うコードがある(走っている `sudo` など)ためです。entitlements の blob があるのに dict の形で取れない時は `Failed`(その他)にします。保護を緩める entitlement の有無を確かめられないまま「無い」と言わないためです。
 
-検証は全部 `kSecCSNoNetworkAccess` で行い、ネットワークを使いません(証明書と公証のオンラインの失効確認はしない)。ディスク全体の静的検査もしません。手順の順序、失敗の分類、印の決定は procline-core に置き、Security framework の呼び出しは procline-macos が渡します。
+検証は全部 `kSecCSNoNetworkAccess` で行い、ネットワークを使いません(証明書と公証のオンラインの失効確認はしない)。ディスク全体の静的検査もしません。手順の順序、失敗の分類、印の決定は procline-core に置き(`procline_core::verify` の `verify` と、予算つきで列を検証する `verify_chain`)、Security framework の呼び出しは procline-macos が `SigningCalls` の実装として渡します(呼び出しと生の戻り値だけを持つ)。requirement は収集ごとに 1 度だけコンパイルします。
 
 **信頼の印**(`CodeSigning::mark()`。上の行から順に当てて最初に当たったもの):
 
@@ -473,9 +473,9 @@ register(key, impl)
    - 観測に失敗した condition(`EvalContext` のその key が `Err(ObserveError)`)を使う grant は、その評価では判定できない。id を `Decision.undecidable` に載せ、許可にも失効にもしない。
    - 寿命型の `check` が偽になった grant は、その評価でその場で失効を確定し、`Decision.expired` に id を載せる。失効は一度確定したら戻らない(時計の巻き戻しや観測の回復で復活しない)。
    - targets が対象に当たらない grant を除く。
-   - `allow` の grant は、自身への条件のクラスを対象のプロセス(保護の状態)で決め直し、その grant の scope が制約の表のそのクラスの条件を満たさなければ採用しない。id を `Decision.too_weak` に載せる(決定の記録: [DR-0012](decisions/DR-0012-strength-class-from-protection.md))。保護のあるビルドで作った grant に、持ち込まれた保護の無い同じ身元のビルドが当たるのを止める。
    - 各 grant の subject を照合し、状態型の `check` を取る。subject の `match` と `tags` は対象自身と、`ancestors` は列を近い側から貪欲に部分列として照合する。
    - 列が途切れている(`ProcessChain.truncated` が `Some`)とき: subject の条件(`match` ∧ `tags` ∧ `ancestors` の部分列)はすべて肯定条件で、列を延ばしても「当たった」が「当たらない」に変わらない(単調)。よって途切れた列で当たった grant は全列でも当たるので、効果の決定に使う。祖先への条件(`ancestors`、またはその定義が `ancestors` を持つタグ。タグが別のタグを参照するときは推移的に辿る)を持ち、対象自身への条件 (`match` と `tags` の自身の部分) は当たったのに、祖先の条件が途切れた列の中で見つからなかった grant は判定できない (自身への条件で外れた grant は全列でも外れるので、判定できなかったとは扱わない)。その id を `Decision.undecidable` に載せ、効果の決定には使わない。subject は当たったが状態型の `check` が偽の grant は、全列でも偽なので判定できなかったとは扱わない。
+   - subject が当たり状態型の `check` も真の `allow` の grant は、自身への条件のクラスを対象のプロセス(保護の状態)で決め直し、その grant の scope が制約の表のそのクラスの条件を満たさなければ採用しない。id を `Decision.too_weak` に載せ、trace に `strength` の項目を残す(決定の記録: [DR-0012](decisions/DR-0012-strength-class-from-protection.md))。保護のあるビルドで作った grant に、持ち込まれた保護の無い同じ身元のビルドが当たるのを止める。`UntilWithin` の基準時刻は grant の `created_at`。当たらなかった grant は採否の対象でないので載せない。
 2. effect を決める。順序は deny > allow > ask。
    - `deny` が 1 つでも当たれば拒否。
    - `allow` が当たれば許可。当たった allow のうち採用するのは 1 件。advance で変わらない grant(永続、または `uses` を持たない)を優先し、同順なら作成の古い順。他の grant で通るのに、限りある `uses` を減らさないため。
@@ -752,7 +752,7 @@ pub struct Decision {
     pub updated_grant: Option<Grant>,    // advance で変わった grant の新版。explain では常に None
     pub expired: Vec<String>,            // この評価で失効が確定した grant の id。evaluate のものをアプリが削除する(explain のものは削除に使わない)
     pub undecidable: Vec<String>,        // 判定できない grant の id(祖先への条件を持ち途切れた列で当たらなかったもの、観測に失敗した condition を使うもの)。効果の決定には使っていない
-    pub too_weak: Vec<String>,           // 対象のプロセスの保護の状態で決め直したクラスでは、scope が制約を満たさないので採用しなかった allow の grant の id(DR-0012)
+    pub too_weak: Vec<String>,           // 当たったが、対象のプロセスの保護の状態で決め直したクラスでは scope が制約を満たさないので採用しなかった allow の grant の id(DR-0012)
 }
 
 // subject の形(procline-acl)
