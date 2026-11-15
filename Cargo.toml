@@ -24,6 +24,7 @@ plist = "1"
 globset = "0.4"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+procline = { path = "crates/procline" }
 procline-core = { path = "crates/procline-core" }
 procline-macos = { path = "crates/procline-macos" }
 procline-acl = { path = "crates/procline-acl" }

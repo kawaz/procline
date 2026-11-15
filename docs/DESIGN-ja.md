@@ -658,7 +658,7 @@ JSON では、バイト列(証明書の DER など)を base64url(padding なし)
 
 ```rust
 // 収集(procline-macos)
-// examples/dump.rs は collect_pid で集めた列を JSON で出す(cargo run -p procline --example dump -- <pid>)
+// procline コマンド(crates/procline-cli)は collect_pid で集めた列を JSON で出す(procline <pid>)
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
     icon: true,

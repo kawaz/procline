@@ -658,7 +658,7 @@ In JSON, byte strings (such as certificate DER) are written as base64url (withou
 
 ```rust
 // Collection (procline-macos)
-// examples/dump.rs prints the chain collected with collect_pid as JSON (cargo run -p procline --example dump -- <pid>)
+// the procline command (crates/procline-cli) prints the chain collected with collect_pid as JSON (procline <pid>)
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
     icon: true,

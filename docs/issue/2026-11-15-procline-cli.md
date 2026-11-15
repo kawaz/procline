@@ -30,7 +30,27 @@ kawaz の提案 (2026-11-15): `procline <pid>` で収集の結果がそのまま
 - **出力**: 既定で env を出さない、証明書の DER を出すか要約だけにするか、`--digest` / `--all-names` / `--no-signature` の扱い
 - **配り方**: 署名 (hardened runtime) と配布 (homebrew tap) をいつ入れるか
 
+## 決めたこと (段 1)
+
+- **置き場**: 別の crate `crates/procline-cli` (package 名 `procline-cli`、バイナリ名 `procline`)。依存は `procline` と `serde_json` だけで、`procline-acl` には直接依存しない (kawaz 裁定 2026-11-15)
+- **コマンドの形**: `procline [options] [--] <pid>` を既定の動作にする。サブコマンドは名前で、pid は数字だけなので、先頭の語で区別でき、段 2 の `match` / 段 3 の `explain` を足しても衝突しない。引数が無ければ `--help` を出す
+- **オプション** (ロングだけ、pid の後ろにも置ける、`--` でオプションを終える):
+
+  | オプション | 中身 | 既定 |
+  |---|---|---|
+  | `--env` | 全部の環境変数を集める (秘密らしい名前の値は伏せる) | 集めない |
+  | `--digest` | 実行ファイルの sha256 | 取らない |
+  | `--all-names` | uid / gid の全部の名前 | 代表の名前だけ |
+  | `--no-signature` | 署名の検証を飛ばす (`code_signing` が null) | 検証する |
+  | `--max-ancestors <N>` (`=` でも渡せる) | 祖先の上限 | 64 |
+  | `--help` / `--version` | グローバルオプション (どの段でも効く) | |
+
+- **パーサ**: 手書き。オプション・サブコマンド・シェルの表 (`src/lib.rs`) を、パーサ、`--help` の節 (Commands / Options / Global options)、補完の 3 者が共有する。clap は使わない (CLI の決まりの節構成を自分で組むことになり、表が二重になるため)
+- **補完**: 段 1 から入れる。`procline completion zsh` が、同じ表から zsh の補完を出す (`source <(procline completion zsh)` で読む)
+- **終了コード**: 成功 0、収集の失敗 1 (原因と次にどうするかを標準エラーに出す)、使い方の誤り 2 (`--help` を案内する)
+- **出力**: アイコンと署名の予算は CLI から選べない (アイコンは取らず、予算は無し)
+
 ## 受け入れ条件
 
-- [ ] 段 1 を入れる (置き場と CLI の形を決めてから)
+- [x] 段 1 を入れる (置き場と CLI の形を決めてから)
 - [ ] 段 2 は、procline-acl の型の読み込みが入った後に、形を決めて入れる

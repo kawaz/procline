@@ -395,6 +395,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "procline-cli"
+version = "0.1.0"
+dependencies = [
+ "procline",
+ "serde_json",
+]
+
+[[package]]
 name = "procline-core"
 version = "0.1.0"
 dependencies = [
