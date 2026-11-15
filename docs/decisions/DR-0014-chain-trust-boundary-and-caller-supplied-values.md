@@ -130,6 +130,7 @@ procline が保証すること / しないこと:
   - UNIX ドメインソケット (socketpair と名前付き) の読み側が `LOCAL_PEERPID` / `LOCAL_PEERTOKEN` で読めるのは、`getsockopt` した時点で相手側の端を最後に送受信 (write / read / sendmsg / recvmsg) に使ったプロセスの pid と、その時点の資格情報 (euid、ruid、pidversion) (同じ uid で、3 種類のソケットと 12 の組で観測)。どのプロセスも送受信していない間は、作ったプロセス (名前付きでは connect したプロセス)。読み手が自分自身を exec しても変わらない
   - そのため、相手の token は要求を書いたプロセスや書いた時の実行イメージと一致するとは限らない。書いた後に相手が exec すれば exec の後の実行イメージと資格情報 (setuid root のプログラムなら euid 0) になり、相手側の端を持つ別のプロセス (fork で引き継いだ子、`SCM_RIGHTS` で受け取ったプロセス) が送受信すればそのプロセスになる。作ったプロセスを後から名指す手段にはならない
   - 相手側の端を持つプロセスが全部終わると、`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` は `ENOTCONN` で失敗する。`LOCAL_PEERCRED` の uid は接続の時の値のまま残る (SOCK_DGRAM の socketpair では取れない)
+  - 相手側の端を別のプロセスがまだ持っている間に、最後に送受信に使ったプロセスが終わると、`LOCAL_PEERPID` はその終わったプロセスの pid を返し続け、`LOCAL_PEERTOKEN` は `EINVAL` で失敗する。その pid が別のプロセスに割り当て直されると、`LOCAL_PEERTOKEN` はソケットで送受信していないそのプロセスの token を返す。pid の一巡は、権限の無いプロセスが 1 分以内に起こせた (SOCK_STREAM の socketpair と名前付きで観測。pid の再利用は socketpair でだけ観測)
 
 ### DESIGN に書くこと
 
@@ -169,7 +170,7 @@ procline が保証すること / しないこと:
   - root から別 uid のプロセスの argv と cwd が取れるか
   - hardened runtime の Developer ID 署名のプロセスが自分の pid で集めた時の所要時間と、列の先頭 (自分) の署名の検証の結果
   - 走っている `sudo` の子として起動されたプロセスが自分の pid で集めた列で、2 番目が `sudo` になること (同じ uid の親子では観測した。親が実効 uid 0 の組は、walk が使う値が uid を問わず読めることだけ観測済み)
-  - UNIX ドメインソケットの相手 (findings `2026-11-15-socketpair-peer-after-fork-exec.md` の未観測): root のプロセスが作り、降格して exec した子が読む組。委譲 (`LOCAL_PEEREPID` が別の pid になる設定)。最後に送受信に使ったプロセスが終わり、相手側の端を別のプロセスがまだ持っている間に読んだ値。観測した以外の syscall と他の版の macOS。`collect_peer` を通した照合
+  - UNIX ドメインソケットの相手 (findings `2026-11-15-socketpair-peer-after-fork-exec.md` の未観測): root のプロセスが作り、降格して exec した子が読む組。委譲 (`LOCAL_PEEREPID` が別の pid になる設定)。名前付きのソケットでの pid の再利用と、pid を得たプロセスが相手側の端の fd を持たない組。観測した以外の syscall と他の版の macOS。`collect_peer` を通した照合
 
 ## 関連
 

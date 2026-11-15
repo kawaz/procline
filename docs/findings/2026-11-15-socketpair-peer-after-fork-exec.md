@@ -1,4 +1,4 @@
-# UNIX ドメインソケットの相手の pid と audit token は、getsockopt した時点で相手側の端を最後に送受信に使ったプロセスを指し、資格情報はその時点の値になる
+# UNIX ドメインソケットの相手の pid と audit token は、getsockopt した時点で相手側の端を最後に送受信に使ったプロセスを指し、資格情報はその時点の値になる。そのプロセスが終わると token は読めず、その pid が再利用されると無関係のプロセスの token が返る
 
 - Date: 2026-11-15
 
@@ -30,6 +30,23 @@ SOCK_STREAM の socketpair、SOCK_DGRAM の socketpair、名前付きの SOCK_ST
 - A が作った直後に自分の端で読んだ相手の pid は A 自身だった (組 2 で fork の前に測った。この時、両方の端を A しか持っていない)
 - pipe の読み側の fd に `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` を呼ぶと、`ENOTSOCK` (errno 38、Socket operation on non-socket) で失敗した。pipe からは、書き込み側を持つプロセスをカーネルに問えない (この点は今回の組では測り直していない。1 回の観測)
 
+### 組 11・12: 相手側の端を最後に送受信に使ったプロセスが終わった後
+
+A が作り、R が片方の端だけを持ち、A と W が相手側の端を持つ。W は相手側の端に 1 バイト write してから終わり、A は相手側の端を持ち続ける (この組では W が終わるまで A は write しない)。SOCK_STREAM の socketpair と名前付きの SOCK_STREAM で組 11 を 4 回ずつ測り、全部で同じ値になった。組 12 は SOCK_STREAM の socketpair で 2 回。`LOCAL_PEERCRED` の uid は全部の時点で 501 (errno 0)。
+
+| 組 | R が読む時点 | `LOCAL_PEERPID` / `LOCAL_PEEREPID` | `LOCAL_PEERTOKEN` |
+|---|---|---|---|
+| 11 | W が write する前 | A | A の token |
+| 11 | W が write した後、W は生きている | W | W の token |
+| 11 | W が終了して親に回収されていない (zombie)、A は相手側の端を持ったまま | W の pid のまま (errno 0) | errno 22 (`EINVAL`) |
+| 11 | W を `waitpid` で回収した後、A は相手側の端を持ったまま | W の pid のまま (errno 0) | errno 22 (`EINVAL`) |
+| 11 | その後 A が相手側の端に write | A | A の token |
+| 12 | W を回収した後、W と同じ数値の pid が別のプロセス (A の子。W とも、このソケットでの送受信とも無関係) に割り当てられ、そのプロセスが生きている | W と同じ数値の pid (errno 0) | その別のプロセスの token。pidversion は元の W と違う (14709315 → 14808958、14916736 → 15016155)。euid 501 |
+
+- 組 12 の pid の再利用は、A が子を同時に 1 つだけ fork し、すぐ終わらせて回収するのを繰り返して起こした。W の pid が再び割り当てられるまでの fork は 1 回目 98,108 回、2 回目 98,374 回で、2 回目は 47.8 秒だった。どちらも利用者の権限 (uid 501) だけで起きた
+- 組 12 で W の pid を得たプロセスは A の子なので、fork で相手側の端の fd を引き継いでいた。そのプロセスはこのソケットで送受信していない
+- 組 11 で `LOCAL_PEERTOKEN` が失敗した時も、`LOCAL_PEERPID` / `LOCAL_PEEREPID` は成功した (W の pid を返した)。相手側の端を持つプロセスが全部終わった組 7 の `ENOTCONN` とは違う値
+
 ## 観測から言える規則
 
 観測した操作 (read / write / sendmsg / recvmsg / getsockopt / exec / `SCM_RIGHTS` での受け渡し)、同じ uid、この OS の範囲で:
@@ -38,6 +55,9 @@ SOCK_STREAM の socketpair、SOCK_DGRAM の socketpair、名前付きの SOCK_ST
 - token の euid・ruid・pidversion は、読み手が `getsockopt` した時点の、そのプロセスの値。そのプロセスが exec していれば exec の後の値になる。書かれたバイトがいつ書かれたかには結び付かない
 - `LOCAL_PEERCRED` の uid は、接続の時 (socketpair を作った時、connect した時) の値のまま変わらない。SOCK_DGRAM の socketpair では取れない
 - 相手側の端を持つプロセスが全部終わると、`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` は `ENOTCONN` で失敗する
+- 相手側の端を別のプロセスがまだ持っている間に、最後に送受信に使ったプロセスが終わると (親に回収される前を含む)、`LOCAL_PEERPID` / `LOCAL_PEEREPID` は終わったプロセスの pid を返し続け、`LOCAL_PEERTOKEN` は `EINVAL` で失敗する (`ENOTCONN` ではない)。相手側の端を持つプロセスが送受信すれば、そのプロセスに戻る
+- その pid が別のプロセスに割り当て直されると、`LOCAL_PEERTOKEN` はそのプロセスの token を返す。そのプロセスがこのソケットで送受信していなくても返る (観測した組では、そのプロセスは fork で相手側の端の fd を引き継いでいた)。pidversion は元のプロセスと違う
+- pid が一巡して同じ数値が割り当て直されるまでの fork は、権限の無いプロセスが 1 分以内に起こせた (約 9.8 万回)
 
 ## 実用的な示唆
 
@@ -48,6 +68,8 @@ SOCK_STREAM の socketpair、SOCK_DGRAM の socketpair、名前付きの SOCK_ST
   - 相手側の端を持つ別のプロセスが送受信すれば、token はそのプロセスになる (組 4、組 8)
 - 「相手が root である」「相手が特定のバイナリである」ことは、要求を書いたのがその root、そのバイナリであることを示さない。権限の無いプロセスが、書いた後に自分で setuid のプログラムや他のバイナリを exec すれば、token はその条件を満たす (組 6 の補助は、uid 501 のプロセスが書いた後に setuid root のプログラムを exec して euid 0 の token になった観測)
 - 端を作ったプロセスを、読み手が後からカーネルの値で名指す手段にはならない。名指せるのは「今、相手側の端を最後に使ったと記録されているプロセス」
+- その記録は pid の数値で、記録されたプロセスが終わった後は、token はプロセスを表さない。読めない (`EINVAL`) か、その pid を後から得た、送受信もしていないプロセスの token になる (組 11・12)。token の pidversion を読み手が初めて読むなら、元のプロセスの値を知らないので、再利用された pid かどうかを token だけでは区別できない
+- 相手側の端を持つプロセスは、相手側の端を持ったまま、送受信に使った子を終わらせ、自分で fork を繰り返して pid を一巡させられる。どのプロセスがその pid を得るかを一般には選べないが、組 12 では一巡させたプロセス自身の子がその pid を得た
 - `LOCAL_PEERCRED` と `LOCAL_PEERTOKEN` は、同じ接続について別の時点の資格情報を返しうる (組 6 では uid 501 と euid 0)
 - pipe でも socketpair でも、書き込み側の端を持てるのは、作ったプロセスと、それが fork で引き継がせたか fd を渡したプロセスだけ (fd の性質で、ここでは観測していない)。pipe では書き込み側をカーネルに問えず、「書いたのは自分を起動した側」は起動の手順から言うことになる
 
@@ -63,6 +85,13 @@ C の試験プログラム 1 つ (約 220 行、`clang … -lbsm`)。引数で�
 - A、R、W は、それぞれ専用の pipe で 1 バイトの命令を受け、操作を終えてから同じ 1 バイトの ack を返す (操作は read / write / sendmsg / recvmsg / `getsockopt` / 測定)。起動したプロセスが命令を 1 つ送って ack を待ってから次を送るので、操作と測定の順序は命令の順に固定される。R の測定結果は別の pipe で起動したプロセスに送って出力する
 - 組 7 は、相手側の端を持つプロセスを全部 `_exit` させ、`waitpid` で回収してから R に測らせた
 - A の exec (組 5、組 6) は、起動したプロセスが先に A の `kqueue` の `EVFILT_PROC` (`NOTE_EXEC`) を登録してから A に exec を命じ、`NOTE_EXEC` を受けたうえで `proc_pidpath(A)` が exec 先のパスに変わったことを確かめてから R に測らせた。setuid root の `top` は `-l 999 -s 60` で起動して出力を `/dev/null` に向け、測定の後に `SIGKILL` で止めた
+
+組 11・12 は別の C の試験プログラム (約 50 行、`clang … -lbsm`)。
+
+- 起動したプロセスが A になり、ソケットを作る。名前付きでは、A が一時ディレクトリの下のパスに bind / listen し、別のソケットで connect して、自分で accept する (R に渡すのは accept した端、A が持ち続けるのは connect した端)。A は R と W を fork する。R は A が作った端 (名前付きでは accept した端) だけを持ち、W は相手側の端を引き継ぐ
+- 同期は pipe の 1 バイトの命令と ack (組 1〜10 と同じ形)。W の終了は、A が W に終わるよう命じ、`kqueue` の `EVFILT_PROC` (`NOTE_EXIT`) を受けてから R に測らせ (zombie の時点)、続けて `waitpid` で回収してから測らせた
+- 組 12 は、W を回収して測った後、A が fork を繰り返す。子は自分の pid が W の pid でなければすぐ `_exit` し、A が `waitpid` で回収してから次を fork する (子は同時に 1 つだけ)。W の pid の子は pipe で待たせて生かしたまま R に測らせ、測った後に終わらせて回収した。その後 A が相手側の端に write して R に測らせた
+- R の測定は組 1〜10 と同じ 4 つの `getsockopt` と errno
 
 ### 実出力の例
 
@@ -97,17 +126,19 @@ R snapshot3 self=97236 peerpid=97234/0 peerepid=97234/0 tokenpid=97234 pidversio
   - `LOCAL_PEERCRED` は、自分の端の `unp_peercred` を返す。無い時は SOCK_STREAM なら `ENOTCONN`、それ以外は `EINVAL`。`unp_peercred` は接続の時に書く (`unp_connect` で connect した側の資格情報と listen した側の資格情報を写し、`unp_connect2` は SOCK_STREAM の socketpair でだけ作ったプロセスの資格情報を両方の端に写す)。SOCK_DGRAM の socketpair が `EINVAL` になる観測と合う
 - `bsd/kern/uipc_socket.c` の `so_update_last_owner_locked` (https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.121.6/bsd/kern/uipc_socket.c) が、その socket の `last_pid` と `last_upid` を呼んだプロセスの値に書き換える。呼ぶのは `sosend` と `soreceive` (read / write / sendmsg / recvmsg が通る) のほか、`sobindlock`、`solisten`、`soacceptlock`、`soconnectlock`、`soconnectxlocked`、`sosend_list`、`soreceive_m_list`。`getsockopt` は通らない
 - 観測の規則 (相手側の端を最後に送受信に使ったプロセス、資格情報は読んだ時点の値、exec しても pid は同じなので exec の後の値) は、このソースの読みと合う
+- `uipc_ctloutput` (https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.121.6/bsd/kern/uipc_usrreq.c#L853-L932) の `LOCAL_PEERPID` / `LOCAL_PEEREPID` は `peerso->last_pid` の数値を返すだけで、プロセスを引かない。`LOCAL_PEERTOKEN` は `peerpid = peerso->last_pid; p = proc_find(peerpid);` で引き、見つかればその task の `TASK_AUDIT_TOKEN`、見つからなければ `EINVAL`。`last_upid` は照合していない。組 11・12 の観測 (終わったプロセスの pid が返り続ける、token は `EINVAL`、pid が割り当て直されると別のプロセスの token) と合う
 
 ソースからの推測 (観測していない):
 
-- `LOCAL_PEERPID` と `LOCAL_PEERTOKEN` は `last_upid` を見ず、`last_pid` だけで引く。最後に送受信に使ったプロセスが終わり、相手側の端を別のプロセスがまだ開いている間は、`LOCAL_PEERTOKEN` は `EINVAL` になるか、その pid を後から使ったプロセスの token になりうる
 - `last_pid` は bind / listen / accept / connect でも書き換わる
 
 ## 未観測
 
 - 作ったプロセスが root で、子が降格して exec した組
 - 委譲 (`LOCAL_PEEREPID` が別の pid になる設定)
-- 最後に送受信に使ったプロセスが終わり、相手側の端を別のプロセスがまだ持っている間に読んだ値 (上の推測)
+- 組 11 の SOCK_DGRAM の socketpair、組 12 の名前付きのソケットと SOCK_DGRAM の socketpair
+- 組 12 で、pid を得たプロセスが相手側の端の fd を持たない組 (観測した組では fork で引き継いでいた)
+- 組 12 で、pid を得たプロセスが別の uid や setuid のプログラムである組
 - 上に挙げた以外の syscall (`sendfile`、`writev` / `readv`、list 版の送受信、`shutdown` など)
 - 別の uid のプロセスが相手側の端を使う組
 - 他の版の macOS

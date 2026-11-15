@@ -51,7 +51,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 | 項目 | 取り方(macOS) | 強さ | 備考 |
 | --- | --- | --- | --- |
-| audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む。表すのは、token を読んだ時点で相手側の端を最後に送受信に使ったプロセスと、その時点の資格情報で、要求を書いたプロセスや、ソケットを作った・接続したプロセスとは限らない([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md)) |
+| audit token(接続相手) | `getsockopt(LOCAL_PEERTOKEN)` | 強 | 公開 API。pid、pidversion、uid、asid を含む。表すのは、token を読んだ時点で相手側の端を最後に送受信に使ったプロセスと、その時点の資格情報で、要求を書いたプロセスや、ソケットを作った・接続したプロセスとは限らない。token は記録された pid で引かれ、相手側の端を別のプロセスが持ったままそのプロセスが終わると読めず(`EINVAL`)、その pid が別のプロセスに割り当て直されるとソケットと無関係なそのプロセスの token になる([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md)) |
 | unique\_id / parent\_unique\_id | `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` の `p_uniqueid`、`p_puniqueid` | 強 | 起動ごとに一意な 64bit ID。祖先を確実に辿れる。`#ifdef PRIVATE` の SPI なので、取れなければ pid と起動時刻の組に落とす |
 | pid、起動時刻 | `sysctl(KERN_PROC_PID)` の `kinfo_proc`(uid を問わず読める) | 強(組で) | 組で識別子になる(unique\_id が無いときの識別)。audit token の pidversion は exec で変わるので、token を読んだ後に exec した相手の検出に使える(読む前に exec していれば、token が既に exec の後の値) |
 | asid(audit session ID) | audit token | 強 | ログインや ssh のセッションごとに別。起動ごとに再利用されるので、`os.login_session` の pin 値に boot UUID と組で使う |

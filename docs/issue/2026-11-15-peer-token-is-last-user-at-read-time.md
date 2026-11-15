@@ -21,6 +21,7 @@ DESIGN (ja/en) の「識別子」の表と「収集の整合性」の 3 は、�
 ## 背景 (事実)
 
 - 観測: 同じ uid (501)、SOCK_STREAM / SOCK_DGRAM の socketpair と名前付きの SOCK_STREAM の 3 種類、12 の組を 2 回ずつ。全部で同じ遷移 (findings の表)
+- 観測 (findings の組 11・12): 相手側の端を別のプロセスが持ったまま、最後に送受信に使ったプロセスが終わると、`LOCAL_PEERTOKEN` は `EINVAL` (`ENOTCONN` ではない)。その pid が別のプロセスに割り当て直されると、そのプロセスの token が返る
 - XNU の公開ソース (`xnu-12377.121.6`。実機の版とは違う): `LOCAL_PEERTOKEN` は接続先の socket の `last_pid` を `proc_find` し、その時点の task から token を取る。`last_pid` は `sosend` / `soreceive` などで書き換わる
 - `collect_peer` (`crates/procline-macos/src/collect.rs`) は、最初に token を読んで pid と pidversion で対象を決め、収集の最後に token を読み直して、違えば `IdentityChanged` にする。この読み直しは、収集の間に相手側の端を別のプロセスが送受信に使った場合も `IdentityChanged` にする、とコードからは読める (`collect_peer` を通しては観測していない)
 - 要求が書かれてから `collect_peer` が最初に token を読むまでの間の exec や送受信は、この読み直しでは分からない (token は最初から変わった後の値になる。観測からの推論)
@@ -36,7 +37,7 @@ DESIGN (ja/en) の「識別子」の表と「収集の整合性」の 3 は、�
 DESIGN-ja (DESIGN.md も同じ箇所):
 
 - 題「接続元プロセスの情報収集と ACL 設計」、概要の「収集の入口は UNIX ドメインソケットの接続相手(audit token)が主」、使い方の型の「接続相手を集め」
-- 設計の柱 1「接続相手は audit token、祖先はプロセスごとに一意な ID で特定し、pid の再利用で取り違えない」
+- 設計の柱 1「接続相手は audit token、祖先はプロセスごとに一意な ID で特定し、pid の再利用で取り違えない」。接続相手については観測と食い違う: token は相手側の端を最後に使ったプロセスの pid で引かれ、そのプロセスが終わった後に pid が再利用されると、無関係のプロセスの token が返る (findings の組 12)
 - 「識別子」の表: audit token (強)、pid と起動時刻の備考 (pidversion で exec を検出する)、asid (強。audit token から取り、`os.login_session` の pin 値)
 - 識別子の後の段落: audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれる (対象の行の `process` は token の pid で決めた個体)
 - 「プロセスの属性」の uid・gid: 接続相手の行は、token の pid の `kinfo_proc` から取った、収集した時点の実効 uid (`LOCAL_PEERCRED` の接続の時の uid は使わない。findings の組 6)
@@ -69,7 +70,9 @@ DR:
 - できる (観測): fork で端を引き継いだ子や、`SCM_RIGHTS` で端を渡したプロセスが送受信すれば、token はそのプロセスになる
 - 許可された他のプロセスに自分の端を使わせるには、そのプロセスに端を持たせ (fork で引き継がせるか、fd を渡して受け取らせる)、送受信させる必要がある (観測した遷移は、全部が端を持つプロセスの送受信によるもの)
 - 推測 (観測していない): 自分の子に端を標準入出力として引き継がせ、許可されたバイナリを exec させれば、そのバイナリが普段どおり読み書きするだけで token はそのプロセスになる。fd を受け取って読み書きするプロトコルを持つプロセスにも同じことができる
-- 推測 (ソースからの読み。観測していない): `LOCAL_PEERTOKEN` は `last_pid` だけで引き、`last_upid` を見ない。最後に送受信に使ったプロセスが終わり、相手側の端を別のプロセスがまだ開いている間は、`EINVAL` になるか、その pid を後から使った無関係のプロセスの token になりうる
+- できる (観測): 相手側の端を自分で持ったまま、端に write した子を終わらせ、fork を繰り返して pid を一巡させる。子が終わった後は `LOCAL_PEERTOKEN` は `EINVAL` になり (`LOCAL_PEERPID` は終わった子の pid を返し続ける)、その pid が別のプロセスに割り当て直されると、ソケットで送受信していないそのプロセスの token が返る。pid の一巡は uid 501 のプロセスで約 9.8 万回の fork、48 秒で起きた (findings の組 11・12。XNU の公開ソースでも `LOCAL_PEERTOKEN` は `last_pid` を `proc_find` で引き、`last_upid` を照合しない)
+- どのプロセスがその pid を得るかは選べない (推測)。ただし、自分の子に得させることはできる (観測: 一巡させたプロセス自身の子が得た。その子は fork で相手側の端の fd を引き継いでいた)
+- 推測 (観測していない): その pid を得させた子に、許可されたバイナリを exec させれば、token はそのバイナリの実行イメージと資格情報になる (組 5・6 の exec の観測と組 12 の組み合わせ)
 - 観測した中では、`getsockopt` だけ・読み手自身の送受信・読み手の exec では、token は変わらなかった
 
 対策の案 (名前だけ。採否は書かない):
