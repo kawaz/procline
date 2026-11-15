@@ -1,0 +1,19 @@
+[package]
+name = "procline-acl-macos"
+description = "The os.* vocabulary items of the procline ACL on macOS (host state and its epochs), built on the procline-macos collector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+procline-acl.workspace = true
+procline-core.workspace = true
+procline-macos.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

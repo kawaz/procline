@@ -25,7 +25,14 @@ pam-passkey は収集と署名の検証だけを使い (DESIGN-ja「構成」: �
 - 分け方の候補: feature (`acl`、`icon`) で切る、`os_items` を別の crate (procline-macos-acl 等) に移す。どちらも DR-0001 の crate の分け方に関わる
 - アイコンを実装する時に、収集の型 (`icon_png`) を AppKit 無しで持てるか
 
+## 結果
+
+- ACL の部分は [DR-0013](../decisions/DR-0013-acl-layer-in-separate-crates.md) で決まり、実装した (2026-11-15)。`os.*` の語彙は新しい crate procline-acl-macos に置き、収集の crate (procline-core、procline-macos、入口の procline) は procline-acl に依存しない。feature は使わない。procline-macos は語彙が使う OS の観測を公開関数 (`boot_session_uuid()`、`wake_time_secs()`) で出す。`cargo tree -p procline` / `-p procline-macos` / `-p procline-cli` に procline-acl は出ない
+- アイコンの部分は [DR-0015](../decisions/DR-0015-icon-outside-collection.md) (提案) の裁定待ちで、この issue はそれまで開いておく
+
 ## 関連
 
 - [DR-0001](../decisions/DR-0001-crate-naming.md): crate の分け方と依存
+- [DR-0013](../decisions/DR-0013-acl-layer-in-separate-crates.md): ACL の層を別の crate に分ける
+- [DR-0015](../decisions/DR-0015-icon-outside-collection.md): アイコンを収集の型から外す (提案)
 - DESIGN-ja「構成」

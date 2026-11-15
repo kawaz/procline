@@ -14,7 +14,7 @@ Status は各 DR ファイルの `Status:` 行が正本。ここに載るのは�
 
 | DR | 状態 | 説明 |
 |---|---|---|
-| [DR-0001](DR-0001-crate-naming.md) | N/A | crate 名を procline / procline-core / procline-macos / procline-acl にし、入口は procline。`os.*` の語彙は procline-macos が提供し(macos → acl の依存)、acl の builtin は OS 非依存の項目だけ |
+| [DR-0001](DR-0001-crate-naming.md) | N/A | crate 名を procline / procline-core / procline-macos / procline-acl / procline-acl-macos にし、入口は procline。収集の crate は ACL に依存せず、`os.*` の語彙は procline-acl-macos が提供する(acl-macos → acl・macos の依存)。acl の builtin は OS 非依存の項目だけ |
 | [DR-0003](DR-0003-rule-strength-from-own-match.md) | ✅ 実装済 | ルールの強さは対象プロセス自身への条件のクラスで決め、祖先への条件は数えない |
 | [DR-0004](DR-0004-rule-grant-split-and-condition-advance.md) | 🟡 部分実装 | 静的な rule と pin 済みの grant を分け、condition を observe / pin / check / advance で表す。評価は grant だけを見て、採用された grant だけを advance し、grant は 1 件ずつ永続化する |
 | [DR-0005](DR-0005-process-identity-as-one-item.md) | ✅ 実装済 | プロセスの個体識別はルールの語彙では `process` 1 項目(クラスは照合したプロセスの保護の状態で決まり、保護ありで強 = DR-0012)。pin 値は取れた識別子と boot UUID の複合値で、両側に揃う識別子を全部比べて照合する。寿命型 scope の `process` は持たない |
@@ -25,7 +25,8 @@ Status は各 DR ファイルの `Status:` 行が正本。ここに載るのは�
 | [DR-0010](DR-0010-or-in-values-and-tag-definitions.md) | 🟡 部分実装 | OR は値の列(`MatchValue::AnyOf`、1 段だけ・placeholder なし・空は不正)とタグの同名の複数定義の 2 か所にだけ置き、subject に `any_of` のような構文は足さない。列のクラスは要素の最弱、タグの強さは定義の最弱。同名タグの判定は三値の OR |
 | [DR-0011](DR-0011-verified-signature-and-trust-mark.md) | ✅ 実装済 | コード署名は requirement (`anchor apple` / `anchor apple generic` / 証明書の種類の OID / `notarized`、`kSecCSNoNetworkAccess`) で検証した事実だけを持ち、身元は検証に成功した時だけ持つ型 (`CodeSigning::Verified` / `Failed(理由)` / `Unsigned` / `NotChecked`) にする。通常の方法が 100013 か -67034 で失敗した時だけ pid ベースで検証し直す。信頼の印 (11 値) は core の 1 か所で決める。キャッシュは持たない |
 | [DR-0012](DR-0012-strength-class-from-protection.md) | 🟡 部分実装 | `binary` / `path` / `process` のクラスは照合したプロセスの保護の状態 (status の hardened runtime、保護を緩める entitlement、debugged) で決め、評価のたびに確かめ直して、満たせない `allow` の grant は採用しない (`Decision.too_weak`)。build と読み込みは上限で検査する |
-| [DR-0013](DR-0013-collect-only-dependencies.md) | 💭 提案 | 収集だけのアプリが ACL の crate とアイコンの読み込みを持ち込まないように、`os_items` を procline-macos / procline の feature `acl` (既定は空) の後ろに置き、アイコンは収集から外して feature `icon` の関数 (ImageIO で `.icns` を読む、AppKit を使わない) にする。feature は入口の procline に置いて procline-macos に渡し、`os_items` / `icon_png` は入口から再公開する |
+| [DR-0013](DR-0013-acl-layer-in-separate-crates.md) | ✅ 実装済 | ACL の層を収集の層から crate で分ける。`os.*` の語彙は新しい crate procline-acl-macos に置き、依存は ACL → 収集の一方向。収集の crate (procline-core / procline-macos / 入口の procline) は procline-acl に依存せず、feature は使わない。procline-macos は語彙が使う OS の観測 (`boot_session_uuid` / `wake_time_secs`) を公開関数で出し、`unsafe` は procline-macos の `sys/` だけ |
 | [DR-0014](DR-0014-chain-trust-boundary-and-caller-supplied-values.md) | 💭 提案 | 評価に渡す chain は評価するプロセスが自分で収集したものとし、`ProcessChain` から `Deserialize` を外して field を非公開に、構築を `from_collected` (アプリのコードの表明) 1 つに、`TaggedChain` の構築を `Policy::tag` だけにする。`ProcessInfo` / `CodeSigning` 等からも `Deserialize` を外すか (他のプロセスの結果を procline の型で読む使い方を支えるか) は裁定待ち。保証は chain の出どころまでで、明示の組み立てとアプリが渡す観測値は範囲外。呼び出し元が渡す argv / cwd は chain に入れず受け取ったアプリが持つ。procline は行の識別子と親子の繋ぎ方 (識別子 / 起動時刻の順) を出し、付け替えの後の exec に途切れの印が付かないことは保証しない |
+| [DR-0015](DR-0015-icon-outside-collection.md) | 💭 提案 | アイコンを収集の型とオプションから外し (`ProcessInfo.icon_png` / `CollectOptions.icon` を消す)、実行パスから PNG を返す feature `icon` の関数 `icon_png` (ImageIO で `.icns` を読む、AppKit を使わない) にする。feature は入口の procline に置いて procline-macos に渡し、既定は空 |
 
 置き換えられた DR は [archive/INDEX.md](archive/INDEX.md) にある。

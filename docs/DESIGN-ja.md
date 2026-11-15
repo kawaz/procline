@@ -30,16 +30,17 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 ## 構成
 
-収集は OS ごとの crate に実装し、型と照合は OS に依存しない core に置きます。アプリが使うのは入口の procline だけで、これがビルドターゲットに応じて OS ごとの crate を読み込みます(`[target.'cfg(target_os = "macos")'.dependencies]`)。core 自体を入口にしないのは、OS ごとの crate が core の型に依存するので、core から読むと循環するためです。ACL は型だけに依存するので、Linux の収集を足してもそのまま使えます。`os.*` の語彙は OS ごとの crate が `procline_acl::Item` として提供するので、procline-macos は procline-acl にも依存します(procline-acl は core だけに依存するので循環しません)。名前は process lineage(プロセスとその祖先の列)から取っています(決定の記録: [DR-0001](decisions/DR-0001-crate-naming.md))。
+収集は OS ごとの crate に実装し、型と照合は OS に依存しない core に置きます。収集を使うアプリが依存するのは入口の procline だけで、これがビルドターゲットに応じて OS ごとの crate を読み込みます(`[target.'cfg(target_os = "macos")'.dependencies]`)。core 自体を入口にしないのは、OS ごとの crate が core の型に依存するので、core から読むと循環するためです。ACL は収集の上に載る任意の層で、収集の crate(procline、procline-core、procline-macos)は ACL の crate に依存しません。依存は ACL → 収集の一方向です(決定の記録: [DR-0013](decisions/DR-0013-acl-layer-in-separate-crates.md))。procline-acl は型だけに依存するので、Linux の収集を足してもそのまま使えます。OS に依存する `os.*` の語彙は procline-acl-macos が `procline_acl::Item` として提供し、OS の観測は procline-macos の公開関数を呼んで行います。名前は process lineage(プロセスとその祖先の列)から取っています(決定の記録: [DR-0001](decisions/DR-0001-crate-naming.md))。
 
 | crate | 中身 | 依存 |
 | --- | --- | --- |
 | procline | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
 | procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の検証の手順と信頼の印の決定、表示用の無害化、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
-| procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、`os.*` の語彙の提供(`procline_macos::os_items()`) | core、procline-acl、Security framework、AppKit |
+| procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、`os.*` の語彙が使う OS の観測(`boot_session_uuid()`、`wake_time_secs()`) | core、Security framework、AppKit |
 | procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、OS 非依存の組み込みの語彙、rule の作成と grant の発行 | core |
+| procline-acl-macos | `os.*` の語彙の提供(`procline_acl_macos::os_items()`)。OS の観測は procline-macos の公開関数で行い、`unsafe` を持たない | procline-acl、core、procline-macos |
 
-アプリ(cw、pam-passkey)は、必要なものだけを使います。pam-passkey は収集だけ、cw はすべてです。cw は `procline_macos::os_items()` の `os.*` の項目を `Vocabulary::register` で登録します。cw 固有の語彙(`app.unlock` など)は cw 側で定義して、`app.` の名前で procline-acl に登録します。
+アプリは必要なものだけを使います。収集だけを使うアプリは procline に依存します。ACL を使うアプリは procline-acl と procline-acl-macos を足し、`procline_acl_macos::os_items()` の `os.*` の項目を `Vocabulary::register` で登録します。アプリ固有の語彙(cw なら `app.unlock` など)はアプリ側で定義して、`app.` の名前で procline-acl に登録します。
 
 ## 収集する情報
 
@@ -412,7 +413,7 @@ register(key, impl)
 登録先は procline-acl の `Vocabulary` で、matcher の項目、scope、条件が同じ器に入ります。登録の時点で検査するのは、key の重複と名前空間だけです。
 
 - `Vocabulary::builtin()` は OS 非依存の項目だけを持ちます。matcher の項目(`process`、`binary`、`uid`、`gid`、`path`、`cwd`、`argv`、`name`、`tty`、`responsible`)、`until`、`age`、`uses`、`time.window` です。
-- `os.*` の項目(`os.session`、`os.console_user`、`os.login_session`、`os.not_remote`、`os.console_active`)は procline-macos が `Item` として提供し(`procline_macos::os_items() -> Vec<procline_acl::Item>`)、アプリが `register` で登録します。
+- `os.*` の項目(`os.session`、`os.console_user`、`os.login_session`、`os.not_remote`、`os.console_active`)は procline-acl-macos が `Item` として提供し(`procline_acl_macos::os_items() -> Vec<procline_acl::Item>`)、アプリが `register` で登録します。
 
 名前空間は項目のカテゴリで揃えます。
 
@@ -510,7 +511,7 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 | `os.session` | 選んだ段階以下のどれかの期間の終わり。`boot` は再起動、`awake` はスリープ・ハイバネーション、`unlocked` は画面ロック(手動、離席の自動ロック、スクリーンセーバー) | `boot` は `kern.bootsessionuuid`、`awake` は直近の起床の時刻(`kern.waketime`)、`unlocked` は直近の解錠の時刻 |
 | `os.console_user` | ユーザーの切り替え | ユーザーの切り替えの事象固有の値 |
 
-`until`、`age`、`uses` は procline-acl の `Vocabulary::builtin()` に入り、`os.*` は procline-macos の `os_items()` が提供します(「項目の登録」)。
+`until`、`age`、`uses` は procline-acl の `Vocabulary::builtin()` に入り、`os.*` は procline-acl-macos の `os_items()` が提供します(「項目の登録」)。
 
 世代は事象固有の値(起動の UUID、起床・解錠の時刻など)です。デーモンの再起動と無関係に一意なので、再起動を跨いで読み直した grant も正しく判定できます。
 
@@ -691,7 +692,7 @@ enum SessionLevel { Boot, Awake, Unlocked }          // os.session の段階(arg
 
 // 語彙(procline-acl)
 let mut vocab = Vocabulary::builtin();               // OS 非依存の項目だけ: matcher の項目(process / binary / uid / gid / path / cwd / argv / name / tty / responsible)、until / age / uses、time.window
-for item in procline_macos::os_items() {             // os.* の項目(os.session / os.console_user / os.login_session / os.not_remote / os.console_active)は procline-macos が提供する
+for item in procline_acl_macos::os_items() {         // os.* の項目(os.session / os.console_user / os.login_session / os.not_remote / os.console_active)は procline-acl-macos が提供する
     vocab.register(item)?;
 }
 // matcher の項目、寿命型、状態型を同じ register で足す。key の重複と名前空間の違反はエラー

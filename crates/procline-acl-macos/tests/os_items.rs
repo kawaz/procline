@@ -6,8 +6,8 @@ use std::time::SystemTime;
 use procline_acl::{
     Condition, ConditionKind, EvalContext, ItemKind, Observed, PinError, Vocabulary,
 };
+use procline_acl_macos::os_items;
 use procline_core::{Identity, ProcessChain, ProcessInfo};
-use procline_macos::os_items;
 use serde_json::{Value, json};
 
 fn vocabulary() -> Vocabulary {

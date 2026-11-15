@@ -30,16 +30,17 @@ The adversary is another process with the same uid. root and impersonation of th
 
 ## Structure
 
-Collection is implemented in per-OS crates, while the types and matching live in an OS-independent core. Apps use only the entry crate procline, which pulls in the per-OS crate for the build target (`[target.'cfg(target_os = "macos")'.dependencies]`). The core itself is not the entry point because the per-OS crates depend on the core's types, so having the core load them would create a cycle. The ACL depends only on the types, so it works unchanged when Linux collection is added. The `os.*` vocabulary is provided by the per-OS crate as `procline_acl::Item`s, so procline-macos also depends on procline-acl (procline-acl depends only on the core, so there is no cycle). The name comes from process lineage (a process and the sequence of its ancestors) (decision record: [DR-0001](decisions/DR-0001-crate-naming.md)).
+Collection is implemented in per-OS crates, while the types and matching live in an OS-independent core. Apps that use collection depend only on the entry crate procline, which pulls in the per-OS crate for the build target (`[target.'cfg(target_os = "macos")'.dependencies]`). The core itself is not the entry point because the per-OS crates depend on the core's types, so having the core load them would create a cycle. The ACL is an optional layer on top of collection, and the collection crates (procline, procline-core, procline-macos) do not depend on the ACL crates. Dependencies go one way, from the ACL to collection (decision record: [DR-0013](decisions/DR-0013-acl-layer-in-separate-crates.md)). procline-acl depends only on the types, so it works unchanged when Linux collection is added. The OS-dependent `os.*` vocabulary is provided by procline-acl-macos as `procline_acl::Item`s, and it observes the OS by calling public functions of procline-macos. The name comes from process lineage (a process and the sequence of its ancestors) (decision record: [DR-0001](decisions/DR-0001-crate-naming.md)).
 
 | crate | Contents | Depends on |
 | --- | --- | --- |
 | procline | Entry point. Re-exports the core types and the collect of the build target's OS | core, a per-OS crate (only one, per target) |
 | procline-core | Types for collection results, the strength class type (`Strength`), the signature verification steps and the trust mark, sanitization for display, env policy and redaction, the JSON shape | none (OS-independent) |
-| procline-macos | Collection of the peer and ancestors, code signature verification, icons, providing the `os.*` vocabulary (`procline_macos::os_items()`) | core, procline-acl, Security framework, AppKit |
+| procline-macos | Collection of the peer and ancestors, code signature verification, icons, the OS observations the `os.*` vocabulary uses (`boot_session_uuid()`, `wake_time_secs()`) | core, Security framework, AppKit |
 | procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, the OS-independent built-in vocabulary, rule creation and grant issuance | core |
+| procline-acl-macos | Providing the `os.*` vocabulary (`procline_acl_macos::os_items()`). It observes the OS through the public functions of procline-macos and has no `unsafe` | procline-acl, core, procline-macos |
 
-Apps (cw, pam-passkey) use only what they need. pam-passkey uses only collection; cw uses everything. cw registers the `os.*` items from `procline_macos::os_items()` with `Vocabulary::register`. cw-specific vocabulary (`app.unlock` and so on) is defined on the cw side and registered into procline-acl under `app.` names.
+Apps use only what they need. An app that uses only collection depends on procline. An app that uses the ACL adds procline-acl and procline-acl-macos, and registers the `os.*` items from `procline_acl_macos::os_items()` with `Vocabulary::register`. App-specific vocabulary (`app.unlock` and so on for cw) is defined on the app side and registered into procline-acl under `app.` names.
 
 ## Collected Information
 
@@ -412,7 +413,7 @@ register(key, impl)
 Registration goes into procline-acl's `Vocabulary`, where matcher items, scopes, and conditions share the same container. The only checks at registration time are duplicate keys and the namespace.
 
 - `Vocabulary::builtin()` holds only the OS-independent items: the matcher items (`process`, `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible`), `until`, `age`, `uses`, and `time.window`.
-- The `os.*` items (`os.session`, `os.console_user`, `os.login_session`, `os.not_remote`, `os.console_active`) are provided by procline-macos as `Item`s (`procline_macos::os_items() -> Vec<procline_acl::Item>`), and the app registers them with `register`.
+- The `os.*` items (`os.session`, `os.console_user`, `os.login_session`, `os.not_remote`, `os.console_active`) are provided by procline-acl-macos as `Item`s (`procline_acl_macos::os_items() -> Vec<procline_acl::Item>`), and the app registers them with `register`.
 
 Namespaces are aligned with the item's category.
 
@@ -510,7 +511,7 @@ Multiple scopes can be listed, and the grant is in effect only while all of them
 | `os.session` | The end of any of the periods at or below the chosen level. `boot` ends on reboot, `awake` on sleep or hibernation, `unlocked` on screen lock (manual, automatic lock when away, screen saver) | `boot` is `kern.bootsessionuuid`, `awake` is the time of the most recent wake (`kern.waketime`), `unlocked` is the time of the most recent unlock |
 | `os.console_user` | User switch | A value intrinsic to the user switch event |
 
-`until`, `age`, and `uses` are in procline-acl's `Vocabulary::builtin()`, and `os.*` is provided by procline-macos's `os_items()` ("Item Registration").
+`until`, `age`, and `uses` are in procline-acl's `Vocabulary::builtin()`, and `os.*` is provided by procline-acl-macos's `os_items()` ("Item Registration").
 
 An epoch is a value intrinsic to the event (the boot UUID, the time of a wake or unlock, etc.). It is unique independently of daemon restarts, so grants reloaded across a restart can also be judged correctly.
 
@@ -691,7 +692,7 @@ enum SessionLevel { Boot, Awake, Unlocked }          // level of os.session (the
 
 // Vocabulary (procline-acl)
 let mut vocab = Vocabulary::builtin();               // only OS-independent items: matcher items (process / binary / uid / gid / path / cwd / argv / name / tty / responsible), until / age / uses, time.window
-for item in procline_macos::os_items() {             // os.* items (os.session / os.console_user / os.login_session / os.not_remote / os.console_active) are provided by procline-macos
+for item in procline_acl_macos::os_items() {         // os.* items (os.session / os.console_user / os.login_session / os.not_remote / os.console_active) are provided by procline-acl-macos
     vocab.register(item)?;
 }
 // matcher items, lifetime, and state items are added with the same register. Duplicate keys and namespace violations are errors

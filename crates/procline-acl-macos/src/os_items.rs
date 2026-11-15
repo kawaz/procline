@@ -4,8 +4,6 @@ use procline_acl::{Condition, ConditionKind, Item, ObserveError, Observed, PinEr
 use procline_core::{ProcessChain, SessionLevel};
 use serde_json::{Map, Value, json};
 
-use crate::sys::proc as sys;
-
 /// The items, for `os_items`.
 pub(crate) fn items() -> Vec<Item> {
     vec![
@@ -48,8 +46,9 @@ impl Condition for Session {
         let failed = |what: &str, err: std::io::Error| ObserveError {
             reason: format!("cannot read {what}: {err}"),
         };
-        let boot = sys::boot_session_uuid().map_err(|err| failed("kern.bootsessionuuid", err))?;
-        let awake = sys::wake_time_secs().map_err(|err| failed("kern.waketime", err))?;
+        let boot = procline_macos::boot_session_uuid()
+            .map_err(|err| failed("kern.bootsessionuuid", err))?;
+        let awake = procline_macos::wake_time_secs().map_err(|err| failed("kern.waketime", err))?;
         Ok(Some(json!({ "boot": boot, "awake": awake })))
     }
 

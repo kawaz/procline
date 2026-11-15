@@ -18,7 +18,7 @@
 
 ## 裁定待ち
 
-HO-Q1〜Q4 は、pam-passkey のセッションが起票した PL-Q1〜Q4 (収集と署名の検証を helper に移して procline に載せ替える作業の前提) をこのリポに移したもの。推奨は起票側のもので、統括の評価は各項の末尾に書く。
+HO-Q1、HO-Q2、HO-Q4 は、別リポ (kawaz/pam-passkey) の作業から出た問いをこのリポに移したもの (HO-Q3 は裁定済みで [DR-0013](decisions/DR-0013-acl-layer-in-separate-crates.md))。推奨は起票側のもの。判断の軸は procline 自身の層と型の設計で、特定のアプリの都合ではない (kawaz 2026-11-15)。
 
 ### 👺HO-Q1: 収集した事実の型 (1 プロセス分の型、署名の型など 18 型) から、JSON の読み込み (`Deserialize`) を外すか
 
@@ -35,21 +35,9 @@ HO-Q1〜Q4 は、pam-passkey のセッションが起票した PL-Q1〜Q4 (収�
 - [x] a (起票側の推奨): 採る
 - [ ] b: 採らない
 
-### 👺HO-Q3: ACL の層を収集の層からどう分けるか
-
-kawaz (2026-11-15): ACL 自体は分けてよい。利用者はさまざまで、特定のアプリ (pam-passkey、cw) だけを前提に決めない。
-
-収集 (プロセスと祖先の情報、署名の検証) は単独で使える機能で、ACL はその上に載る任意の層。今は procline-macos が `os.*` の語彙を出すために procline-acl に依存していて、収集の層が ACL の層を知っている ([DR-0001](decisions/DR-0001-crate-naming.md))。分け方の案:
-
-- [ ] a (統括の推奨): `os.*` の語彙を別の crate (`procline-acl-macos`) に出し、依存を ACL → 収集の一方向にする。収集の crate (core、macos、入口の procline) は ACL を一切知らない。feature の組み合わせが増えない。crate が 1 つ増える。procline-macos は語彙が使う観測 (起動の UUID、起床の時刻、asid) を普通の関数として公開する
-- [ ] b: procline-macos の feature `acl` (既定で無効) の後ろに置く (提案中の [DR-0013](decisions/DR-0013-collect-only-dependencies.md) の形)。crate は増えないが、収集の crate が ACL への任意の依存を持ち続け、feature の有無の両方をビルドとテストで見る必要がある
-- [ ] c: 今のまま (常に依存)
-
-a の推奨理由: 層の境界が crate の境界と一致し、依存の向きが 1 つになる。b は同じ分離を feature で表すので、境界がビルドの設定に隠れる。
-
 ### 👺HO-Q4: アイコンを収集の型から外すか
 
-同じ DR-0013。今は収集の型にアイコンの field があるが未実装。
+提案中の [DR-0015](decisions/DR-0015-icon-outside-collection.md)。今は収集の型にアイコンの field があるが未実装。
 
 - [ ] a (起票側の推奨): 収集の型と収集のオプションからアイコンを消し、実行パスから PNG を返す別の関数 (feature `icon`、ImageIO で取り AppKit を読み込まない) にする。アプリは自分のキャッシュに無い時だけ呼ぶ。アセットカタログだけの app のアイコンは取れない
 - [ ] b: 収集の中に残す

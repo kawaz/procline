@@ -200,7 +200,7 @@ procline が保証すること / しないこと:
 - [DR-0008](DR-0008-evaluation-semantics.md): 途切れた列と `undecidable`
 - [DR-0011](DR-0011-verified-signature-and-trust-mark.md): `CodeSigning` の JSON の形と読み込みの規則、ユーザ権限から走っている `sudo` の署名を検証する手順
 - [DR-0012](DR-0012-strength-class-from-protection.md): 保護の状態とクラス (chain の `runtime` と `entitlements` を信じる側)
-- [DR-0013](DR-0013-collect-only-dependencies.md): 収集だけのアプリの依存
+- [DR-0013](DR-0013-acl-layer-in-separate-crates.md): ACL の層を収集の層から crate で分ける
 - [DESIGN-ja の「脅威モデルの前提」「識別子」「収集する情報」「収集の整合性」「API の骨格」](../DESIGN-ja.md)
 - issue: [JSON から読み込んだ ProcessChain を評価が信用する](../issue/2026-11-15-deserialized-chain-is-trusted-by-evaluate.md)、[呼び出し元が渡して補う入口](../issue/2026-11-15-caller-supplied-own-info.md)、[付け替えの後の exec](../issue/2026-11-15-ancestry-reset-by-exec-after-reparent.md)
 - [findings: 親が終わった後の p_puniqueid](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md)、[findings: collect_pid の観測](../findings/2026-11-09-collect-pid-observations.md)、[findings: socketpair の相手](../findings/2026-11-15-socketpair-peer-after-fork-exec.md)、[findings: cw の評価と承認画面のプロセス](../findings/2026-11-15-cw-evaluation-and-approval-processes.md)

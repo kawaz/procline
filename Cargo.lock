@@ -395,6 +395,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "procline-acl-macos"
+version = "0.1.0"
+dependencies = [
+ "procline-acl",
+ "procline-core",
+ "procline-macos",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "procline-cli"
 version = "0.1.0"
 dependencies = [
@@ -418,7 +429,6 @@ dependencies = [
  "core-foundation",
  "libc",
  "plist",
- "procline-acl",
  "procline-core",
  "security-framework",
  "security-framework-sys",

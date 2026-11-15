@@ -1,10 +1,9 @@
-//! Collects a process and its ancestors on macOS, and provides the `os.*` vocabulary items.
+//! Collects a process and its ancestors on macOS, and reads the epochs of the host (the boot UUID, the time of the last wake).
 
 #![deny(unsafe_code)]
 
 mod collect;
 mod file;
-mod os_items;
 mod path_meta;
 mod procargs;
 mod signing;
@@ -53,11 +52,14 @@ impl fmt::Debug for CollectOptions {
     }
 }
 
-/// The `os.*` items (`os.session`, `os.console_user`, `os.login_session`, `os.not_remote`, `os.console_active`), for the application to add with `Vocabulary::register`.
-///
-/// `os.session` observes the levels `boot` and `awake`; the level `unlocked` is not observed yet, so pinning it fails with `Unobservable`. `os.console_user`, `os.not_remote` and `os.console_active` are not implemented yet: observing them fails, so grants using them are undecidable and none can be made.
-pub fn os_items() -> Vec<procline_acl::Item> {
-    os_items::items()
+/// The boot UUID of the running system (`kern.bootsessionuuid`): a new value at every boot. The same value as `ProcessChain.boot_uuid` of the collections made during this boot.
+pub fn boot_session_uuid() -> io::Result<String> {
+    sys::proc::boot_session_uuid()
+}
+
+/// The time of the last wake from sleep (`kern.waketime`), in seconds since the epoch (the microseconds dropped): a new value at every wake.
+pub fn wake_time_secs() -> io::Result<i64> {
+    sys::proc::wake_time_secs()
 }
 
 /// Collects the peer of a connected UNIX domain socket and its ancestors. The peer's audit token identifies its process and addresses its code signature; the other processes' signatures are looked up by pid.

@@ -18,7 +18,7 @@ pub struct Vocabulary {
 }
 
 impl Vocabulary {
-    /// The built-in items, all independent of the OS: the matcher items (`process` (identifies the individual process), `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible`), `time.window`, and `until` / `age` / `uses`. The `os.*` items come from the collector crate of the OS (`procline_macos::os_items`); the application adds them with `register`.
+    /// The built-in items, all independent of the OS: the matcher items (`process` (identifies the individual process), `binary`, `uid`, `gid`, `path`, `cwd`, `argv`, `name`, `tty`, `responsible`), `time.window`, and `until` / `age` / `uses`. The `os.*` items come from the ACL crate of the OS (`procline_acl_macos::os_items`); the application adds them with `register`.
     pub fn builtin() -> Self {
         let mut vocab = Self::default();
         for item in [
