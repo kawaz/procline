@@ -206,27 +206,39 @@ mod tests {
         }
     }
 
+    /// What takes the place of the executable of the running copy.
+    #[derive(Debug, Clone, Copy)]
+    enum Content {
+        /// A copy of `/usr/bin/true`, signed by Apple (with certificates).
+        AppleSigned,
+        /// A copy of `/usr/bin/true` signed again ad-hoc with another identifier (without certificates, so no requirement is evaluated after the signing information is read).
+        AdHoc,
+    }
+
     /// What happens to the executable of the running copy between the check and the reading of the signing information.
     #[derive(Debug, Clone, Copy)]
     enum Swap {
-        /// Renamed over by a copy of `/usr/bin/true`, signed by Apple (with certificates).
-        AppleSigned,
-        /// Renamed over by a copy of `/usr/bin/true` signed again ad-hoc with another identifier (without certificates, so no requirement is evaluated after the signing information is read).
-        AdHoc,
-        /// Removed.
+        /// Another file is renamed over the path (a new inode at the path).
+        RenamedOver(Content),
+        /// The contents are written into the executable's own inode.
+        Overwritten(Content),
+        /// The path is removed.
         Removed,
     }
 
     impl Swap {
-        /// Prepares the file that takes the place of the executable, in the same directory (a rename stays on one file system).
+        /// Prepares the file with the new contents, in the same directory (a rename stays on one file system).
         fn prepare(self, executable: &Path) -> Option<PathBuf> {
             let replacement = executable.with_extension("replacement");
-            match self {
+            let content = match self {
                 Self::Removed => return None,
-                Self::AppleSigned => {
+                Self::RenamedOver(content) | Self::Overwritten(content) => content,
+            };
+            match content {
+                Content::AppleSigned => {
                     std::fs::copy("/usr/bin/true", &replacement).unwrap();
                 }
-                Self::AdHoc => {
+                Content::AdHoc => {
                     std::fs::copy("/usr/bin/true", &replacement).unwrap();
                     let signed = Command::new("/usr/bin/codesign")
                         .args([
@@ -251,16 +263,29 @@ mod tests {
     struct SwappedAfterCheck<'a> {
         calls: Calls<'a>,
         executable: PathBuf,
-        /// `None` removes the executable.
+        swap: Swap,
+        /// The file with the new contents; `None` for `Swap::Removed`.
         replacement: Option<PathBuf>,
         swapped: std::cell::Cell<bool>,
     }
 
     impl SwappedAfterCheck<'_> {
         fn swap(&self) {
-            match &self.replacement {
-                Some(replacement) => std::fs::rename(replacement, &self.executable).unwrap(),
-                None => std::fs::remove_file(&self.executable).unwrap(),
+            match (self.swap, &self.replacement) {
+                (Swap::RenamedOver(_), Some(replacement)) => {
+                    std::fs::rename(replacement, &self.executable).unwrap();
+                }
+                (Swap::Overwritten(_), Some(replacement)) => {
+                    let mut into = std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(&self.executable)
+                        .unwrap();
+                    std::io::copy(&mut std::fs::File::open(replacement).unwrap(), &mut into)
+                        .unwrap();
+                }
+                (Swap::Removed, None) => std::fs::remove_file(&self.executable).unwrap(),
+                (swap, replacement) => panic!("{swap:?} prepared as {replacement:?}"),
             }
         }
     }
@@ -287,9 +312,9 @@ mod tests {
     }
 
     // 要求なしの検証が通った直後、署名の情報を読む前に、走っているコードの実行ファイルを差し替える。SecCode.h は「Code の署名の情報の一部はディスクから読む」と書くので、署名の情報が差し替えた先のファイルから読まれると、検証に成功した結果に別のファイルの身元 (identifier、cdhash、署名者) が付く。走っているコードが ad-hoc なら、署名の情報の後に requirement の評価が無いので、そこでも気づけない。
-    // 結果は、走っているコード (このテストのバイナリのコピー。同じバイナリなので、このプロセス自身と identifier・cdhash・署名者が同じ) の身元か、Failed (身元を持たない) でなければならない。走っているコードは linker が署名した ad-hoc。差し替え方は 3 通り: Apple の署名のファイル (証明書あり)、identifier を変えて署名し直した ad-hoc のファイル (証明書なし。後に requirement の評価が無い)、削除。
+    // 結果は、走っているコード (このテストのバイナリのコピー。同じバイナリなので、このプロセス自身と identifier・cdhash・署名者が同じ) の身元か、Failed (身元を持たない) でなければならない。走っているコードは linker が署名した ad-hoc の単体のバイナリ。差し替え方は 5 通り: 別のファイルを rename で置く (新しい inode) か、同じ inode に中身を上書きするかの 2 通り × 中身が Apple の署名のファイル (証明書あり) か、identifier を変えて署名し直した ad-hoc のファイル (証明書なし。後に requirement の評価が無い) かの 2 通り、と削除。時機は通常の方法の要求なしの検証の直後。
     // 前提として、差し替えの後に SecCode を開き直すと差し替えに気づく (ディスクから検証した Verified にならない) ことを確かめる。これが崩れると、差し替えが効いていないのにこのテストが通ってしまう。
-    // macOS 26.5.2 での観測: 3 通りとも、差し替えの前に開いた SecCode は検証した静的なコードを持ち続け、署名の情報は差し替える前のもの (Verified、verified_from は disk、身元は走っているコード) だった。開き直すと、置き換えた 2 通りは running_code に切り替えて Verified、削除は Failed(Missing)。時機は検証の呼び出しの間に差し替えを挟んで作る (時間待ちをしない)。
+    // macOS 26.5.2 での観測: rename の 2 通りと削除は、差し替えの前に開いた SecCode が検証した静的なコードを持ち続け、署名の情報は差し替える前のもの (Verified、verified_from は disk、身元は走っているコード) だった。同じ inode への上書きの 2 通りは Failed(Other)。開き直すと、rename と上書きの 4 通りは running_code に切り替えて走っているコードの身元で Verified、削除は Failed(Missing)。時機は検証の呼び出しの間に差し替えを挟んで作る (時間待ちをしない)。
     #[test]
     fn replacement_between_the_check_and_the_signing_information() {
         let requirements = Requirements::default();
@@ -300,7 +325,13 @@ mod tests {
         let CodeSigning::Verified(own) = own else {
             panic!("the own signature does not verify: {own:?}");
         };
-        for swap in [Swap::AppleSigned, Swap::AdHoc, Swap::Removed] {
+        for swap in [
+            Swap::RenamedOver(Content::AppleSigned),
+            Swap::RenamedOver(Content::AdHoc),
+            Swap::Overwritten(Content::AppleSigned),
+            Swap::Overwritten(Content::AdHoc),
+            Swap::Removed,
+        ] {
             let copy = RunningCopy::start();
             let calls = SwappedAfterCheck {
                 calls: Calls {
@@ -308,6 +339,7 @@ mod tests {
                     requirements: &requirements,
                 },
                 executable: copy.path(),
+                swap,
                 replacement: swap.prepare(&copy.path()),
                 swapped: std::cell::Cell::new(false),
             };
