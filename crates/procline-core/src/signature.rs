@@ -313,20 +313,22 @@ impl fmt::Display for CdHash {
 impl std::str::FromStr for CdHash {
     type Err = CdHashParseError;
 
+    /// Exactly 40 hex digits (`0-9`, `a-f`, `A-F`), nothing else: no sign, no spaces.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() != 40 {
-            return Err(CdHashParseError {
-                input: s.to_owned(),
-            });
+        let error = || CdHashParseError {
+            input: s.to_owned(),
+        };
+        let digits: Vec<u8> = s
+            .chars()
+            .map(|c| c.to_digit(16).and_then(|digit| u8::try_from(digit).ok()))
+            .collect::<Option<_>>()
+            .ok_or_else(error)?;
+        if digits.len() != 40 {
+            return Err(error());
         }
         let mut bytes = [0u8; 20];
-        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-            let pair = std::str::from_utf8(chunk).map_err(|_| CdHashParseError {
-                input: s.to_owned(),
-            })?;
-            bytes[i] = u8::from_str_radix(pair, 16).map_err(|_| CdHashParseError {
-                input: s.to_owned(),
-            })?;
+        for (byte, [high, low]) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
+            *byte = (high << 4) | low;
         }
         Ok(Self(bytes))
     }
@@ -413,6 +415,26 @@ mod tests {
     fn cdhash_rejects_non_hex_or_wrong_length() {
         assert!(serde_json::from_str::<CdHash>("\"01ab\"").is_err());
         assert!(serde_json::from_str::<CdHash>(&format!("\"{}\"", "zz".repeat(20))).is_err());
+    }
+
+    // 40 文字でも、16 進の数字 (0-9a-fA-F) 以外を含めばエラー。1 バイトを 2 文字ずつ整数として読むと、符号の付いた "+f" が 0x0f として通り、書き出すと "0f" になって、書いた値と照合に使う値が食い違う (ルールの binary の cdhash もこの読み込みを通る)。空白や全角の数字も同じ (全角は 1 文字が 3 バイトなので、バイト数が 40 になる組を使う)。
+    #[test]
+    fn cdhash_rejects_signs_spaces_and_non_ascii_digits() {
+        let zeros = "0".repeat(38);
+        for input in [
+            format!("+f{zeros}"),
+            format!("-0{zeros}"),
+            format!(" f{zeros}"),
+            format!("{zeros}f "),
+            format!("１{}", "0".repeat(37)),
+        ] {
+            assert_eq!(input.len(), 40, "{input:?}");
+            assert!(input.parse::<CdHash>().is_err(), "{input:?}");
+            assert!(
+                serde_json::from_str::<CdHash>(&format!("\"{input}\"")).is_err(),
+                "{input:?}"
+            );
+        }
     }
 
     /// 検証に成功した署名。印は signer だけで決まるので、他の field は固定にしておき、各ケースは signer だけを変える。
