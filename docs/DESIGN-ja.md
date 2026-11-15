@@ -85,7 +85,7 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 1. SecCode を得て(接続相手は audit token、祖先は pid)、requirement 無しで `SecCodeCheckValidity` を呼ぶ。
 2. 実行ファイルを読めない(走っている `sudo` のような setuid のプロセスをユーザ権限から見る時)か、ディスク上の実行ファイルが走っているものと違う時だけ、`kSecGuestAttributeDynamicCode` を足して、カーネルが持つ署名で検証し直す。それも失敗したら `Failed` で、理由は最初の戻り値で決める。
 3. 証明書の根を requirement `anchor apple`(Apple 自身のコード)→ `anchor apple generic`(Apple が発行した証明書)の順に確かめ、Apple が発行した証明書の時だけ、種類を証明書の拡張の OID(`anchor apple generic` と組の requirement)で Mac App Store → Developer ID → 開発用の順に確かめ、Developer ID の時だけ `notarized` を確かめる。
-4. hardened runtime、platform binary、debugged は、カーネルの動的な status(`kSecCodeInfoStatus`)から取る。status に valid(`CS_VALID`)が無ければ `Failed`(その他)にします。CodeDirectory の flags には hardened runtime が無いのにカーネルが hardened として扱うコードがある(走っている `sudo` など)ためです。entitlements の blob があるのに dict の形で取れない時は `Failed`(その他)にします。保護を緩める entitlement の有無を確かめられないまま「無い」と言わないためです。
+4. hardened runtime、platform binary、debugged は、カーネルの動的な status(`kSecCodeInfoStatus`)から取る。CodeDirectory の flags には hardened runtime が無いのにカーネルが hardened として扱うコードがある(走っている `sudo` など)ためです。status に valid(`CS_VALID`)が無ければ `Failed`(その他)にします。entitlements の blob があるのに dict の形で取れない時は `Failed`(その他)にします。保護を緩める entitlement の有無を確かめられないまま「無い」と言わないためです。
 
 検証は全部 `kSecCSNoNetworkAccess` で行い、ネットワークを使いません(証明書と公証のオンラインの失効確認はしない)。ディスク全体の静的検査もしません。手順の順序、失敗の分類、印の決定は procline-core に置き(`procline_core::verify` の `verify` と、予算つきで列を検証する `verify_chain`)、Security framework の呼び出しは procline-macos が `SigningCalls` の実装として渡します(呼び出しと生の戻り値だけを持つ)。requirement は収集ごとに 1 度だけコンパイルします。
 
