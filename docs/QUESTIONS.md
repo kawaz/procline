@@ -27,6 +27,33 @@ HO-Q4 は、別リポ (kawaz/pam-passkey) の作業から出た問いをこの�
 - [ ] a (起票側の推奨): 収集の型と収集のオプションからアイコンを消し、実行パスから PNG を返す別の関数 (feature `icon`、ImageIO で取り AppKit を読み込まない) にする。アプリは自分のキャッシュに無い時だけ呼ぶ。アセットカタログだけの app のアイコンは取れない
 - [ ] b: 収集の中に残す
 
+### 👺LJ-Q1: DR-0016 (一覧と grant の JSON の読み書き) を採るか
+
+提案中の [DR-0016](decisions/DR-0016-list-and-grant-json.md)。未実装の読み込みの入口 (`Policy::load_verified`、`Policy::load_grant`) と書き出しを実装する前提になる。分岐のないところ (crate が読む側も書く側も持つ、未知のキー・重複・空はエラー、版は持たず新しさの検査はアプリの `PolicyVerifier`、自動の grant は読み込みが作って永続化しない) は DR の「どの選択肢でも変わらない部分」。裁定待ちの分岐は 7 つで、J2・J4・J5 は既存の DR の型や trait を改める。
+
+- [ ] a (統括の推奨): 分岐のないところと、7 つの分岐の推奨を全部採る
+- [ ] b: 採るが、下でチェックした分岐は推奨と違う案にする (案の記号か内容を教えてください)
+  - [ ] J1 一覧の入れ物と名前付きの subject の形 (推奨 b: `subjects` / `tags` / `rules` の 3 つの配列)
+  - [ ] J2 placeholder の型 (推奨 a: 値全体の placeholder を `MatchValue::Pin` 1 つにする。`process` / `responsible` の名指しが消える。DR-0007 の型の形を改める)
+  - [ ] J3 ACL の型の公開の `Deserialize` (推奨 b: 持たない。JSON から値になるのは 2 つの入口だけ)
+  - [ ] J4 grant の condition の検査 (推奨 b: `Condition` に検査の method を足す。DR-0004 の trait を改める)
+  - [ ] J5 pin 値の性質の印 (推奨 a: `Condition` に 3 値の method を 1 つ足す。自動の grant の対象と採用の順が決まり、消費型の印の issue も片づく。DR-0008 の文言を改める)
+  - [ ] J6 自動の grant の値 (推奨 a: `id` は `rule:<rule の id>`、`created_at` は epoch)
+  - [ ] J7 検査のエラーの場所 (推奨 a: JSON Pointer で持たせる)
+- [ ] c: 採らない・分岐のないところに異論がある (内容を教えてください)
+
+### 👺SD-Q1: DR-0017 (`sanitize_for_display` の仕様) を採るか
+
+提案中の [DR-0017](decisions/DR-0017-sanitize-for-display.md)。制御文字と bidi の制御文字を `\u{…}` で書き、char で数え、切り詰めの印 `…` を上限の外に付ける。値を独立した枠に置くのは表示するアプリの責務。
+
+- [ ] a (統括の推奨): 4 つの分岐の推奨を全部採る
+- [ ] b: 採るが、下でチェックした分岐は推奨と違う案にする
+  - [ ] S1 表示から値が 1 つに決まるようにするか (推奨 a: `\` と値の中の `…` もエスケープする)
+  - [ ] S2 対象の範囲 (推奨 b: 見えない書式文字と行の区切りも対象にする = Cc・Cf・Zl・Zp)
+  - [ ] S3 短い書き方 (推奨 a: 持たない。改行も `\u{a}`)
+  - [ ] S4 上限が数えるもの (推奨 a: 出力の文字数)
+- [ ] c: 採らない
+
 ### 👺PT-Q1: 要求を書いたプロセスと、接続相手として収集されるプロセスの食い違いを、procline が扱うか
 
 [issue](issue/2026-11-15-peer-token-is-last-user-at-read-time.md) の (c)。接続相手の audit token が表すのは「読んだ時点で相手側の端を最後に送受信に使ったプロセスの、その時点の資格情報」で、要求を書いたプロセスとは限らない ([findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md))。同じ uid の別プロセスは、要求を書いた後に許可されたバイナリを自分で exec すれば、収集の結果をそのバイナリのものにできる。macOS の UNIX ドメインソケットには、メッセージごとに書き手の資格情報を付ける手段が無い。
