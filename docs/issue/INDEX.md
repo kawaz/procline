@@ -7,7 +7,6 @@
 | 2026-11-15 | design | open | [JSON から読み込んだ ProcessChain を、評価がそのまま信用する](./2026-11-15-deserialized-chain-is-trusted-by-evaluate.md) |  |
 | 2026-11-15 | design | open | [署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる](./2026-11-15-grant-and-list-rollback.md) |  |
 | 2026-11-15 | design | open | [収集だけを使う利用者が、ACL とアイコンを持ち込まずに済む入口が要るか決める](./2026-11-15-minimal-collect-entry.md) |  |
-| 2026-11-15 | bug | open | [終了して回収されていない祖先 (zombie) が、途切れの印なしで列に残る](./2026-11-15-zombie-ancestor-not-truncated.md) |  |
 | 2026-11-09 | design | open | [消費型 condition を表す印を Condition trait に足すか決める](./2026-11-09-consumable-condition-marker.md) |  |
 | 2026-11-09 | tech-memo | open | [os.session の各段階の事象固有の値を macOS 実機で確かめる](./2026-11-09-os-session-event-values.md) |  |
 | 2026-11-08 | task | open | [grant 永続化のベンチ (advance ごとの署名 + 書き込みコスト)](./2026-11-08-grant-persist-bench.md) |  |

@@ -1,9 +1,10 @@
 ---
 title: 終了して回収されていない祖先 (zombie) が、途切れの印なしで列に残る
-status: open
+status: resolved
 category: bug
 created: 2026-11-15T12:30:00+09:00
 origin: 自リポ TODO (pam-passkey のセッションからの起票。署名の検証と収集のレビューの確認で見つかった)
+close_reason: implemented
 ---
 
 # 終了して回収されていない祖先 (zombie) が、途切れの印なしで列に残る
@@ -36,11 +37,11 @@ procline の収集のテストの足場 (sh とその子のサブシェル。sh 
 
 - `Recorded::read` は `kinfo_proc` が読めれば生きているとみなし、`unique_ids` の失敗は「SPI が使えない」として `None` にする。zombie の `ESRCH` も `None` になる
 - `same_individual` / `same_image` / `is_parent_of` は、片方の `ids` が `None` なら unique ID と pid version を比べず、起動時刻だけで同じとみなす。zombie の起動時刻は生前と同じなので通る
-- 対象 (列の先頭) も同じ経路を通るので、収集の途中で対象が zombie になっても `Ok` になるはず (コードを読んだだけで、未観測)
+- 対象 (列の先頭) も同じ経路を通り、収集の途中で対象が zombie になると `Ok` になった (修正を外した状態のテストで、pid の経路と接続相手の経路の両方で観測)
 
-## 直し方の案 (返事待ち)
+## 直し方の案 (推奨案を採った)
 
-### 推奨: `kinfo_proc` の `p_stat` が `SZOMB` なら、`Recorded::read` を「そのプロセスは無い」(`ESRCH`) で失敗させる
+### 推奨 (採用): `kinfo_proc` の `p_stat` が `SZOMB` なら、`Recorded::read` を「そのプロセスは無い」(`ESRCH`) で失敗させる
 
 - `KinfoProc` に、`p_stat == SZOMB` を表す値を足す (crate の中の型)。`Recorded::read` は zombie を `ESRCH` の失敗として返す
 - 既存の分岐がそのまま当てはまる:
@@ -50,14 +51,21 @@ procline の収集のテストの足場 (sh とその子のサブシェル。sh 
 - カーネルが状態として返す値で判定するので、SPI が使えない環境でも効く
 - テスト: 今の収集のテストの足場に「sh を終わらせて回収しない」を足す (kill して `waitid(WEXITED | WNOWAIT)` で待つ。時間待ちなし)。足場で上の 2 つの時機を作れることは確かめた。署名の後に zombie になる場合と、walk の前に zombie になる場合の 2 つで、`AncestorExited` になることを固定する。対象が zombie になる場合も足す
 
-### 代わりの案: `PROC_PIDUNIQIDENTIFIERINFO` の `ESRCH` を「無い」として扱う
+### 代わりの案 (不採用。SPI が使えない環境で効かない): `PROC_PIDUNIQIDENTIFIERINFO` の `ESRCH` を「無い」として扱う
 
 - `unique_ids` の失敗のうち `ESRCH` だけを `Recorded::read` の失敗にし、それ以外 (SPI が無い時は `EINVAL` のはず) は今どおり `None`
 - `kinfo_proc` の offset を新しく読まなくて済む
 - ただし、SPI が使えない環境では zombie を検出できない。未知の flavor が `EINVAL` を返すことは観測したが、SPI が無い版の macOS で実際に何が返るかは観測していない
 
+## 結果
+
+- `kinfo_proc` (呼び出し元は `Recorded::read` だけ) が、`p_stat` が `SZOMB` の時に、既存の「無い」と同じ `no_such_process()` (`ESRCH`) を返す。`KinfoProc` の型は変えていない。`p_stat` の offset 36 (`char`) と `SZOMB` 5 は、SDK (MacOSX 26.5、arm64) のヘッダを `offsetof` でコンパイルして測った (同じプログラムで既存の `p_comm` 243、`e_ppid` 560 も一致)
+- 対象が zombie の時: pid の経路は `NoSuchProcess`、接続相手の経路は `IdentityChanged` (開始時に zombie ならどちらも `NoSuchProcess`)。どれも回収済みで消えたプロセスの時と同じ
+- テスト (`collect::tests`): `a_zombie_ancestor_before_the_walk_ends_the_chain`、`a_zombie_ancestor_after_the_signatures_ends_the_chain`、`a_target_that_became_a_zombie_is_gone` (pid と接続相手)。zombie は kill と `waitid(WEXITED | WNOWAIT)` で作り、時間待ちなし。修正を外すと 3 つとも落ちる (祖先は列が 2 つ残る、対象は `Ok`)。失敗しても子は残らない (Drop で回収)
+- DESIGN (ja/en) の「収集の整合性」の 4 に、回収されていない終了済みのプロセスも終了として扱うことを足した
+
 ## 受け入れ条件
 
-- [ ] 収集の途中で zombie になった祖先で、列がその手前で `AncestorExited` で終わる (署名の後に zombie になる場合と、walk の前に zombie になる場合)
-- [ ] 収集の途中で zombie になった対象で、結果が `Ok` にならない
-- [ ] それぞれ、zombie を実際に作るテストで固定する
+- [x] 収集の途中で zombie になった祖先で、列がその手前で `AncestorExited` で終わる (署名の後に zombie になる場合と、walk の前に zombie になる場合)
+- [x] 収集の途中で zombie になった対象で、結果が `Ok` にならない
+- [x] それぞれ、zombie を実際に作るテストで固定する
