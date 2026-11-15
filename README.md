@@ -6,7 +6,7 @@ Rust crates that collect information about a process and its ancestors (lineage)
 
 ## Command
 
-The `procline` command prints a process and its ancestors as JSON (macOS).
+The `procline` command prints a process and its ancestors as JSON (macOS). In the strings of the JSON, the control characters that change the state of a terminal, the direction of the display or the lines (DEL, C1, the bidi controls, U+2028, U+2029) are written as `\uXXXX` (the values read as JSON stay the same).
 
 ```sh
 cargo install --path crates/procline-cli

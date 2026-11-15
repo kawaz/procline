@@ -14,7 +14,7 @@
 | crate | 役割 | 依存 |
 | --- | --- | --- |
 | `procline` | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの収集の crate(target ごとに片方だけ) |
-| `procline-core` | OS 非依存の型と判定(収集結果の型、強さのクラス、署名の検証と信頼の印([DR-0011](DR-0011-verified-signature-and-trust-mark.md))、無害化、env の方針) | なし |
+| `procline-core` | OS 非依存の型と判定(収集結果の型、強さのクラス、署名の検証と信頼の印([DR-0011](DR-0011-verified-signature-and-trust-mark.md))、env の方針) | なし |
 | `procline-macos` | macOS での収集、コード署名の検証、アイコン、`os.*` の語彙が使う OS の観測(`boot_session_uuid()`、`wake_time_secs()`) | core |
 | `procline-acl` | rule と grant の型、評価、語彙とその登録、OS 非依存の組み込みの語彙(`Vocabulary::builtin()`)、rule の作成と grant の発行 | core |
 | `procline-acl-macos` | `os.*` の語彙の提供(`procline_acl_macos::os_items() -> Vec<procline_acl::Item>`) | acl、core、macos |

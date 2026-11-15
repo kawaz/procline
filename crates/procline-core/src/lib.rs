@@ -6,7 +6,6 @@ mod binary;
 mod env;
 mod pin;
 mod process;
-mod sanitize;
 mod session;
 mod signature;
 mod strength;
@@ -19,7 +18,6 @@ pub use process::{
     AuditToken, Credentials, Identity, NamedId, PathMeta, ProcessChain, ProcessIdentity,
     ProcessInfo, StartTime, Truncated,
 };
-pub use sanitize::sanitize_for_display;
 pub use session::SessionLevel;
 pub use signature::{
     Bundle, CdHash, Certificate, CertificateKind, CodeSigning, FailureReason, Mark, Root,

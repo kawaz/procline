@@ -326,3 +326,159 @@ fn version_prints_the_package_version() {
         format!("procline {}\n", env!("CARGO_PKG_VERSION"))
     );
 }
+
+// 端末の状態・表示の向き・行を変える文字で、serde_json がエスケープしないもの: DEL、C1 の 32 個、bidi の制御文字 12 個、行と段落の区切り。argv やパスは他のプロセスが決める文字列なので、CLI はこれらを JSON の `\uXXXX` で書く (JSON として読んだ値は変わらない)。実装の集合とは別にここで列挙して、両方が一致することを確かめる。
+fn terminal_controls() -> Vec<char> {
+    let mut chars: Vec<char> = ('\u{80}'..='\u{9f}').collect();
+    chars.push('\u{7f}');
+    chars.extend(['\u{61c}', '\u{200e}', '\u{200f}']);
+    chars.extend('\u{202a}'..='\u{202e}');
+    chars.extend('\u{2066}'..='\u{2069}');
+    chars.extend(['\u{2028}', '\u{2029}']);
+    chars
+}
+
+/// A child whose argv ends with the given arguments, blocked reading its standard input. The value kills and reaps it when dropped, also on failure.
+#[cfg(target_os = "macos")]
+struct Holding(std::process::Child);
+
+#[cfg(target_os = "macos")]
+impl Holding {
+    /// Returns once the child printed `ready`. `/bin/sh` may exec the shell it stands for, and `echo` runs in that last image, so the argv the collection reads no longer changes; the child ending before that fails the test instead of leaving it waiting.
+    fn start(args: &[&str]) -> Self {
+        use std::io::BufRead;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "echo ready; read never", "sh"])
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("/bin/sh starts");
+        let stdout = child.stdout.take().expect("the standard output is piped");
+        let holding = Self(child);
+        let mut line = String::new();
+        std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("the child writes a line");
+        assert_eq!(line, "ready\n", "the child ended before it was ready");
+        holding
+    }
+
+    fn pid(&self) -> String {
+        self.0.id().to_string()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Holding {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The argv of the child as the CLI printed it, read as JSON, and the raw standard output. Only the child is collected (`--max-ancestors=0`), without env.
+#[cfg(target_os = "macos")]
+fn collect_argv(args: &[&str]) -> (Vec<String>, String) {
+    let child = Holding::start(args);
+    let output = procline(&["--max-ancestors=0", &child.pid()]);
+    assert!(
+        output.status.success(),
+        "procline failed with {}",
+        output.status
+    );
+    let text = stdout(&output).to_owned();
+    let chain: serde_json::Value =
+        serde_json::from_str(&text).expect("the standard output is JSON");
+    let argv = processes(&chain)[0]["argv"]
+        .as_array()
+        .expect("the argv of the child is collected")
+        .iter()
+        .map(|arg| arg.as_str().expect("an argument is a string").to_owned())
+        .collect();
+    (argv, text)
+}
+
+// 対象の各グループから 1 文字ずつ (DEL、C1 の CSI U+009B、bidi の U+202E と U+2066、行の区切り U+2028) を argv に持つプロセスを実際に起こして CLI で集める。標準出力にはどの対象の文字も生のまま現れず、JSON として読んだ argv は元の文字列と同じ。NUL などの U+0000〜U+001F は argv に入れられない (C の文字列で NUL が終端になる) ので、ここでは使わない。
+#[cfg(target_os = "macos")]
+#[test]
+fn control_characters_in_argv_are_escaped_in_the_output() {
+    let args = [
+        "a\u{7f}b",
+        "c\u{9b}31m",
+        "\u{202e}fdp.exe",
+        "x\u{2066}y\u{2069}z",
+        "line\u{2028}break",
+    ];
+    let (argv, text) = collect_argv(&args);
+    for c in terminal_controls() {
+        assert!(
+            !text.contains(c),
+            "the output holds U+{:04X} unescaped",
+            u32::from(c)
+        );
+    }
+    assert!(
+        text.contains(r"c\u009b31m"),
+        "U+009B is not written as \\u009b"
+    );
+    assert!(
+        argv.ends_with(&args.map(str::to_owned)),
+        "the argv read from the output differs from the arguments given"
+    );
+}
+
+// 対象の外の非 ASCII (日本語) は \u にならず、そのままの文字で出る。エスケープは端末を操作する文字だけに絞り、読める値を読めないままにしない。
+#[cfg(target_os = "macos")]
+#[test]
+fn japanese_in_argv_is_printed_as_it_is() {
+    let args = ["日本語のパス"];
+    let (argv, text) = collect_argv(&args);
+    assert!(
+        text.contains("\"日本語のパス\""),
+        "the argument is not printed as it is"
+    );
+    assert!(argv.ends_with(&args.map(str::to_owned)));
+}
+
+fn escaped(value: &str) -> String {
+    procline_cli::escape_terminal_controls(&serde_json::to_string(value).expect("a string is JSON"))
+}
+
+// 対象の全部の文字 (C1 の 32 個、DEL、bidi の 12 個、U+2028、U+2029) は、serde_json が U+0000〜U+001F に使うのと同じ形 (16 進 4 桁、小文字) の `\uXXXX` になり、JSON として読むと元の文字に戻る。
+#[test]
+fn every_terminal_control_becomes_a_unicode_escape() {
+    let chars = terminal_controls();
+    assert_eq!(chars.len(), 32 + 1 + 12 + 2);
+    for c in chars {
+        let json = escaped(&c.to_string());
+        assert_eq!(json, format!("\"\\u{:04x}\"", u32::from(c)));
+        let read: String = serde_json::from_str(&json).expect("the escaped text is JSON");
+        assert_eq!(read, c.to_string());
+    }
+}
+
+// 集合の端の隣 (U+007E、U+00A0、U+061B と U+061D、U+200D と U+2010、U+2027、U+202F、U+2065、U+206A) と日本語は、そのままの文字で出る。U+2029 と U+202A はどちらも対象で隣り合うので、その間に外の文字は無い。U+0000〜U+001F、`"`、`\` は serde_json の書き方のまま変わらない。整形 (インデント、キーの順) も変わらない: 書き換えるのは対象の文字だけ。
+#[test]
+fn characters_outside_the_set_are_kept() {
+    for c in [
+        '\u{7e}', '\u{a0}', '\u{61b}', '\u{61d}', '\u{200d}', '\u{2010}', '\u{2027}', '\u{202f}',
+        '\u{2065}', '\u{206a}', '日',
+    ] {
+        assert_eq!(
+            escaped(&c.to_string()),
+            format!("\"{c}\""),
+            "U+{:04X}",
+            u32::from(c)
+        );
+    }
+    let syntax: String = ('\u{0}'..='\u{1f}').chain(['"', '\\']).collect();
+    let json = serde_json::to_string(&syntax).expect("a string is JSON");
+    assert_eq!(procline_cli::escape_terminal_controls(&json), json);
+    let pretty = serde_json::to_string_pretty(
+        &serde_json::json!({"b": ["日本", 1, null], "a": {"c": true}}),
+    )
+    .expect("a value is JSON");
+    assert_eq!(procline_cli::escape_terminal_controls(&pretty), pretty);
+}

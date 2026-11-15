@@ -327,6 +327,5 @@ rule の引数の検査 (`Condition::validate_args`) は grant には使えな�
 - [DR-0010](DR-0010-or-in-values-and-tag-definitions.md): 値の列とタグの複数定義
 - [DR-0013](DR-0013-acl-layer-in-separate-crates.md): crate の層
 - [DR-0014](DR-0014-chain-trust-boundary-and-caller-supplied-values.md): 外から書く型と `Deserialize`
-- [DR-0017](DR-0017-sanitize-for-display.md): `sanitize_for_display` (提案)
 - [findings: 読み込みの入口の実装前の仕分け](../findings/2026-11-15-load-entry-recon.md)
 - issue: [差し戻し](../issue/2026-11-15-grant-and-list-rollback.md)、[消費型の印](../issue/2026-11-09-consumable-condition-marker.md)、[CLI](../issue/2026-11-15-procline-cli.md)

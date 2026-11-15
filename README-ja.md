@@ -6,7 +6,7 @@
 
 ## コマンド
 
-`procline` コマンドは、プロセスとその祖先を集めた列を JSON で出す (macOS)。
+`procline` コマンドは、プロセスとその祖先を集めた列を JSON で出す (macOS)。出力の JSON の文字列では、端末の状態・表示の向き・行を変える制御文字 (DEL、C1、bidi の制御文字、U+2028、U+2029) を `\uXXXX` で書く (JSON として読んだ値は変わらない)。
 
 ```sh
 cargo install --path crates/procline-cli

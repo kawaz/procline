@@ -36,7 +36,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | crate | 中身 | 依存 |
 | --- | --- | --- |
 | procline | 入口。core の型と、ビルドターゲットの OS の collect を再公開する | core、OS ごとの crate(target ごとに片方だけ) |
-| procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の検証の手順と信頼の印の決定、表示用の無害化、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
+| procline-core | 収集結果の型、強さのクラスの型(`Strength`)、署名の検証の手順と信頼の印の決定、env の方針と伏せ字、JSON の形 | なし(OS 非依存) |
 | procline-macos | 接続相手と祖先の収集、コード署名の検証、アイコン、`os.*` の語彙が使う OS の観測(`boot_session_uuid()`、`wake_time_secs()`) | core、Security framework、AppKit |
 | procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、OS 非依存の組み込みの語彙、rule の作成と grant の発行 | core |
 | procline-acl-macos | `os.*` の語彙の提供(`procline_acl_macos::os_items()`)。OS の観測は procline-macos の公開関数で行い、`unsafe` を持たない | procline-acl、core、procline-macos |
@@ -117,7 +117,7 @@ crate は署名の検証の結果をキャッシュしません。走ってい�
 
 **アイコン**: 手元の .app から取ります。App Store の API は、Developer ID 配布のアプリが取れず、利用中のアプリを外部に問い合わせることになるので使いません。キャッシュのキーは cdhash(なければ bundle ID と版)です。アイコンは誰でも真似できるので、画面では必ず信頼の印と並べて出します。
 
-## env、無害化、収集の整合性
+## env、収集の整合性
 
 ### env
 
@@ -131,13 +131,7 @@ env にはトークンなどの秘密が混ざるので、収集するかどう�
 
 伏せ字は core に置き、2つの関数として差し替えられるようにします(`Redaction` を `CollectOptions.redaction` で渡す)。対象の判定 `Fn(&str) -> bool`(変数名を受け取る)と、伏せ方 `Fn(&str, &str) -> String`(名前と値を受け取る)です。既定は、名前に `TOKEN`、`SECRET`、`PASS`、`KEY`、`CRED`、`AUTH`、`COOKIE`、`SESSION`、`PRIVATE`、`CERT`、`SALT`、`PWD`、`OTP` を含む変数(大文字小文字を区別しない)の値を `[redacted]` に置き換え、名前だけ残します。語の選び方は Rails の `filter_parameters` や Sentry の既定の伏せ字など、既存のリストに合わせます。`PWD` は作業ディレクトリの変数も巻き込みますが、作業ディレクトリは cwd の項目で取れるので困りません。外したいときは、既定の判定関数を包んで PWD を除く関数に差し替えます。収集結果の env は伏せた後の値しか持たないので、照合には使えません(表示専用)。
 
-### 表示用の無害化
-
-argv、パス、env の値など、相手が自由に決められる文字列を画面に出すときは、core の関数を通します。
-
-- 制御文字と bidi 制御文字はエスケープして見せる(表示を入れ替えて別のコマンドに見せる攻撃を防ぐ)。
-- 長すぎる値は切り詰め、切り詰めたことが分かる形にする。
-- 照合には無害化する前の元の値を使う。
+表示用の無害化は procline の責務外です。値は生のまま返します。
 
 ### 収集の整合性
 
@@ -663,6 +657,7 @@ JSON では、バイト列(証明書の DER など)を base64url(padding なし)
 ```rust
 // 収集(procline-macos)
 // procline コマンド(crates/procline-cli)は collect_pid で集めた列を JSON で出す(procline <pid>)
+// その JSON の文字列では、端末の状態・表示の向き・行を変える制御文字(DEL、C1、bidi の制御文字、U+2028、U+2029)を \uXXXX で書く
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(vec!["PWD".into(), "SSH_CONNECTION".into()]),
     icon: true,

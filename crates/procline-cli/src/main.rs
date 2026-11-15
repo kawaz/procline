@@ -44,7 +44,7 @@ mod collect {
     use std::process::ExitCode;
 
     use procline::{CollectError, CollectOptions, EnvPolicy, Redaction, collect_pid};
-    use procline_cli::{CollectChoice, PROGRAM};
+    use procline_cli::{CollectChoice, PROGRAM, escape_terminal_controls};
 
     pub(crate) fn run(pid: i32, choice: &CollectChoice) -> ExitCode {
         let options = CollectOptions {
@@ -70,7 +70,7 @@ mod collect {
             }
         };
         match serde_json::to_string_pretty(&chain) {
-            Ok(json) => super::print(&format!("{json}\n")),
+            Ok(json) => super::print(&format!("{}\n", escape_terminal_controls(&json))),
             Err(err) => {
                 eprintln!("{PROGRAM}: cannot write the chain as JSON: {err}");
                 ExitCode::FAILURE

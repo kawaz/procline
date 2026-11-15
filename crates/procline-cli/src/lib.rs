@@ -1,11 +1,12 @@
-//! The command line of the `procline` command: its grammar, the `--help` text and the shell completion, all built from the same tables.
+//! The command line of the `procline` command: its grammar, the `--help` text and the shell completion, all built from the same tables, and the escaping of the JSON it prints.
 //!
-//! The binary (`src/main.rs`) runs what [`parse`] returns. This library exists so that the tests can read the tables the parser, the help and the completion share; it is not an API for other crates.
+//! The binary (`src/main.rs`) runs what [`parse`] returns and prints the JSON through [`escape_terminal_controls`]. This library exists so that the tests can read the tables the parser, the help and the completion share, and call the escaping; it is not an API for other crates.
 
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
 use std::fmt;
+use std::fmt::Write as _;
 
 /// The name of the command.
 pub const PROGRAM: &str = "procline";
@@ -460,4 +461,37 @@ fn zsh_escape_description(description: &str) -> String {
         .replace('[', r"\[")
         .replace(']', r"\]")
         .replace(':', r"\:")
+}
+
+/// Whether `c` changes the state of a terminal, the direction of the display or the lines, and is left as it is by `serde_json`: DEL, the C1 controls, the 12 bidi controls and the line and paragraph separators.
+///
+/// Design rationale: the set is a fixed list rather than a Unicode property (`Bidi_Control`, the category `Cc`), so that the command does not depend on the Unicode tables.
+fn is_terminal_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{7f}'..='\u{9f}'
+            | '\u{61c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
+}
+
+/// Writes every character of `json` (text written by `serde_json`) for which [`is_terminal_control`] holds as a JSON escape `\uXXXX` (4 lowercase hex digits, the form `serde_json` uses for U+0000 to U+001F). Read as JSON, the result holds the same values; every other character is kept.
+///
+/// Design rationale: the text `serde_json` wrote is rewritten, rather than written through an own `serde_json::ser::Formatter`, because driving a serializer with a formatter needs the `serde` crate, which this crate does not depend on. The output is the same: outside strings `serde_json` writes only ASCII, so each such character in the text is inside a string.
+pub fn escape_terminal_controls(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len());
+    for c in json.chars() {
+        if is_terminal_control(c) {
+            // Writing to a String does not fail.
+            let _ = write!(escaped, "\\u{:04x}", u32::from(c));
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
 }

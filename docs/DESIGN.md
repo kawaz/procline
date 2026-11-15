@@ -36,7 +36,7 @@ Collection is implemented in per-OS crates, while the types and matching live in
 | crate | Contents | Depends on |
 | --- | --- | --- |
 | procline | Entry point. Re-exports the core types and the collect of the build target's OS | core, a per-OS crate (only one, per target) |
-| procline-core | Types for collection results, the strength class type (`Strength`), the signature verification steps and the trust mark, sanitization for display, env policy and redaction, the JSON shape | none (OS-independent) |
+| procline-core | Types for collection results, the strength class type (`Strength`), the signature verification steps and the trust mark, env policy and redaction, the JSON shape | none (OS-independent) |
 | procline-macos | Collection of the peer and ancestors, code signature verification, icons, the OS observations the `os.*` vocabulary uses (`boot_session_uuid()`, `wake_time_secs()`) | core, Security framework, AppKit |
 | procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, the OS-independent built-in vocabulary, rule creation and grant issuance | core |
 | procline-acl-macos | Providing the `os.*` vocabulary (`procline_acl_macos::os_items()`). It observes the OS through the public functions of procline-macos and has no `unsafe` | procline-acl, core, procline-macos |
@@ -117,7 +117,7 @@ The crate does not cache verification results. Verifying one running process tak
 
 **Icons**: taken from the local .app. The App Store API is not used, because it cannot return Developer ID distributed apps and would mean querying an external service about which apps are in use. The cache key is the cdhash (or the bundle ID and version if there is none). Since anyone can imitate icons, the UI always shows them alongside the trust mark.
 
-## env, Sanitization, and Collection Consistency
+## env and Collection Consistency
 
 ### env
 
@@ -131,13 +131,7 @@ env can contain secrets such as tokens, so the caller chooses whether to collect
 
 Redaction lives in the core and is replaceable as two functions (a `Redaction` passed via `CollectOptions.redaction`): the target predicate `Fn(&str) -> bool` (takes the variable name) and the redaction function `Fn(&str, &str) -> String` (takes the name and value). By default, variables whose name contains `TOKEN`, `SECRET`, `PASS`, `KEY`, `CRED`, `AUTH`, `COOKIE`, `SESSION`, `PRIVATE`, `CERT`, `SALT`, `PWD`, or `OTP` (case-insensitive) have their value replaced with `[redacted]`, keeping only the name. The word choice follows existing lists such as Rails' `filter_parameters` and Sentry's default redaction. `PWD` also catches the working directory variable, but this is not a problem because the working directory is available as the cwd item. To exclude it, replace the predicate with one that wraps the default and excludes PWD. The env in the collection result holds only the values after redaction, so it cannot be used for matching (display only).
 
-### Sanitization for Display
-
-Strings whose content the other side can freely choose, such as argv, paths, and env values, go through a core function when shown on screen.
-
-- Control characters and bidi control characters are shown escaped (preventing attacks that reorder the display to make it look like a different command).
-- Overly long values are truncated, in a form that makes the truncation visible.
-- Matching uses the original value before sanitization.
+Sanitization for display is outside procline's responsibility. Values are returned raw.
 
 ### Collection Consistency
 
@@ -663,6 +657,7 @@ In JSON, byte strings (such as certificate DER) are written as base64url (withou
 ```rust
 // Collection (procline-macos)
 // the procline command (crates/procline-cli) prints the chain collected with collect_pid as JSON (procline <pid>)
+// in the strings of that JSON, the control characters that change the state of a terminal, the direction of the display or the lines (DEL, C1, the bidi controls, U+2028, U+2029) are written as \uXXXX
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
     env: EnvPolicy::Allowlist(vec!["PWD".into(), "SSH_CONNECTION".into()]),
     icon: true,
