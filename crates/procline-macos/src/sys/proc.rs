@@ -34,6 +34,10 @@ mod kinfo {
     pub const START_SEC: usize = 0;
     /// `kp_proc.p_un.__p_starttime.tv_usec` (`suseconds_t`, 32 bit).
     pub const START_USEC: usize = 8;
+    /// `kp_proc.p_stat` (`char`, one of the `S*` process states of `<sys/proc.h>`).
+    pub const STAT: usize = 36;
+    /// `SZOMB` (`<sys/proc.h>`): the process has exited and awaits collection by its parent.
+    pub const SZOMB: u8 = 5;
     /// `kp_proc.p_comm` (`char[MAXCOMLEN + 1]`).
     pub const COMM: usize = 243;
     pub const COMM_LEN: usize = 17;
@@ -64,7 +68,7 @@ fn no_such_process() -> io::Error {
     io::Error::from_raw_os_error(libc::ESRCH)
 }
 
-/// `sysctl({CTL_KERN, KERN_PROC, KERN_PROC_PID, pid})`. Readable for every process regardless of its uid. A pid with no process is `ESRCH`.
+/// `sysctl({CTL_KERN, KERN_PROC, KERN_PROC_PID, pid})`. Readable for every process regardless of its uid. A pid with no process is `ESRCH`, and so is a process that has exited and awaits collection by its parent (`SZOMB`): the kernel still answers for it with its start time, but it runs nothing, and `proc_pidinfo` and `proc_pidpath` answer `ESRCH` for it (observed).
 pub(crate) fn kinfo_proc(pid: i32) -> io::Result<KinfoProc> {
     let mut buf = [0u8; kinfo::SIZE];
     let mut size = buf.len();
@@ -92,6 +96,9 @@ pub(crate) fn kinfo_proc(pid: i32) -> io::Result<KinfoProc> {
             io::ErrorKind::InvalidData,
             format!("kinfo_proc of {size} bytes, expected {}", kinfo::SIZE),
         ));
+    }
+    if buf[kinfo::STAT] == kinfo::SZOMB {
+        return Err(no_such_process());
     }
     let ngroups = i16::from_ne_bytes(read_array(&buf, kinfo::CR_NGROUPS));
     let ngroups = usize::try_from(ngroups).unwrap_or(0).min(kinfo::NGROUPS);

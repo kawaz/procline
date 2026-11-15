@@ -525,6 +525,70 @@ mod tests {
             self.sh.kill().unwrap();
             self.sh.wait().unwrap();
         }
+
+        /// Kills sh and leaves it unreaped (a zombie): this test is its parent and does not collect it until the value is dropped.
+        fn zombify_sh(&mut self) {
+            zombify(&mut self.sh);
+        }
+    }
+
+    /// Kills the child and returns once it has exited, without reaping it (`waitid` with `WNOWAIT`), so it stays a zombie until `Child::wait`.
+    fn zombify(child: &mut Child) {
+        child.kill().unwrap();
+        // SAFETY: an all-zero siginfo_t is a valid value to be overwritten.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waits for one child of this process, writing into `info`.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(rc, 0);
+    }
+
+    /// `/usr/bin/nc` connected to a socket this test listens on: a direct child of this test, so it stays a zombie when killed until it is reaped, and the accepted stream gives its audit token. The connection is made by nc itself, so its `exec` is done once it is accepted. Dropping the value kills and reaps it.
+    struct Connected {
+        child: Child,
+        stream: std::os::unix::net::UnixStream,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Connected {
+        fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("s");
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let child = Command::new("/usr/bin/nc")
+                .arg("-U")
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            // Owned by the value before accepting, so the child is killed also when accepting fails; the placeholder stream is replaced by the accepted one.
+            let mut connected = Self {
+                child,
+                stream: std::os::unix::net::UnixStream::pair().unwrap().0,
+                _dir: dir,
+            };
+            connected.stream = listener.accept().unwrap().0;
+            connected
+        }
+
+        fn pid(&self) -> i32 {
+            i32::try_from(self.child.id()).unwrap()
+        }
+    }
+
+    impl Drop for Connected {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 
     impl Drop for Family {
@@ -541,16 +605,7 @@ mod tests {
         family: &mut Family,
         between: impl FnOnce(&mut Family),
     ) -> (Vec<Option<CodeSigning>>, Result<ProcessChain, CollectError>) {
-        let options = CollectOptions {
-            env: EnvPolicy::None,
-            redaction: Redaction::default(),
-            icon: false,
-            digest: false,
-            signature: true,
-            signature_budget: None,
-            all_names: false,
-            max_ancestors: 1,
-        };
+        let options = options();
         let boot_uuid = sys::boot_session_uuid().unwrap();
         let (records, truncated) = walk(Recorded::read(family.target).unwrap(), 1);
         assert_eq!(
@@ -568,6 +623,20 @@ mod tests {
             None,
         );
         (verified, result)
+    }
+
+    /// Signatures on, nothing else optional, the target and one ancestor.
+    fn options() -> CollectOptions {
+        CollectOptions {
+            env: EnvPolicy::None,
+            redaction: Redaction::default(),
+            icon: false,
+            digest: false,
+            signature: true,
+            signature_budget: None,
+            all_names: false,
+            max_ancestors: 1,
+        }
     }
 
     fn identifier(signing: Option<&CodeSigning>) -> Option<&str> {
@@ -612,5 +681,62 @@ mod tests {
         assert_eq!(exit.processes().len(), 1);
         assert_eq!(exit.processes()[0].identity.pid, family.target);
         assert_eq!(exit.truncated, Some(Truncated::AncestorExited));
+    }
+
+    // 終了して親にまだ回収されていないプロセス (zombie) は、終わったプロセスとして扱う。カーネルは zombie についても kinfo_proc を返し、起動時刻は生前と同じなので、起動時刻で個体を見ると生きている祖先と区別できない (unique ID は読めず、SPI が無い時と同じ None になる)。kinfo_proc の p_stat が SZOMB なら「そのプロセスは無い」(ESRCH) とし、回収済みのプロセスと同じ分岐に乗せる: 祖先なら列をその手前で AncestorExited で終える (祖先は途中で終了していることがあり、途切れたと分かる形で列を終える)。
+    // 時機は 2 つ (このテストと次のテスト): 対象を記録した後・親を読む前 (walk の前) と、署名を検証した後・最後の確かめ直しの前。どちらも sh を kill して waitid(WNOWAIT) で終了を待ち、回収しない (このテストが sh の親。時間待ちをしない)。zombie として扱わないと、前者は親として受け入れ (unique ID なし・署名は failed・path なし)、後者は生前の unique ID と署名を持った行を途切れの印なしで返していた。
+    #[test]
+    fn a_zombie_ancestor_before_the_walk_ends_the_chain() {
+        let mut family = Family::start();
+        let target = Recorded::read(family.target).unwrap();
+        family.zombify_sh();
+        let (records, truncated) = walk(target, 1);
+        assert_eq!(
+            records.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            [family.target]
+        );
+        assert_eq!(truncated, Some(Truncated::AncestorExited));
+    }
+
+    // 上と同じ規則の、もう 1 つの時機: 署名を検証した後・最後の確かめ直しの前に祖先が zombie になる。
+    #[test]
+    fn a_zombie_ancestor_after_the_signatures_ends_the_chain() {
+        let mut family = Family::start();
+        let (_, result) = collect_with(&mut family, Family::zombify_sh);
+        let chain = result.unwrap();
+        assert_eq!(
+            chain
+                .processes()
+                .iter()
+                .map(|p| p.identity.pid)
+                .collect::<Vec<_>>(),
+            [family.target]
+        );
+        assert_eq!(chain.truncated, Some(Truncated::AncestorExited));
+    }
+
+    // 対象 (列の先頭) が収集の途中で zombie になったら、回収されて消えた時と同じエラー: pid で集めた時は NoSuchProcess (その pid のプロセスはもう無い)、接続相手は IdentityChanged (接続を記録した個体が、収集の終わりにはもういない)。生前の値で Ok を返さない。対象は nc で、このテストの直接の子なので、kill して waitid(WNOWAIT) で待てば回収されずに残る。時機は署名を検証した後・最後の確かめ直しの前。
+    #[test]
+    fn a_target_that_became_a_zombie_is_gone() {
+        let options = options();
+        let boot_uuid = sys::boot_session_uuid().unwrap();
+        for peer in [false, true] {
+            let mut connected = Connected::start();
+            let pid = connected.pid();
+            let peer_token = peer.then(|| {
+                crate::sys::peer::peer_token(std::os::fd::AsFd::as_fd(&connected.stream)).unwrap()
+            });
+            let (records, truncated) = walk(Recorded::read(pid).unwrap(), 1);
+            let verified = signatures(&records, &options, peer_token);
+            zombify(&mut connected.child);
+            let result = describe_and_recheck(
+                &records, truncated, verified, &boot_uuid, &options, peer_token,
+            );
+            match (peer, result) {
+                (false, Err(CollectError::NoSuchProcess { pid: gone })) => assert_eq!(gone, pid),
+                (true, Err(CollectError::IdentityChanged)) => {}
+                (peer, result) => panic!("peer {peer}: {result:?}"),
+            }
+        }
     }
 }
