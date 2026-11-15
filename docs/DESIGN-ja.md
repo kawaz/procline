@@ -2,12 +2,12 @@
 
 ## 概要
 
-プロセスとその祖先の情報を集め、その情報に対するアクセス制御(ACL)を定義・評価するための crate 群です。pam-passkey の承認画面と、cw の ACL 照合・後付けの許可ルールが同じものを必要とするので、両者から切り出して共通の部品にします。収集の入口は UNIX ドメインソケットの接続相手(audit token)が主ですが、中心はあくまでプロセスで、接続相手であることには依存しません。
+プロセスとその祖先の情報を集め、その情報に対するアクセス制御(ACL)を定義・評価するための crate 群です。収集した情報は表示にも ACL の照合にも同じ型で使え、収集だけを使うことも、その上に ACL を載せて使うこともできます。収集の入口は UNIX ドメインソケットの接続相手(audit token)が主ですが、中心はあくまでプロセスで、接続相手であることには依存しません。
 
-**利用者と使い方**
+**使い方の型**
 
-- **pam-passkey**: 呼び出し元のプロセスとその祖先を集め、承認画面に表示する。照合は使わない。
-- **cw**: 接続相手を集め、キーごとの ACL で許可・拒否・再認証を決める。承認画面から後付けでルールを作る。
+- **収集だけを使うアプリ**: 呼び出し元のプロセスとその祖先を集め、承認画面に表示する。照合は使わない。
+- **ACL も使うアプリ**: 接続相手を集め、アプリが守る対象ごとの ACL で許可・拒否・再認証を決める。承認画面から後付けでルールを作る。
 
 **設計の柱**
 
@@ -22,11 +22,11 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 **脅威モデルの前提**
 
-守る相手は、同じ uid の別プロセスです。root と、評価するアプリ自身のなりすましは範囲外です(cw の設計文書と同じ)。
+守る相手は、同じ uid の別プロセスです。root と、評価するアプリ自身のなりすましは範囲外です。
 
 - 署名と保護の状態は、その code が差し込みや改変なしに動いていることまでを示し、その code が何を実行するか(インタプリタが読むスクリプト、AI エージェントの操作)は表しません。
 - 保護の無い署名済みのバイナリ(hardened runtime が無い、保護を緩める entitlement がある)は、同じ uid のプロセスが自分で起動してライブラリを差し込むだけで、そのコードの署名由来の条件を満たすプロセスを作れます。同じ身元の別のビルドでも同じです。そのため、`binary`、`path`、`process` のクラスは照合したプロセスの保護の状態で決め、評価のたびに確かめ直します(決定の記録: [DR-0012](decisions/DR-0012-strength-class-from-protection.md))。
-- 一覧と grant の保存先と署名鍵の保護(同じ uid のプロセスから使えない鍵)はアプリの責務です。cw は Secure Enclave の鍵で担います。
+- 一覧と grant の保存先と署名鍵の保護(同じ uid のプロセスから使えない鍵)はアプリの責務です。
 - 評価に渡す chain は、評価するプロセスが自分で収集したものです。収集した事実の型(`ProcessChain`、`ProcessInfo`、`CodeSigning` など)は JSON から読めず、chain を組めるのは収集の入口と、アプリのコードが「収集した値」と表明する `ProcessChain::from_collected` だけです。タグ付きの列(`TaggedChain`)を作れるのは `Policy::tag` だけです。他のプロセスから受け取った値は表示にだけ使います。条件の観測値(`EvalContext`)と、項目に直接渡す `ProcessInfo`(`MatchTarget`、`Vocabulary::class`)はアプリの責務です(決定の記録: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md))。
 
 ## 構成
@@ -41,7 +41,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 | procline-acl | rule と grant の型、評価、語彙(matcher の項目、scope、条件)とその登録、OS 非依存の組み込みの語彙、rule の作成と grant の発行 | core |
 | procline-acl-macos | `os.*` の語彙の提供(`procline_acl_macos::os_items()`)。OS の観測は procline-macos の公開関数で行い、`unsafe` を持たない | procline-acl、core、procline-macos |
 
-アプリは必要なものだけを使います。収集だけを使うアプリは procline に依存します。ACL を使うアプリは procline-acl と procline-acl-macos を足し、`procline_acl_macos::os_items()` の `os.*` の項目を `Vocabulary::register` で登録します。アプリ固有の語彙(cw なら `app.unlock` など)はアプリ側で定義して、`app.` の名前で procline-acl に登録します。
+アプリは必要なものだけを使います。収集だけを使うアプリは procline に依存します。ACL を使うアプリは procline-acl と procline-acl-macos を足し、`procline_acl_macos::os_items()` の `os.*` の項目を `Vocabulary::register` で登録します。アプリ固有の語彙(`app.unlock` など。「アプリが足す語彙」)はアプリ側で定義して、`app.` の名前で procline-acl に登録します。
 
 ## 収集する情報
 
@@ -80,7 +80,7 @@ SPI や私的 API に依存する項目は、取れなければ空にするだ�
 
 ## 署名の検証と信頼の印
 
-アイコンや名前は「何に見えるか」、署名は「実際は誰か」です。署名の情報は、requirement で検証した事実だけを持ちます(決定の記録: [DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md))。core は事実から信頼の印を 1 か所で決め、pam-passkey の承認画面も cw のルール作成画面も、その値を表示に写します。印は「このバイナリが誰のものと確かめられたか」を表し、操作が安全かどうかは表しません(`zsh` や `sudo` は常に `apple`)。
+アイコンや名前は「何に見えるか」、署名は「実際は誰か」です。署名の情報は、requirement で検証した事実だけを持ちます(決定の記録: [DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md))。core は事実から信頼の印を 1 か所で決め、アプリの承認画面もルール作成画面も、その値を表示に写します。印は「このバイナリが誰のものと確かめられたか」を表し、操作が安全かどうかは表しません(`zsh` や `sudo` は常に `apple`)。
 
 **検証の結果**(`CodeSigning`): `Verified`(検証に成功)、`Failed`(検証に失敗。理由は「走っている間に実行ファイルが更新・差し替えされた」「実行ファイルが消えている」「その他」)、`Unsigned`、`NotChecked`(収集の時間の予算で検証しなかった)。身元(識別子、cdhash、証明書、Team ID、bundle ID、entitlements)は `Verified` にしか無く、検証に失敗したプロセスの身元は持ちません。差し替えられた時に取れるのは差し替えた先のファイルの情報で、走っているコードの情報ではないためです。
 
@@ -527,7 +527,7 @@ scope は複数並べられ、すべてが生きている間だけ grant が効�
 
 ### アプリが足す語彙
 
-アプリ固有の語彙は `app.` の名前空間に置きます。名前空間は crate 群が使うもの(`os.`、`time.` など)と `app.` だけで、アプリが自由に作ることはしません。評価するアプリは常に1つなので複数の名前空間は要らず、自由にすると今後 crate に足す名前空間とぶつかり得るためです。cw なら次のようなものです。
+アプリ固有の語彙は `app.` の名前空間に置きます。名前空間は crate 群が使うもの(`os.`、`time.` など)と `app.` だけで、アプリが自由に作ることはしません。評価するアプリは常に1つなので複数の名前空間は要らず、自由にすると今後 crate に足す名前空間とぶつかり得るためです。アプリ固有の語彙の例として、次のようなものがあります。
 
 - `app.unlock`: vault を開いた回。手動ロックや vkey\_ttl 切れで終わる。
 - `app.passphrase`: P を発行した回。Sealed になると終わる。
@@ -629,7 +629,7 @@ struct ObserveError { reason: String }
 
 保存形は「一覧 1 本」と「grant 1 件ずつ」の 2 系統です。どちらも JSON で、保存と署名はアプリの責務です。署名の検証はアプリが実装する `PolicyVerifier::verify(&self, kind: SignedKind, bytes, sig)` で行い、`enum SignedKind { List, Grant }` で一覧と grant の署名の用途を分けます。
 
-**一覧**(subject、tag、rule): crate は「一覧のバイト列と署名を受け取り、検証してから読む」ための入口(`Policy::load_verified`)を用意します。cw は一覧に D 側の鍵で署名し、同じ uid のプロセスが勝手に許可ルールを書き足せないようにします(PasskeyRegistry と同じ扱い)。
+**一覧**(subject、tag、rule): crate は「一覧のバイト列と署名を受け取り、検証してから読む」ための入口(`Policy::load_verified`)を用意します。アプリは一覧に同じ uid のプロセスから使えない鍵で署名し、同じ uid のプロセスが勝手に許可ルールを書き足せないようにします。
 
 **grant**: grant はメモリ上に持ち、デーモンの意図しない終了に備えて、作成時と更新時に 1 件ずつ署名して永続化し、起動時に全部読み直します。メモリ上の grant が変わるのは、アプリが永続化してから `add_grant` / `remove_grant` を呼んだときだけです(決定の記録: [DR-0008](decisions/DR-0008-evaluation-semantics.md))。crate は `Grant` の JSON の形と、次の入口を持ちます。
 

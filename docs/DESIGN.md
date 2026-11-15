@@ -2,12 +2,12 @@
 
 ## Overview
 
-A set of crates for collecting information about a process and its ancestors, and for defining and evaluating access control (ACL) over that information. pam-passkey's approval UI and cw's ACL matching and after-the-fact allow rules need the same thing, so it is carved out of both into a shared component. The main entry point for collection is the peer of a UNIX domain socket (its audit token), but the center is the process itself, and nothing depends on it being a peer.
+A set of crates for collecting information about a process and its ancestors, and for defining and evaluating access control (ACL) over that information. The collected information can be used with the same types both for display and for ACL matching, and an app can use collection alone or use it with the ACL on top. The main entry point for collection is the peer of a UNIX domain socket (its audit token), but the center is the process itself, and nothing depends on it being a peer.
 
-**Consumers and how they use it**
+**Patterns of use**
 
-- **pam-passkey**: collects the calling process and its ancestors and shows them in the approval UI. It does not use matching.
-- **cw**: collects the peer and decides allow, deny, or re-authentication via a per-key ACL. It creates rules after the fact from the approval UI.
+- **An app that uses only collection**: collects the calling process and its ancestors and shows them in the approval UI. It does not use matching.
+- **An app that also uses the ACL**: collects the peer and decides allow, deny, or re-authentication via an ACL per object the app protects. It creates rules after the fact from the approval UI.
 
 **Design pillars**
 
@@ -22,11 +22,11 @@ macOS is implemented first, in a form that Linux can be added to later. Linux co
 
 **Threat model assumptions**
 
-The adversary is another process with the same uid. root and impersonation of the evaluating app itself are out of scope (the same as cw's design document).
+The adversary is another process with the same uid. root and impersonation of the evaluating app itself are out of scope.
 
 - The signature and the protection state show that the code runs without injection or modification, and no more; they do not represent what that code executes (a script read by an interpreter, the operations of an AI agent).
 - An unprotected signed binary (no hardened runtime, or an entitlement that relaxes the protection) lets a process with the same uid launch it itself with a library injected, which makes a process that satisfies the signature-derived conditions of that code. Another build with the same identity does the same. So the class of `binary`, `path` and `process` is decided by the protection state of the matched process, and checked again at every evaluation (decision record: [DR-0012](decisions/DR-0012-strength-class-from-protection.md)).
-- Protecting the storage of the list and grants and the signing key (a key that processes with the same uid cannot use) is the app's responsibility. cw handles it with a Secure Enclave key.
+- Protecting the storage of the list and grants and the signing key (a key that processes with the same uid cannot use) is the app's responsibility.
 - The chain passed to evaluation is one the evaluating process collected itself. The types of collected facts (`ProcessChain`, `ProcessInfo`, `CodeSigning` and so on) cannot be read from JSON, and a chain can be built only by the collect entry points and by `ProcessChain::from_collected`, through which the app's code states that the values were collected. Only `Policy::tag` can create a tagged sequence (`TaggedChain`). Values received from other processes are used only for display. The observed values of conditions (`EvalContext`) and a `ProcessInfo` passed directly to an item (`MatchTarget`, `Vocabulary::class`) are the app's responsibility (decision record: [DR-0014](decisions/DR-0014-chain-trust-boundary-and-caller-supplied-values.md)).
 
 ## Structure
@@ -41,7 +41,7 @@ Collection is implemented in per-OS crates, while the types and matching live in
 | procline-acl | Types for rules and grants, evaluation, the vocabulary (matcher items, scopes, conditions) and its registration, the OS-independent built-in vocabulary, rule creation and grant issuance | core |
 | procline-acl-macos | Providing the `os.*` vocabulary (`procline_acl_macos::os_items()`). It observes the OS through the public functions of procline-macos and has no `unsafe` | procline-acl, core, procline-macos |
 
-Apps use only what they need. An app that uses only collection depends on procline. An app that uses the ACL adds procline-acl and procline-acl-macos, and registers the `os.*` items from `procline_acl_macos::os_items()` with `Vocabulary::register`. App-specific vocabulary (`app.unlock` and so on for cw) is defined on the app side and registered into procline-acl under `app.` names.
+Apps use only what they need. An app that uses only collection depends on procline. An app that uses the ACL adds procline-acl and procline-acl-macos, and registers the `os.*` items from `procline_acl_macos::os_items()` with `Vocabulary::register`. App-specific vocabulary (`app.unlock` and so on; "Vocabulary Added by Apps") is defined on the app side and registered into procline-acl under `app.` names.
 
 ## Collected Information
 
@@ -80,7 +80,7 @@ Items that depend on SPIs or private APIs are simply left empty if unavailable; 
 
 ## Signature Verification and the Trust Mark
 
-Icons and names are "what it looks like"; the signature is "who it actually is". The signing information holds only facts verified with requirements (decision record: [DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md)). The core decides the trust mark from those facts in one place, and both pam-passkey's approval UI and cw's rule creation UI map that value to their display. The mark tells "whose binary this was confirmed to be"; it does not tell whether the operation is safe (`zsh` and `sudo` are always `apple`).
+Icons and names are "what it looks like"; the signature is "who it actually is". The signing information holds only facts verified with requirements (decision record: [DR-0011](decisions/DR-0011-verified-signature-and-trust-mark.md)). The core decides the trust mark from those facts in one place, and both the app's approval UI and its rule creation UI map that value to their display. The mark tells "whose binary this was confirmed to be"; it does not tell whether the operation is safe (`zsh` and `sudo` are always `apple`).
 
 **Result of verification** (`CodeSigning`): `Verified` (verification succeeded), `Failed` (verification failed; the reason is "the executable was updated or replaced while it ran", "the executable is gone", or "other"), `Unsigned`, `NotChecked` (not verified within the collection's time budget). The identity (identifier, cdhash, certificates, Team ID, bundle ID, entitlements) exists only in `Verified`, and a process whose verification failed has no identity. When the executable was replaced, what can be read is the information of the file it was replaced with, not of the running code.
 
@@ -527,7 +527,7 @@ The level names of `os.session` are names of periods.
 
 ### Vocabulary Added by Apps
 
-App-specific vocabulary goes in the `app.` namespace. The only namespaces are the ones the crates use (`os.`, `time.`, etc.) and `app.`; apps do not create namespaces freely. Only one app evaluates at a time, so multiple namespaces are unnecessary, and allowing free creation could collide with namespaces added to the crates in the future. For cw, it would be things like:
+App-specific vocabulary goes in the `app.` namespace. The only namespaces are the ones the crates use (`os.`, `time.`, etc.) and `app.`; apps do not create namespaces freely. Only one app evaluates at a time, so multiple namespaces are unnecessary, and allowing free creation could collide with namespaces added to the crates in the future. Examples of app-specific vocabulary:
 
 - `app.unlock`: one opening of the vault. Ends on manual lock or vkey\_ttl expiry.
 - `app.passphrase`: one issuance of P. Ends when it becomes Sealed.
@@ -629,7 +629,7 @@ No constraint is placed on `deny`. Even a deny on weak conditions at least works
 
 There are two storage forms: "one list" and "one grant per file". Both are JSON, and saving and signing are the app's responsibility. Signatures are verified with `PolicyVerifier::verify(&self, kind: SignedKind, bytes, sig)`, implemented by the app, and `enum SignedKind { List, Grant }` separates the purposes of the list's and grants' signatures.
 
-**The list** (subjects, tags, rules): the crate provides an entry point (`Policy::load_verified`) to "receive the bytes of the list and a signature, verify, then load". cw signs the list with the D-side key so that a process with the same uid cannot add allow rules on its own (treated the same as the PasskeyRegistry).
+**The list** (subjects, tags, rules): the crate provides an entry point (`Policy::load_verified`) to "receive the bytes of the list and a signature, verify, then load". The app signs the list with a key that processes with the same uid cannot use, so that a process with the same uid cannot add allow rules on its own.
 
 **Grants**: grants are held in memory, and to guard against unintended daemon termination, each one is signed and persisted individually on creation and on update, and all of them are reloaded at startup. In-memory grants change only when the app calls `add_grant` / `remove_grant` after persisting (decision record: [DR-0008](decisions/DR-0008-evaluation-semantics.md)). The crate has the JSON shape of `Grant` and the following entry points.
 
