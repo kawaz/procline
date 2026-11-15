@@ -50,8 +50,10 @@ impl SigningCalls for Calls<'_> {
         }
     }
 
+    /// A certificate chain that cannot be read fails like the call (`-1`), so the result is `Failed(Other)` instead of a shorter chain or, without any certificate, ad-hoc.
     fn info(&self, code: &SecCode) -> Result<SigningInfo, i32> {
         let info = security::signing_information(code)?;
+        let certificates = info.certificates().ok_or(-1)?;
         Ok(SigningInfo {
             identifier: info.identifier(),
             cdhash: info
@@ -59,8 +61,7 @@ impl SigningCalls for Calls<'_> {
                 .and_then(|bytes| <[u8; 20]>::try_from(bytes.as_slice()).ok())
                 .map(CdHash),
             team_id: info.team_identifier(),
-            certificates: info
-                .certificates()
+            certificates: certificates
                 .into_iter()
                 .map(|(summary, der)| Certificate { summary, der })
                 .collect(),

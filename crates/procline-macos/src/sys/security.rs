@@ -97,6 +97,18 @@ pub(crate) fn check(code: &SecCode, requirement: Option<&SecRequirement>) -> OSS
     }
 }
 
+/// The subject summary of a certificate (`SecCertificateCopySubjectSummary`), `None` when the function returns NULL (`__nullable`; observed for a certificate with an empty subject). Not `SecCertificate::subject_summary` of security-framework, which panics on NULL.
+pub(crate) fn subject_summary(certificate: &SecCertificate) -> Option<String> {
+    // SAFETY: `certificate` is a live SecCertificate; the result is NULL or a string under the create rule.
+    let summary = unsafe {
+        security_framework_sys::certificate::SecCertificateCopySubjectSummary(
+            certificate.as_concrete_TypeRef(),
+        )
+    };
+    // SAFETY: a non-NULL result is owned by the caller (create rule).
+    (!summary.is_null()).then(|| unsafe { CFString::wrap_under_create_rule(summary) }.to_string())
+}
+
 /// The dictionary `SecCodeCopySigningInformation` returns.
 pub(crate) struct SigningInfo(CFDictionary);
 
@@ -218,18 +230,22 @@ impl SigningInfo {
         self.number(InfoKey::Status)
     }
 
-    /// `kSecCodeInfoCertificates`, leaf first: (subject summary, DER).
-    pub(crate) fn certificates(&self) -> Vec<(String, Vec<u8>)> {
-        let Some(array) = self
-            .get(InfoKey::Certificates)
-            .and_then(|v| v.downcast::<CFArray>())
-        else {
-            return Vec::new();
+    /// `kSecCodeInfoCertificates`, leaf first: (subject summary, DER); empty without the key. `None` when the value is not an array of certificates (not an array, or an element that is NULL or not a certificate): the chain could not be read, and an empty or shorter list would not say so.
+    pub(crate) fn certificates(&self) -> Option<Vec<(Option<String>, Vec<u8>)>> {
+        let Some(value) = self.get(InfoKey::Certificates) else {
+            return Some(Vec::new());
         };
-        cf::array_elements(&array)
+        let array = value.downcast::<CFArray>()?;
+        let elements = cf::array_elements(&array);
+        if usize::try_from(array.len()).ok()? != elements.len() {
+            return None;
+        }
+        elements
             .into_iter()
-            .filter_map(|item| item.downcast::<SecCertificate>())
-            .map(|cert| (cert.subject_summary(), cert.to_der()))
+            .map(|item| {
+                let certificate = item.downcast::<SecCertificate>()?;
+                Some((subject_summary(&certificate), certificate.to_der()))
+            })
             .collect()
     }
 
@@ -257,11 +273,64 @@ impl SigningInfo {
 mod tests {
     use std::ptr;
 
-    use core_foundation::base::TCFType;
-    use core_foundation::dictionary::CFMutableDictionary;
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::{CFDictionary, CFMutableDictionary};
     use core_foundation::string::CFString;
+    use security_framework::certificate::SecCertificate;
 
-    use super::owned_result;
+    use super::{InfoKey, SigningInfo, owned_result, subject_summary};
+
+    /// A self-signed certificate with an empty subject and issuer (`openssl req -x509 -newkey rsa:2048 -nodes -subj "/" -outform DER`; the key was discarded).
+    const EMPTY_SUBJECT: &[u8] = include_bytes!("../../tests/fixtures/empty-subject.der");
+
+    /// Signing information holding only `kSecCodeInfoCertificates`, with the value, or nothing for `None`.
+    fn with_certificates(value: Option<CFType>) -> SigningInfo {
+        let pairs: Vec<(CFType, CFType)> = value
+            .map(|value| (InfoKey::Certificates.cf_string().as_CFType(), value))
+            .into_iter()
+            .collect();
+        SigningInfo(CFDictionary::from_CFType_pairs(&pairs).to_untyped())
+    }
+
+    // SecCertificateCopySubjectSummary は __nullable で、subject が空の証明書では NULL を返す (観測)。security-framework の SecCertificate::subject_summary は NULL を包もうとして panic するので使わず、自前のラッパで None にする。そういう証明書で署名したプロセスが接続しても、収集する側が落ちないため。対照として、subject のある証明書 (launchd の署名の leaf、Apple の "Software Signing") は要約を返す。
+    #[test]
+    fn a_certificate_with_an_empty_subject_has_no_summary() {
+        let certificate = SecCertificate::from_der(EMPTY_SUBJECT).unwrap();
+        assert_eq!(subject_summary(&certificate), None);
+
+        let launchd = super::guest(super::Guest::Pid(1), false).unwrap();
+        let chain = super::signing_information(&launchd)
+            .unwrap()
+            .certificates()
+            .unwrap();
+        assert_eq!(chain[0].0.as_deref(), Some("Software Signing"));
+    }
+
+    // 証明書の列 (kSecCodeInfoCertificates) を読めない時は、空や短い列を返さず None にし、署名の情報の取得の失敗 (Failed(Other)) にする。空の列は ad-hoc と読まれ、短い列は確かめていない連なりを表示に出すため。SecCode.h は「ad-hoc では無い。エラーの時は欠けるか一部だけになりうる」と書く。
+    // - key が無い: 空の列 (ad-hoc の署名の形)
+    // - 値が配列でない: None
+    // - 配列の要素に証明書でないものがある: None
+    // - 証明書の配列: 要約 (無ければ None) と DER の列
+    // 該当なし: NULL を要素に持つ配列は、CF の既定の callback では作れないので試していない。要素の数を配列の長さと照らし合わせるので、NULL を飛ばした短い列も None になる。
+    #[test]
+    fn a_certificate_chain_that_cannot_be_read_is_none() {
+        let certificate = SecCertificate::from_der(EMPTY_SUBJECT).unwrap();
+        let text = CFString::new("not a certificate").as_CFType();
+
+        assert_eq!(with_certificates(None).certificates(), Some(Vec::new()));
+        assert_eq!(with_certificates(Some(text.clone())).certificates(), None);
+        let mixed = CFArray::from_CFTypes(&[certificate.as_CFType(), text]);
+        assert_eq!(
+            with_certificates(Some(mixed.as_CFType())).certificates(),
+            None
+        );
+        let chain = CFArray::from_CFTypes(&[certificate.as_CFType()]);
+        assert_eq!(
+            with_certificates(Some(chain.as_CFType())).certificates(),
+            Some(vec![(None, EMPTY_SUBJECT.to_vec())])
+        );
+    }
 
     // Copy の形の呼び出し (SecCodeCopySigningInformation) が出力のポインタに辞書を入れたら、戻り値が 0 でなくても、その辞書は呼び出し側が持ち、解放する責任を負う (CF_RETURNS_RETAINED)。失敗の時に辞書を包まずに捨てると漏れる。Security framework が失敗の時に辞書を入れるかは確かめていないので、入れた場合をここで作る: 本物の辞書をもう 1 つ retain して渡し、結果を捨てた後に retain count が元の 1 に戻ることを見る (0 を返した時は成功として辞書を返し、捨てれば同じく戻る)。辞書が無い時は、失敗ならその戻り値、成功なら -1 (情報が無いのに成功とは扱わない)。
     #[test]

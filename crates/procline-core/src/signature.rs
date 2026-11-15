@@ -365,7 +365,8 @@ impl<'de> Deserialize<'de> for CdHash {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Certificate {
-    pub summary: String,
+    /// The subject summary the Security framework makes from the certificate, for display only (the signer writes the subject, so it proves nothing); `None` when it makes none (a certificate with an empty subject).
+    pub summary: Option<String>,
     /// DER bytes; JSON carries them as base64url without padding.
     #[serde(with = "base64url")]
     pub der: Vec<u8>,
@@ -417,6 +418,21 @@ mod tests {
         assert!(serde_json::from_str::<CdHash>(&format!("\"{}\"", "zz".repeat(20))).is_err());
     }
 
+    // 証明書の要約は、Security framework が作れなかった時 (subject が空の証明書で観測) は無い。JSON では null で書き、null を読んで None に戻す (entitlements や bundle_id の「無い」と同じ形)。空の文字列には丸めない (「要約が無い」と「空の要約」を区別する)。
+    #[test]
+    fn certificate_without_summary_is_null_in_json() {
+        let certificate = Certificate {
+            summary: None,
+            der: vec![0x30, 0x82],
+        };
+        let json = serde_json::to_string(&certificate).unwrap();
+        assert_eq!(json, r#"{"summary":null,"der":"MII"}"#);
+        assert_eq!(
+            serde_json::from_str::<Certificate>(&json).unwrap(),
+            certificate
+        );
+    }
+
     // 40 文字でも、16 進の数字 (0-9a-fA-F) 以外を含めばエラー。1 バイトを 2 文字ずつ整数として読むと、符号の付いた "+f" が 0x0f として通り、書き出すと "0f" になって、書いた値と照合に使う値が食い違う (ルールの binary の cdhash もこの読み込みを通る)。空白や全角の数字も同じ (全角は 1 文字が 3 バイトなので、バイト数が 40 になる組を使う)。
     #[test]
     fn cdhash_rejects_signs_spaces_and_non_ascii_digits() {
@@ -457,7 +473,7 @@ mod tests {
     fn certificate(root: Root) -> CodeSigning {
         verified(Signer::Certificate {
             chain: vec![Certificate {
-                summary: "Developer ID Application: Example (ABCDE12345)".to_owned(),
+                summary: Some("Developer ID Application: Example (ABCDE12345)".to_owned()),
                 der: vec![0x30, 0x82],
             }],
             root,
@@ -602,7 +618,7 @@ mod tests {
             cdhash: CdHash([0x36; 20]),
             signer: Signer::Certificate {
                 chain: vec![Certificate {
-                    summary: "Developer ID Application: Example (ABCDE12345)".to_owned(),
+                    summary: Some("Developer ID Application: Example (ABCDE12345)".to_owned()),
                     der: vec![0xfb, 0xff],
                 }],
                 root: Root::AppleIssued {

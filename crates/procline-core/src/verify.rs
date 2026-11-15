@@ -312,7 +312,7 @@ mod tests {
             team_id: Some("ABCDE12345".to_owned()),
             certificates: (0..certificates)
                 .map(|i| Certificate {
-                    summary: format!("certificate {i}"),
+                    summary: Some(format!("certificate {i}")),
                     der: vec![u8::try_from(i).unwrap()],
                 })
                 .collect(),
@@ -434,6 +434,24 @@ mod tests {
         }
     }
 
+    // 要約の無い証明書 (subject が空の自己署名で、Security framework が要約を作れない) でも、根と種類は requirement だけで決まる。要約は表示専用で判定に使わない (署名する側が subject を自由に書ける)。Apple の根を満たさなければ other_certificate になり、要約は None のまま列に残る。
+    #[test]
+    fn a_certificate_without_summary_is_judged_by_requirements_only() {
+        let mut code = signed(1, &[]);
+        let mut signing_info = info(1, 0, 0);
+        signing_info.certificates[0].summary = None;
+        code.info = Some(signing_info);
+        let result = verify(&usual(code));
+        assert_eq!(result.mark(), Mark::OtherCertificate);
+        let CodeSigning::Verified(signature) = result else {
+            unreachable!()
+        };
+        let Signer::Certificate { chain, .. } = signature.signer else {
+            panic!("not a certificate signer")
+        };
+        assert_eq!(chain[0].summary, None);
+    }
+
     // 身元の値の出どころ: identifier・cdhash・証明書の連なり・Team ID・entitlements・bundle ID は署名の情報から、hardened runtime・platform binary・debugged はカーネルの動的な status から取る。CodeDirectory の flags の kSecCodeSignatureRuntime (0x10000) は hardened runtime に使わない (走っている sudo は flags に無く status にある、という観測があるため)。
     #[test]
     fn verified_elements_come_from_the_signing_information_and_status() {
@@ -457,7 +475,7 @@ mod tests {
                 cdhash: CdHash([0xd6; 20]),
                 signer: Signer::Certificate {
                     chain: vec![Certificate {
-                        summary: "certificate 0".to_owned(),
+                        summary: Some("certificate 0".to_owned()),
                         der: vec![0],
                     }],
                     root: Root::Apple {
