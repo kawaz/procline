@@ -8,7 +8,7 @@
 評価 (`Policy::tag`、`grant`、`resolve_subject`、`evaluate`、`explain`、条件の `pin` / `check`) は、渡された chain の中身を事実として扱う。保護の状態 ([DR-0012](DR-0012-strength-class-from-protection.md)) と署名由来の条件は `CodeSigning::Verified` の `runtime` と `entitlements` から、途切れた列の判定 ([DR-0008](DR-0008-evaluation-semantics.md)) は `truncated` から、タグは `TaggedChain` から決まる。今の型は、収集していない値からもこれらを作れる。
 
 - `ProcessChain`、`ProcessInfo`、`CodeSigning` とその部品は `Deserialize` を持つ。`CodeSigning` の読み込みが確かめるのは `mark` と事実の整合だけで ([DR-0011](DR-0011-verified-signature-and-trust-mark.md))、`runtime`、`entitlements`、証明書の根が実際に検証された値かは JSON からは確かめようがない。外から受け取った JSON を chain として読んで評価に渡すと、送り手が `hardened_runtime: true`、`debugged: false`、`entitlements: null` と書くだけで保護ありと判定され、制約なしの `allow` が採用されうる (issue `2026-11-15-deserialized-chain-is-trusted-by-evaluate`。レビューの読み取りによる指摘で、再現のテストは無い)
-- `ProcessChain::new` は公開で、`boot_uuid` と `truncated` は公開の field。`TaggedChain` の field (`chain`、`tags`、`undecidable_tags`) も全部公開で、`Policy::tag` を通さずに任意のタグを付けた値を `evaluate` に渡せる
+- `ProcessChain::new` は公開で、`boot_uuid` と `truncated` は公開の field。`TaggedChain` の field (`vocab`、`chain`、`tags`、`undecidable_tags`) も全部公開で、`Policy::tag` を通さずに任意のタグを付けた値を `evaluate` に渡せる
 
 守る相手は同じ uid の別プロセスで、root と評価するアプリ自身は範囲外 (DESIGN-ja「脅威モデルの前提」)。同じ uid の別プロセスが評価に混ぜられるのは、アプリが外から受け取るバイト列 (JSON、引数、標準入力) だけで、アプリのコードに `ProcessChain::new` を呼ばせることはできない。問題になるのは、アプリの書き手が受け取ったバイト列を、収集した事実の型として読んで評価に渡してしまう取り違え。
 
@@ -21,25 +21,27 @@
 収集した事実の型を JSON から読んでいる所 (このリポ):
 
 - 本体のコードには無い。JSON から読むのは `os.session` の引数 (`SessionLevel`) だけ。procline-acl は serde の `Deserialize` を使わない (grant と一覧の読み込みは未実装)
-- テスト: `CodeSigning` の往復 (`json_round_trips_every_shape` と、書き出しの形のテストの最後の読み戻し)、読み込みが事実と違う印を拒むこと (`reading_rejects_a_mark_the_facts_do_not_give`)、`collect_pid` の列の往復 (`chain_round_trips_through_json`)
+- テスト: `CodeSigning` を読むものが 4 関数 (`crates/procline-core/src/signature.rs` の `json_follows_the_shape_of_the_type` の最後の読み戻し、`json_round_trips_every_shape`、`reading_rejects_a_mark_the_facts_do_not_give`、`crates/procline-macos/tests/collect_pid.rs` の `chain_round_trips_through_json`)。DR-0011 の読み込みの規則 (`TryFrom<Wire> for CodeSigning`) を呼ぶのは、この 4 関数だけ。ほかに `CdHash` を読むものが 3 関数 (`cdhash_round_trips_as_hex_string`、`cdhash_rejects_non_hex_or_wrong_length`、`cdhash_rejects_signs_spaces_and_non_ascii_digits`。`CdHash` は `binary` の `cdhash` の値でもあり、どちらの案でも読める)
+- `ProcessInfo` から JSON で届く procline の型は、`ProcessInfo` を含めて 19: `ProcessInfo`、`Identity`、`AuditToken`、`StartTime`、`Credentials`、`NamedId`、`CodeSigning`、`Mark`、`CdHash`、`Signer`、`Certificate`、`Root`、`CertificateKind`、`RuntimeState`、`VerifiedFrom`、`FailureReason`、`PathMeta`、`Bundle`、`ProcessIdentity` (`responsible`)。列の殻の `ProcessChain` と `Truncated` を足すと 21
 - pam-passkey と cw は、まだ procline を使っていない。cw は、これから procline の上に作り直す利用者として扱う (今の cw の構成の観測は [findings](../findings/2026-11-15-cw-evaluation-and-approval-processes.md) に残すが、作り直す予定なので、この DR の判断の根拠には使わない)
 
 収集の結果を JSON から読むことについて、procline の文書が言っていること:
 
-- DESIGN-ja の柱 2 は「表示と照合を同じ型の上に置く: 画面で見ている情報から、そのままルールを作れるようにする」。画面と照合が同じプロセスにあるか、別のプロセスの画面が収集の結果を読むかには触れていない。ルールを作る `SubjectBuilder` / `RuleBuilder` は収集の結果を受け取らず、実値を埋めるのは chain を持つ `Policy::grant` / `resolve_subject`
+- DESIGN-ja の柱 2 は「表示と照合を同じ型の上に置く: 画面で見ている情報から、そのままルールを作れるようにする」。画面と照合が同じプロセスにあるか、別のプロセスの画面が収集の結果を読むかには触れていない
+- DESIGN-ja の「項目の登録」と「ルールの作成と強さの制約」: `SubjectBuilder` / `RuleBuilder` は収集結果を受け取らず、利用者が選んだ field を `true` (placeholder) で置いた subject を組むだけ。実値は `Policy::grant(rule, tagged, ctx)` が評価する側の chain (`tagged`) から埋め、承認画面のプレビュー (何が pin されるか) は `Policy::resolve_subject(subject, tagged)` が同じく chain から作る。画面が評価と別のプロセスにあっても、画面の側が chain を組み直して評価や pin に渡す経路は設計に無い。柱 2 の「画面からそのままルールを作れる」は、画面の側が評価の型 (`ProcessChain`) を JSON から作ることを求めていないと読める。画面に見せる値 (表示する項目、プレビューの subject) を画面の側でどの型で読むかは、どの文書にも書かれていない
 - DR-0011 の目的は「収集結果の署名が、検証した事実だけを表し、表示と照合のどちらも確かめたことより強く言わない」。読み込みの規則は「`mark` を事実から決め直し、一致しなければエラー」で、誰が何のために読むかは書いていない。テストのコメントは「保存した収集結果を読み直しても事実が変わらない」「印は表示の元なので、JSON を書き換えて ad-hoc の署名に apple の印を付けても、そのまま通さない」(`crates/procline-core/src/signature.rs`)。この規則が守るのは、読んだ側の表示を、書かれた印と事実の食い違い (書き換え、書き手の誤り) から守ることで、事実そのもの (`runtime` や根) が本当に検証されたかは守らない
 - `collect_pid` の列の往復のテストのコメントは「承認画面やルールの保存に JSON で渡しても情報が落ちない」
 
 もう 1 つ、ユーザ権限で収集する時に取れない値の扱いが要る。pam-passkey は、祖先の収集と署名の検証を root の PAM モジュールからユーザ権限の helper に移す (pam-passkey の issue `2026-11-15-collect-in-helper-with-procline`)。
 
-- argv (`KERN_PROCARGS2`) と cwd (`PROC_PIDVNODEPATHINFO`) は、同じ uid か root からしか取れない (別 uid では `EPERM`、[findings](../findings/2026-11-09-collect-pid-observations.md))。走っている `sudo` (実効 uid 0) の argv と cwd は helper から取れない。PAM モジュールは自分の argv と cwd を helper に渡せる。渡された値は呼び出し元が自分について主張するもので、procline が収集したものではない
+- ユーザ権限からは、別 uid のプロセスの argv と cwd が取れない。cwd (`PROC_PIDVNODEPATHINFO`) は `EPERM` ([findings](../findings/2026-11-09-collect-pid-observations.md))、argv (`KERN_PROCARGS2`) は uid 501 から launchd、configd、setuid root の `top` に対して `EINVAL` で、同じ uid のシェルには成功した (2026-11-15 の観測。`crates/procline-macos/src/sys/proc.rs` の `procargs2` のコメントも `EINVAL`)。走っている `sudo` (実効 uid 0) の argv と cwd は helper から取れない。root からなら取れるかは観測していない。PAM モジュールは自分の argv と cwd を helper に渡せる。渡された値は呼び出し元が自分について主張するもので、procline が収集したものではない
 - helper は PAM モジュールが fork し、子の中で降格して exec したもの (pam-passkey の DR-0003)。今の起動時の入力 (pam-passkey の `protocol::HelperInput`) では、`details.processes[0]` が PAM モジュールのプロセスで、識別子は `pid` だけ
 
 祖先の walk が隣り合う行を親子として繋ぐ強さは、識別子が取れたかで変わる (`crates/procline-macos/src/collect.rs` の `Recorded::read` と `is_parent_of`、DESIGN-ja「識別子」)。
 
 - 識別子 (`PROC_PIDUNIQIDENTIFIERINFO`、`#ifdef PRIVATE` の SPI) が親と子の両方で取れた時: 子の `p_puniqueid` と親の `p_uniqueid` の一致で繋ぐ。どちらも uid を問わず読め、`p_puniqueid` はカーネルが fork と exec の時に、その時の親の `p_uniqueid` で書く。親が終わって付け替えられただけなら元の親の値のままで、launchd の `p_uniqueid` と合わないので、列は `AncestorExited` で途切れる ([findings](../findings/2026-11-15-puniqueid-after-reparent-and-exec.md))
 - 取れなかった時: `kinfo_proc` の ppid と、親の起動時刻が子の起動時刻以前であることで繋ぐ。親の pid を後から使い回したプロセス (子より後に起動したもの) は外れるが、付け替えられたプロセスは launchd に繋がり、途切れの印は付かない
-- どちらでも、親が終わって付け替えられた後に exec したプロセスは、`p_puniqueid` が launchd の値 (1) に書き換わるので launchd の子として繋がり、途切れの印は付かない (同じ findings)。これは列のどの行の間でも起きうる。例えば helper の exec の前に `sudo` が終わると、helper の列は helper → launchd になる
+- どちらでも、親が終わって付け替えられた後に exec したプロセスは、`p_puniqueid` が launchd の値 (1) に書き換わるので launchd の子として繋がり、途切れの印は付かない (同じ findings)。これは列のどの行の間でも起きうる。例えば helper の exec の前に `sudo` が終わると、helper の列は helper → launchd になる (親が root の組は観測していない。同じ uid の親での観測と XNU の公開ソースからの推定)
 - どちらで繋いだかは、行の識別子 (`Identity.unique_id`、`parent_unique_id`) が `Some` か `None` かで分かる
 - 自分の pid で `collect_pid` を呼ぶと、列の先頭が自分、2 番目が親になる (同じ uid の親子で観測。親子は unique ID で繋がった)
 
@@ -107,16 +109,22 @@ impl<'a> TaggedChain<'a> {
 上の `ProcessChain` と `TaggedChain` の決定は、どちらの案でも同じ。違うのは、`ProcessChain` の中身の型 (収集した事実だけを表す型) にも `Deserialize` を残すか。
 
 - 案 1: `ProcessChain` だけから外す。`ProcessInfo`、`CodeSigning` などの `Deserialize` と DR-0011 の読み込みの規則は残す
-- 案 2: 収集した事実だけを表す型 (`ProcessChain`、`Truncated`、`ProcessInfo`、`Identity`、`AuditToken`、`Credentials`、`NamedId`、`PathMeta`、`Bundle`、`CodeSigning`、`FailureReason`、`Signer`、`Root`、`CertificateKind`、`RuntimeState`、`VerifiedFrom`、`Certificate`、`Mark`) の全部から外す。rule と grant の値や設定として外から書く型 (`ProcessIdentity`、`StartTime`、`CdHash`、`SessionLevel`、`Strength`、`EnvPolicy`) は残す。DR-0011 の読み込みの規則は、読み込む型が無くなるので持たない
+- 案 2: 収集した事実だけを表す型 (Context の 21 の型のうち、外から書く `ProcessIdentity`、`StartTime`、`CdHash` を除く 18: `ProcessChain`、`Truncated`、`ProcessInfo`、`Identity`、`AuditToken`、`Credentials`、`NamedId`、`PathMeta`、`Bundle`、`CodeSigning`、`FailureReason`、`Signer`、`Root`、`CertificateKind`、`RuntimeState`、`VerifiedFrom`、`Certificate`、`Mark`) の全部から外す。rule と grant の値や設定として外から書く型 (`ProcessIdentity`、`StartTime`、`CdHash`、`SessionLevel`、`Strength`、`EnvPolicy`) は残す。DR-0011 の読み込みの規則は、読み込む型が無くなるので持たない
 
 | 軸 | 案 1 | 案 2 |
 |---|---|---|
 | 同じ uid の別プロセスに対する守り | 同じ。アプリが外から受け取った値を評価に渡さない限り安全 | 同じ |
 | 書き手の取り違え | JSON から読んだ `Vec<ProcessInfo>` は収集した値と型の上で区別が付かない。評価に入るのを止めるのは `from_collected` の名前と文書だけ | 外のバイト列から評価の型を作るには、アプリが field を 1 つずつ書く。読み込みの経路が無い |
 | 型の意味 (DR-0011「確かめたことより強く言わない」) | JSON から読んだ値も `CodeSigning::Verified` になる。読んだプロセスは検証していないので、`Verified` の意味が「検証した」から「検証したと書かれていた」に広がる | `Verified` を持つのは、検証を行ったプロセスが作った値だけ |
-| 他のプロセスが収集した結果を Rust で読んで表示する使い方 | 照合と同じ型で読める。読み込みの規則が、印と事実の食い違いを拒む | 支えない。支えるなら、表示用の別の型 (収集した事実の型を写した十数の型) を足し、読み込みの規則はそこへ移す |
+| 他のプロセスが収集した結果を Rust で読んで表示する使い方 | 照合と同じ型で読める。読み込みの規則が、印と事実の食い違いを拒む | 支えない。支えるなら、表示用の別の型を足し (`ProcessInfo` から届く 19 の型のうち、`Deserialize` を残す `StartTime`、`CdHash`、`ProcessIdentity` を除く 16 を写す。列の殻も要る)、読み込みの規則はそこへ移す |
 | 範囲外の入口 (`MatchTarget`、`Vocabulary::class`) に渡す `ProcessInfo` | JSON から読んだ値をそのまま渡せる (`Decision` は返らない) | 読み込みの経路が無い |
 | DR-0011 の読み込みの規則 | 残る。意味を持つのは、他のプロセスの結果を読む利用者がいる時 | 消える (表示用の型を足す時に、その型の規則として書き直す) |
+| 書き出した列 (`Serialize`) を Rust の受け側が何で読むか | `ProcessChain` は読めないので、受け側が `processes: Vec<ProcessInfo>`、`boot_uuid: String`、`truncated: Option<Truncated>` の殻を自分で定義し、中身を procline の型で読む | procline の型では読めない。受け側の型 (表示用の型を procline が足すならそれ) か、`serde_json::Value` で読む |
+
+比べる時の材料 (事実):
+
+- DR-0011 の読み込みの規則 (`TryFrom<Wire> for CodeSigning`) を今呼ぶのは、テストの 4 関数だけ。本体のコードにも pam-passkey にも、`CodeSigning` / `ProcessInfo` を JSON から読む所は無い
+- 承認画面からルールを作る流れ (DESIGN-ja「項目の登録」「ルールの作成と強さの制約」) では、builder は収集結果を受け取らず、実値を埋めるのもプレビューを作るのも、chain を持つ評価の側 (`Policy::grant`、`Policy::resolve_subject`)。画面の側が評価の型を JSON から作る経路は設計に無い。どちらの案でも、この流れは変わらない
 
 決め手は、procline が「他のプロセスが収集した結果を、Rust で procline の型として読んで表示する」使い方を支えるか。DESIGN と DR にはこの使い方の記述が無く、procline の文書からは決められない。
 
@@ -177,6 +185,8 @@ procline が保証すること / しないこと:
 - 承認画面が評価と別のプロセスにあるアプリ (procline の上に作り直す cw がそうするかは決まっていない) では、どちらの案でも、ルールに実値を埋める `resolve_subject` と `Policy::grant` は chain を持つプロセスが呼ぶ。画面が他のプロセスの収集の結果を procline の型で読めるかは、上の裁定で決まる
 - 未観測の点:
   - 識別子 (SPI) が取れない macOS での walk (今の macOS では uid を問わず取れた)
+  - 別 uid (root) の親が終わる組での `p_puniqueid` (findings `2026-11-15-puniqueid-after-reparent-and-exec.md` の未観測。利用者の権限では root の親を作って終わらせられない)。Context の例「helper の exec の前に `sudo` が終わる」はこの組で、同じ uid の親で観測したことからの推定
+  - root から別 uid のプロセスの argv と cwd が取れるか
   - helper (hardened runtime、Developer ID 署名) が自分の pid で集めた時の所要時間と、列の先頭 (自分) の署名の検証の結果
   - 走っている `sudo` の子として起動された helper から集めた列で、2 番目が `sudo` になること (同じ uid の親子では観測した。親が実効 uid 0 の組は、walk が使う値が uid を問わず読めることだけ観測済み)
   - socketpair を root のプロセスが作り、降格して exec した子が読む組と、その audit token での `collect_peer`
