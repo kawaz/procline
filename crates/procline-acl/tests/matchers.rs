@@ -696,7 +696,7 @@ fn table(strong_item: bool, state: State) -> Strength {
     }
 }
 
-// 保護の状態の決め方の全行 × 表の全セル。各ケースは (検証の結果、binary と path から見た状態、process から見た状態)。
+// 保護の状態の決め方の全行 × 表の全セル。各ケースは (検証の結果、binary と path から見た状態、process から見た状態)。get-task-allow 以外の 3 つの entitlement は、hardened runtime の有無のどちらでも 1 つずつ置く (hardened runtime が無くても、process の「認可で開く」に倒れない)。
 #[test]
 fn class_follows_the_protection_of_the_matched_process() {
     let vocab = Vocabulary::builtin();
@@ -763,13 +763,22 @@ fn class_follows_the_protection_of_the_matched_process() {
         ),
         ("not collected", None, State::Open, State::Open),
     ];
-    let other_relaxing = OTHER_RELAXING.iter().map(|key| {
-        (
-            *key,
-            verified(true, false, &[key]),
-            State::Open,
-            State::Open,
-        )
+    let other_relaxing = OTHER_RELAXING.iter().flat_map(|key| {
+        [true, false].map(|hardened_runtime| {
+            (
+                format!(
+                    "{}, {key}",
+                    if hardened_runtime {
+                        "hardened"
+                    } else {
+                        "not hardened"
+                    }
+                ),
+                verified(hardened_runtime, false, &[key]),
+                State::Open,
+                State::Open,
+            )
+        })
     });
     let signature_field = MatchValue::Binary(BinaryPin {
         team_id: Some(Pinnable::Pin),
@@ -780,8 +789,12 @@ fn class_follows_the_protection_of_the_matched_process() {
         digest: Some(Pinnable::Pin),
         ..no_fields()
     });
-    for (name, code_signing, code_state, individual_state) in
-        cases.into_iter().chain(other_relaxing)
+    for (name, code_signing, code_state, individual_state) in cases
+        .into_iter()
+        .map(|(name, code_signing, code_state, individual_state)| {
+            (name.to_owned(), code_signing, code_state, individual_state)
+        })
+        .chain(other_relaxing)
     {
         let unreplaceable = running(code_signing.clone(), true);
         let writable = running(code_signing, false);

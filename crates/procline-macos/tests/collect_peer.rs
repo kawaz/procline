@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Child, Command, Stdio};
 
-use procline_core::{CodeSigning, EnvPolicy, Mark, Redaction, VerifiedFrom};
+use procline_core::{CodeSigning, EnvPolicy, FailureReason, Mark, Redaction, VerifiedFrom};
 use procline_macos::{CollectError, CollectOptions, collect_peer, collect_pid};
 
 fn options() -> CollectOptions {
@@ -138,6 +138,38 @@ fn replaced_peer_is_verified_from_the_running_code() {
     assert_eq!(signature.identifier, own.identifier);
     assert_eq!(signature.cdhash, own.cdhash);
     assert_ne!(signature.identifier, "com.apple.true");
+}
+
+// 接続相手の実行ファイルを、接続の後に削除する。pid の側 (collect_pid の deleted_executable_is_failed_missing) と同じく、通常の方法が 100002 (実行ファイルが無い) で失敗し、pid ベースへの切り替えの対象 (100013 と -67034) ではないので、検証の結果は Failed(Missing) で、身元は持たない。削除は接続相手が接続して ready を送った後 (起動を終えた後) に行う。コピーは一時ディレクトリに置き、テストの終わりに消える。
+#[test]
+fn deleted_peer_is_failed_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("peer.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let copy = dir.path().join("peer-copy");
+    std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+    let child = Spawned(
+        Command::new(&copy)
+            .args(["--exact", "connect_helper"])
+            .env_clear()
+            .env(SOCKET_PATH, &socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (mut socket, _) = listener.accept().unwrap();
+    let mut ready = [0];
+    socket.read_exact(&mut ready).unwrap();
+    std::fs::remove_file(&copy).unwrap();
+
+    let chain = collect_peer(&socket, &options()).unwrap();
+    let peer = &chain.processes()[0];
+    assert_eq!(peer.identity.pid, i32::try_from(child.0.id()).unwrap());
+    assert_eq!(
+        peer.code_signing,
+        Some(CodeSigning::Failed(FailureReason::Missing))
+    );
 }
 
 // A socket that is not connected has no peer audit token and must return Peer instead of returning an unrelated process or an empty chain.

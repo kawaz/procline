@@ -369,3 +369,28 @@ fn the_until_of_a_grant_is_measured_from_its_creation_when_evaluating() {
     assert_eq!(adopted(&soon, "thirty-days"), Some(false));
     assert_eq!(soon.too_weak, ["thirty-days"]);
 }
+
+// 確かめ直しは allow の grant だけに掛かる: ask の grant は保護の状態で外れない。既定の effect を Deny にした policy で、保護の無いビルド (hardened runtime なし、自身への binary の署名由来の field は弱) に、制限なしの ask の grant と、同じ subject の制限なしの allow の grant (対照: 弱で app.unlock が無いので too_weak) を当てる。ask の grant が採用され、effect は Ask (既定の Deny ではない) で、too_weak には allow の grant だけが載る。
+#[test]
+fn an_ask_grant_is_not_dropped_by_the_protection() {
+    let vocab = vocabulary();
+    let mut policy = Policy::from_parts(
+        &vocab,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        constraints(),
+        Effect::Deny,
+    );
+    let subject = own("binary", signed_as(TEAM, TOOL));
+    policy.add_grant(Grant {
+        effect: Effect::Ask,
+        ..stored("ask", subject.clone(), Vec::new())
+    });
+    policy.add_grant(stored("allow", subject, Vec::new()));
+    let decision = evaluate(&policy, &tool_under_terminal(Build::Open, Build::Open));
+    assert_eq!(decision.effect, Effect::Ask);
+    assert_eq!(decision.grant_id.as_deref(), Some("ask"));
+    assert_eq!(decision.too_weak, ["allow"]);
+}

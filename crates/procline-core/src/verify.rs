@@ -61,6 +61,8 @@ pub const FILE_UNREADABLE: i32 = 100_013;
 
 /// `kSecCodeSignatureLinkerSigned` (code directory flags).
 const FLAG_LINKER_SIGNED: u32 = 0x2_0000;
+/// `kSecCodeStatusValid` / `CS_VALID` (dynamic status): the kernel still holds the running code valid.
+const STATUS_VALID: u32 = 0x1;
 /// `CS_RUNTIME` (dynamic status).
 const STATUS_RUNTIME: u32 = 0x1_0000;
 /// `kSecCodeStatusPlatform` (dynamic status).
@@ -124,7 +126,7 @@ pub fn failure_reason(status: i32) -> FailureReason {
 ///
 /// 1. Look up the code and check it without a requirement. `UNSIGNED` from the check is `Unsigned`.
 /// 2. When the lookup or the check fails with `FILE_UNREADABLE` or `CODE_CHANGED`, do both again on the signature the kernel keeps (`Lookup::RunningCode`) and go on with it; if that fails at any step, the result is `Failed`, classified by the status of the usual way. Any other failure is `Failed` by its own status.
-/// 3. Read the signing information; without the identifier, the cdhash, the flags or the status, or with entitlements that are not in dictionary form, `Failed(Other)`.
+/// 3. Read the signing information; without the identifier, the cdhash, the flags or the status, with a status that lacks valid, or with entitlements that are not in dictionary form, `Failed(Other)`.
 /// 4. Without certificates the signer is ad-hoc. Otherwise the root is the first of `anchor apple` and `anchor apple generic` that holds; only under `anchor apple generic` the kind is the first of Mac App Store, Developer ID and development that holds, and only for Developer ID `notarized` is evaluated.
 /// 5. A requirement check that neither holds (0) nor fails to hold (`REQUIREMENT_NOT_SATISFIED`) makes the result `Failed`, classified by its status.
 pub fn verify<C: SigningCalls>(calls: &C) -> CodeSigning {
@@ -152,7 +154,7 @@ enum Stop {
     Early(i32),
     /// A later step failed with the status.
     Late(i32),
-    /// The signing information lacks an element the identity needs (`FailureReason::Other`); the call succeeded, so there is no status.
+    /// The signing information lacks an element the identity needs, or its status no longer says valid (`FailureReason::Other`); the call succeeded, so there is no OSStatus to classify by.
     Incomplete,
 }
 
@@ -169,7 +171,7 @@ fn attempt<C: SigningCalls>(calls: &C, lookup: Lookup) -> Result<VerifiedSignatu
     else {
         return Err(Stop::Incomplete);
     };
-    if info.entitlements_blob && info.entitlements.is_none() {
+    if status & STATUS_VALID == 0 || (info.entitlements_blob && info.entitlements.is_none()) {
         return Err(Stop::Incomplete);
     }
     let satisfies = |requirement| match calls.check(&code, Some(requirement)) {
@@ -326,7 +328,7 @@ mod tests {
 
     fn signed(certificates: usize, satisfied: &[Requirement]) -> FakeCode {
         FakeCode {
-            info: Some(info(certificates, 0, 0x1_0000)),
+            info: Some(info(certificates, 0, 0x1_0001)),
             satisfied: satisfied.to_vec(),
             ..FakeCode::default()
         }
@@ -424,7 +426,7 @@ mod tests {
     fn no_certificate_is_adhoc_without_asking_requirements() {
         for (flags, linker_signed) in [(0x2_0002, true), (0x2, false)] {
             let mut code = signed(0, &[AnchorApple, AnchorAppleGeneric]);
-            code.info = Some(info(0, flags, 0));
+            code.info = Some(info(0, flags, 0x1));
             let calls = usual(code);
             let CodeSigning::Verified(signature) = verify(&calls) else {
                 panic!("not verified")
@@ -438,7 +440,7 @@ mod tests {
     #[test]
     fn a_certificate_without_summary_is_judged_by_requirements_only() {
         let mut code = signed(1, &[]);
-        let mut signing_info = info(1, 0, 0);
+        let mut signing_info = info(1, 0, 0x1);
         signing_info.certificates[0].summary = None;
         code.info = Some(signing_info);
         let result = verify(&usual(code));
@@ -644,7 +646,7 @@ mod tests {
     fn incomplete_signing_information_fails() {
         let mut incomplete: Vec<SigningInfo> = Vec::new();
         for drop in 0..4 {
-            let mut i = info(1, 0, 0);
+            let mut i = info(1, 0, 0x1);
             match drop {
                 0 => i.identifier = None,
                 1 => i.cdhash = None,
@@ -653,7 +655,7 @@ mod tests {
             }
             incomplete.push(i);
         }
-        let mut blob_only = info(1, 0, 0);
+        let mut blob_only = info(1, 0, 0x1);
         blob_only.entitlements_blob = true;
         incomplete.push(blob_only);
         for signing_info in incomplete {
@@ -675,13 +677,41 @@ mod tests {
             verify(&usual(no_info)),
             CodeSigning::Failed(FailureReason::Other)
         );
-        let mut no_entitlements = info(1, 0, 0);
+        let mut no_entitlements = info(1, 0, 0x1);
         no_entitlements.entitlements_blob = false;
         let code = FakeCode {
             info: Some(no_entitlements),
             ..signed(1, &[AnchorApple])
         };
         assert_eq!(verify(&usual(code)).mark(), Mark::Apple);
+    }
+
+    // status に valid (kSecCodeStatusValid / CS_VALID、0x1) が無ければ Failed(Other)。requirement 無しの検証と status の読み取りの間に valid が外れたら、検証した時のコードと身元を結べないので、身元つきの値を返さない (status が取れない時と同じ分類)。valid 以外の bit (hardened runtime・platform・debugged) が立っていても同じ。
+    #[test]
+    fn a_status_without_valid_fails() {
+        for status in [0, 0x1_0000, 0x1_0000 | 0x0400_0000 | 0x1000_0000] {
+            let code = FakeCode {
+                info: Some(info(1, 0, status)),
+                ..signed(1, &[AnchorApple])
+            };
+            assert_eq!(
+                verify(&usual(code)),
+                CodeSigning::Failed(FailureReason::Other),
+                "{status:#x}"
+            );
+        }
+        let calls = Fake {
+            usual: FakeCode {
+                validity: CODE_CHANGED,
+                ..FakeCode::default()
+            },
+            running: FakeCode {
+                info: Some(info(1, 0, 0x1_0000)),
+                ..signed(1, &[AnchorApple])
+            },
+            ..Fake::default()
+        };
+        assert_eq!(verify(&calls), CodeSigning::Failed(FailureReason::Replaced));
     }
 
     // requirement の評価が成立 (0) と不成立 (-67050) 以外を返したら、その戻り値で Failed に分類する (評価できなかったことを「満たさない」と読み替えない)。コンパイルに失敗した requirement も、その戻り値を返したものとして同じ扱い。どの段の requirement でも同じ。
