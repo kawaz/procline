@@ -198,6 +198,9 @@ impl Matcher for BinaryMatcher {
         let MatchValue::Binary(pin) = value else {
             return Strength::Weak;
         };
+        if pin.validate().is_err() {
+            return Strength::Weak;
+        }
         let protection = process.map(|p| Protection::of(p, Pins::Code));
         let signature_field = pin.team_id.is_some()
             || pin.signing_id.is_some()
@@ -268,7 +271,7 @@ fn verified_signature(process: &ProcessInfo) -> Option<&VerifiedSignature> {
 /// The entitlement that lets a declared debugger attach after the user authorizes it.
 const GET_TASK_ALLOW: &str = "com.apple.security.get-task-allow";
 
-/// The other entitlements that relax the protection of the hardened runtime. Their effect has not been observed, so their presence counts as open.
+/// The other entitlements that relax the protection of the hardened runtime; their presence counts as open (DR-0012). Observed on an ad-hoc signed test program with the hardened runtime, one at a time: with `disable-library-validation`, a library the program loads, replaced on disk by one of another signature, was loaded; `allow-dyld-environment-variables` makes dyld read the user's environment variables, and together with `disable-library-validation` they inject; `disable-executable-page-protection` drops `CS_HARD` and `CS_ENFORCEMENT` from the kernel's status, so the kernel no longer guarantees the code runs unmodified. A path into the process from the same user alone was not observed for the last two, so they count as open on the side of caution.
 const OTHER_RELAXING_ENTITLEMENTS: [&str; 3] = [
     "com.apple.security.cs.allow-dyld-environment-variables",
     "com.apple.security.cs.disable-library-validation",

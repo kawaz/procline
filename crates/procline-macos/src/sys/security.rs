@@ -355,9 +355,7 @@ mod tests {
         // SAFETY: NULL is allowed.
         assert_eq!(unsafe { owned_result(0, ptr::null()) }.err(), Some(-1));
         // SAFETY: NULL is allowed.
-        assert_eq!(
-            unsafe { owned_result(-67061, ptr::null()) }.err(),
-            Some(-67061)
-        );
+        let failed = unsafe { owned_result(-67061, ptr::null()) };
+        assert_eq!(failed.err(), Some(-67061));
     }
 }

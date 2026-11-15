@@ -19,7 +19,7 @@ pub enum Requirement {
 }
 
 impl Requirement {
-    /// Every requirement, for compiling them once before verifying.
+    /// Every requirement. The OS crate compiles each the first time a check needs it, and keeps it for the rest of the collection.
     pub const ALL: [Requirement; 6] = [
         Requirement::AnchorApple,
         Requirement::AnchorAppleGeneric,
@@ -140,6 +140,7 @@ pub fn verify<C: SigningCalls>(calls: &C) -> CodeSigning {
         Err(Stop::Early(status) | Stop::Late(status)) => {
             CodeSigning::Failed(failure_reason(status))
         }
+        Err(Stop::Incomplete) => CodeSigning::Failed(FailureReason::Other),
     }
 }
 
@@ -151,10 +152,9 @@ enum Stop {
     Early(i32),
     /// A later step failed with the status.
     Late(i32),
+    /// The signing information lacks an element the identity needs (`FailureReason::Other`); the call succeeded, so there is no status.
+    Incomplete,
 }
-
-/// `FailureReason::Other` as a status, for the steps whose failure carries no status of its own.
-const INCOMPLETE: i32 = 0;
 
 fn attempt<C: SigningCalls>(calls: &C, lookup: Lookup) -> Result<VerifiedSignature, Stop> {
     let code = calls.open(lookup).map_err(Stop::Early)?;
@@ -167,10 +167,10 @@ fn attempt<C: SigningCalls>(calls: &C, lookup: Lookup) -> Result<VerifiedSignatu
     let (Some(identifier), Some(cdhash), Some(flags), Some(status)) =
         (info.identifier, info.cdhash, info.flags, info.status)
     else {
-        return Err(Stop::Late(INCOMPLETE));
+        return Err(Stop::Incomplete);
     };
     if info.entitlements_blob && info.entitlements.is_none() {
-        return Err(Stop::Late(INCOMPLETE));
+        return Err(Stop::Incomplete);
     }
     let satisfies = |requirement| match calls.check(&code, Some(requirement)) {
         0 => Ok(true),

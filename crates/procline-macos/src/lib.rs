@@ -1,11 +1,17 @@
 //! Collects a process and its ancestors on macOS, and provides the `os.*` vocabulary items.
 
+#![deny(unsafe_code)]
+
 mod collect;
 mod file;
 mod os_items;
 mod path_meta;
 mod procargs;
 mod signing;
+#[allow(
+    unsafe_code,
+    reason = "the FFI layer: the only module that calls the OS through unsafe"
+)]
 mod sys;
 
 use std::fmt;

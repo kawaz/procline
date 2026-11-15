@@ -1,5 +1,7 @@
 //! Access control rules over a process lineage.
 
+#![forbid(unsafe_code)]
+
 mod builder;
 mod conditions;
 mod constraints;

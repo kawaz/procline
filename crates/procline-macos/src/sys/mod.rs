@@ -4,3 +4,5 @@ pub(crate) mod cf;
 pub(crate) mod peer;
 pub(crate) mod proc;
 pub(crate) mod security;
+#[cfg(test)]
+pub(crate) mod test_support;

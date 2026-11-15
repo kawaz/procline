@@ -1,5 +1,7 @@
 //! Entry crate: the core types, and the collector and the `os.*` vocabulary items for the build target OS.
 
+#![forbid(unsafe_code)]
+
 pub use procline_core::*;
 
 #[cfg(target_os = "macos")]

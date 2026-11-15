@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use procline_acl::{Condition, ItemKind, MatchTarget, Matcher, Vocabulary};
 use procline_core::{
-    CdHash, CertificateKind, CodeSigning, Credentials, Identity, NamedId, ProcessChain,
-    ProcessInfo, Root, RuntimeState, Signer, StartTime, VerifiedFrom, VerifiedSignature,
+    CdHash, Certificate, CertificateKind, CodeSigning, Credentials, Identity, NamedId,
+    ProcessChain, ProcessInfo, Root, RuntimeState, Signer, StartTime, VerifiedFrom,
+    VerifiedSignature,
 };
 
 /// The boot UUID of every synthetic chain.
@@ -59,7 +60,10 @@ pub fn signature(team_id: &str, signing_id: &str) -> VerifiedSignature {
         identifier: signing_id.to_owned(),
         cdhash: CdHash([0xab; 20]),
         signer: Signer::Certificate {
-            chain: Vec::new(),
+            chain: vec![Certificate {
+                summary: Some(format!("Developer ID Application: Example ({team_id})")),
+                der: vec![0x30, 0x82],
+            }],
             root: Root::AppleIssued {
                 team_id: Some(team_id.to_owned()),
                 kind: CertificateKind::DeveloperId { notarized: true },

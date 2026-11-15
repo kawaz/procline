@@ -362,7 +362,7 @@ impl<'de> Deserialize<'de> for CdHash {
 }
 
 /// One certificate of the signer chain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Certificate {
     /// The subject summary the Security framework makes from the certificate, for display only (the signer writes the subject, so it proves nothing); `None` when it makes none (a certificate with an empty subject).
@@ -370,6 +370,16 @@ pub struct Certificate {
     /// DER bytes; JSON carries them as base64url without padding.
     #[serde(with = "base64url")]
     pub der: Vec<u8>,
+}
+
+/// Design rationale: written by hand to show the summary and the length of the DER, not its bytes. A chain is printed whole wherever a `CodeSigning` or a `ProcessChain` is formatted with `{:?}` (a failure message, a log line), and a few kilobytes of numbers per certificate bury what the message is about.
+impl fmt::Debug for Certificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Certificate")
+            .field("summary", &self.summary)
+            .field("der_len", &self.der.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// serde adapter: `Vec<u8>` as a base64url (no padding) string, the form every byte string in the JSON takes.
@@ -433,6 +443,26 @@ mod tests {
         );
     }
 
+    // 証明書の {:?} は要約と DER の長さだけを出し、DER のバイト列は出さない。署名 (CodeSigning) や収集の結果 (ProcessChain) を {:?} で出すと連なりの証明書が全部入り、assert の失敗のメッセージやログが 1 枚あたり数 KB の数字で埋まるため。証明書を含む署名の {:?} にも、DER のどのバイトも数字として現れないことを、目印のバイト (どの長さとも一致しない値) で確かめる。
+    #[test]
+    fn certificate_debug_shows_the_summary_and_the_der_length_only() {
+        let certificate = Certificate {
+            summary: Some("Developer ID Application: Example (ABCDE12345)".to_owned()),
+            der: vec![0xe7, 0xe7, 0xe7],
+        };
+        assert_eq!(
+            format!("{certificate:?}"),
+            r#"Certificate { summary: Some("Developer ID Application: Example (ABCDE12345)"), der_len: 3, .. }"#
+        );
+        let signing = verified(Signer::Certificate {
+            chain: vec![certificate],
+            root: Root::Other,
+        });
+        let debug = format!("{signing:?}");
+        assert!(debug.contains("der_len: 3"), "{debug}");
+        assert!(!debug.contains("231"), "{debug}");
+    }
+
     // 40 文字でも、16 進の数字 (0-9a-fA-F) 以外を含めばエラー。1 バイトを 2 文字ずつ整数として読むと、符号の付いた "+f" が 0x0f として通り、書き出すと "0f" になって、書いた値と照合に使う値が食い違う (ルールの binary の cdhash もこの読み込みを通る)。空白や全角の数字も同じ (全角は 1 文字が 3 バイトなので、バイト数が 40 になる組を使う)。
     #[test]
     fn cdhash_rejects_signs_spaces_and_non_ascii_digits() {
@@ -487,10 +517,9 @@ mod tests {
         })
     }
 
-    // 印の表の全 11 行。1 行に 1 つの事実の組を置き、その印と JSON の値 (snake_case) を確かめる。印は「このバイナリが誰のものと確かめられたか」だけで決まる: 根が Apple 自身なら apple、Apple が発行した証明書なら種類 (Developer ID は公証の有無で 2 つ)、それ以外の証明書は other_certificate、証明書が無ければ adhoc、身元の無い 3 つの結果はそれぞれ failed / unsigned / not_checked。
-    #[test]
-    fn every_row_of_the_mark_table() {
-        let rows = [
+    /// 印の表の全 11 行: 1 行に 1 つの事実の組と、その印と、印の JSON の値 (snake_case)。
+    fn mark_table() -> [(CodeSigning, Mark, &'static str); 11] {
+        [
             (
                 certificate(Root::Apple { team_id: None }),
                 Mark::Apple,
@@ -540,37 +569,42 @@ mod tests {
             ),
             (CodeSigning::Unsigned, Mark::Unsigned, "unsigned"),
             (CodeSigning::NotChecked, Mark::NotChecked, "not_checked"),
-        ];
-        assert_eq!(rows.len(), 11);
-        for (signing, expected, wire) in rows {
+        ]
+    }
+
+    // 印の表の全 11 行で、その印と JSON の値 (snake_case) を確かめる。印は「このバイナリが誰のものと確かめられたか」だけで決まる: 根が Apple 自身なら apple、Apple が発行した証明書なら種類 (Developer ID は公証の有無で 2 つ)、それ以外の証明書は other_certificate、証明書が無ければ adhoc、身元の無い 3 つの結果はそれぞれ failed / unsigned / not_checked。
+    #[test]
+    fn every_row_of_the_mark_table() {
+        for (signing, expected, wire) in mark_table() {
             assert_eq!(signing.mark(), expected, "{signing:?}");
             assert_eq!(serde_json::to_value(expected).unwrap(), wire);
             assert_eq!(serde_json::to_value(&signing).unwrap()["mark"], wire);
         }
     }
 
-    // 印は hardened runtime や platform binary に左右されない (色を付けない事実として別に出す)。保護の無い Apple のコードも、debugged なものも、根が Apple 自身なら apple のまま。
+    // 印は hardened runtime、platform binary、debugged に左右されない (保護の状態は色を付けない事実として別に出し、強さのクラスの側で扱う)。印の表の署名のある全 8 行 (検証に成功した署名。失敗・未署名・未検証の 3 行は runtime を持たない) で、runtime の 3 つの bool の全 8 通りに変えても印は表のまま。保護の無い Apple のコードも、debugged な Developer ID のコードも、印は変わらない。
     #[test]
     fn runtime_state_does_not_change_the_mark() {
-        for runtime in [
-            RuntimeState {
-                hardened_runtime: false,
-                platform_binary: false,
-                debugged: true,
-            },
-            RuntimeState {
-                hardened_runtime: true,
-                platform_binary: true,
-                debugged: false,
-            },
-        ] {
-            let CodeSigning::Verified(mut signature) = certificate(Root::Apple { team_id: None })
-            else {
-                unreachable!()
+        let mut verified_rows = 0;
+        for (signing, expected, _) in mark_table() {
+            let CodeSigning::Verified(signature) = signing else {
+                continue;
             };
-            signature.runtime = runtime;
-            assert_eq!(CodeSigning::Verified(signature).mark(), Mark::Apple);
+            verified_rows += 1;
+            for bits in 0..8u8 {
+                let runtime = RuntimeState {
+                    hardened_runtime: bits & 1 != 0,
+                    platform_binary: bits & 2 != 0,
+                    debugged: bits & 4 != 0,
+                };
+                let changed = CodeSigning::Verified(VerifiedSignature {
+                    runtime,
+                    ..signature.clone()
+                });
+                assert_eq!(changed.mark(), expected, "{runtime:?} {changed:?}");
+            }
         }
+        assert_eq!(verified_rows, 8);
     }
 
     // Team ID は署名する側が CodeDirectory に書く値なので、根が Apple (自身か発行) の時だけ照合元になる。自己署名・独自の認証局 (根が Other) と ad-hoc は、Team ID を名乗っていても None。signing_id / bundle_id / cdhash は検証に成功した署名なら常に取れる。

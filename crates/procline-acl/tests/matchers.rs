@@ -446,6 +446,40 @@ fn binary_class_is_the_strongest_field() {
     assert_eq!(m.class(&text("x"), None), Strength::Weak);
 }
 
+// 妥当性の規則 (signing_id には team_id、bundle_id には team_id と signing_id、空は不正) に反する binary の値は、署名由来の field を持っていても弱。そうした値は照合で何にも当たらないが、クラスが強や中に見えると、build・読み込み (プロセスなし) や grant・評価 (保護のあるプロセス) の制約の検査で、その値を持つ rule が実際より強く扱われる。不正な値は項目の形が拒む値と同じく、ルールを強く見せない側に倒す。プロセスなし (上限) と保護のあるプロセス (claude: hardened runtime、entitlement なし) の両方で確かめる。
+#[test]
+fn binary_class_of_an_invalid_value_is_weak() {
+    let vocab = Vocabulary::builtin();
+    let m = matcher(&vocab, "binary");
+    let invalid = [
+        BinaryPin {
+            signing_id: field("com.anthropic.claude-code"),
+            ..no_fields()
+        },
+        BinaryPin {
+            bundle_id: field("com.anthropic.claude-code"),
+            ..no_fields()
+        },
+        BinaryPin {
+            team_id: field("VWXYZ67890"),
+            bundle_id: Some(Pinnable::Pin),
+            ..no_fields()
+        },
+        BinaryPin {
+            signing_id: field("com.anthropic.claude-code"),
+            cdhash: Some(Pinnable::Value(CdHash([0xab; 20]))),
+            ..no_fields()
+        },
+        no_fields(),
+    ];
+    for pin in invalid {
+        assert!(pin.validate().is_err(), "{pin:?}");
+        let value = binary(pin.clone());
+        assert_eq!(m.class(&value, None), Strength::Weak, "{pin:?}");
+        assert_eq!(m.class(&value, Some(&claude())), Strength::Weak, "{pin:?}");
+    }
+}
+
 // validate は BinaryPin::validate の規則 (signing_id には team_id、bundle_id には両方、空は不正、placeholder も「ある」に数える) と、binary の形であることを検査する。
 #[test]
 fn binary_validate_applies_the_field_rules() {

@@ -1,5 +1,7 @@
 //! OS-independent types for a process and its ancestors.
 
+#![forbid(unsafe_code)]
+
 mod binary;
 mod env;
 mod pin;

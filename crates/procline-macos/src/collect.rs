@@ -64,6 +64,8 @@ impl Recorded {
     }
 
     /// The same individual still runs the same image: no `exec` happened in between (the pid version is bumped by every `exec`).
+    ///
+    /// The pid version comes with the unique IDs; when they could not be read for either record (`ids` is `None`, the SPI unavailable), an `exec` in between is not detected and this is `same_individual` alone.
     fn same_image(&self, other: &Self) -> bool {
         let versions_agree = match (self.ids, other.ids) {
             (Some(a), Some(b)) => a.id_version == b.id_version,
@@ -390,9 +392,19 @@ fn describe_and_recheck(
                 Ok(now) if record.same_individual(&now) => {
                     return Err(CollectError::IdentityChanged);
                 }
-                _ => {
+                // Classified as in `walk`: another individual at the pid, or no process at it, means the recorded ancestor exited; any other failure to read it is unavailable.
+                Ok(_) => {
                     processes.truncate(index);
                     truncated = Some(Truncated::AncestorExited);
+                    break;
+                }
+                Err(err) => {
+                    processes.truncate(index);
+                    truncated = Some(if is_no_such_process(&err) {
+                        Truncated::AncestorExited
+                    } else {
+                        Truncated::Unavailable
+                    });
                     break;
                 }
             }
@@ -408,6 +420,7 @@ fn describe_and_recheck(
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Write};
+    use std::os::fd::AsFd;
     use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::{Child, ChildStdin, Command, Stdio};
@@ -416,55 +429,11 @@ mod tests {
 
     use super::{Recorded, describe_and_recheck, signatures, walk};
     use crate::sys::proc as sys;
+    use crate::sys::test_support::{
+        Arrival, ProcessEvent, ProcessWatch, kill_process_group, make_fifo,
+        wait_connection_or_exit, wait_exited_unreaped,
+    };
     use crate::{CollectError, CollectOptions};
-
-    /// Waits for `exec` of one process with a kqueue (`EVFILT_PROC`, `NOTE_EXEC`), without polling. Registered before the `exec` is triggered, so the event is not missed.
-    struct ExecWatch(i32);
-
-    impl ExecWatch {
-        fn new(pid: i32) -> Self {
-            // SAFETY: kqueue takes no arguments and returns a new descriptor or -1.
-            let kq = unsafe { libc::kqueue() };
-            assert!(kq >= 0);
-            let change = libc::kevent {
-                ident: usize::try_from(pid).unwrap(),
-                filter: libc::EVFILT_PROC,
-                flags: libc::EV_ADD | libc::EV_ONESHOT,
-                fflags: libc::NOTE_EXEC,
-                data: 0,
-                udata: std::ptr::null_mut(),
-            };
-            // SAFETY: one change from a valid kevent, no events asked for.
-            let n =
-                unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
-            assert_eq!(n, 0);
-            Self(kq)
-        }
-
-        fn wait(&self) {
-            let mut event = libc::kevent {
-                ident: 0,
-                filter: 0,
-                flags: 0,
-                fflags: 0,
-                data: 0,
-                udata: std::ptr::null_mut(),
-            };
-            // SAFETY: room for one event, no timeout (blocks until the exec).
-            let n = unsafe {
-                libc::kevent(self.0, std::ptr::null(), 0, &mut event, 1, std::ptr::null())
-            };
-            assert_eq!(n, 1);
-            assert_ne!(event.fflags & libc::NOTE_EXEC, 0);
-        }
-    }
-
-    impl Drop for ExecWatch {
-        fn drop(&mut self) {
-            // SAFETY: the descriptor is owned by this value.
-            unsafe { libc::close(self.0) };
-        }
-    }
 
     /// `/bin/sh` and the target: a subshell of sh that only forks, never runs `exec`, and stays blocked opening a FIFO nobody writes to. So the only `exec` and the only exit while a chain is collected are the ones the test makes sh do. sh leads its own process group; dropping the value kills the group (both processes) and reaps sh, also when an assertion failed.
     struct Family {
@@ -478,9 +447,7 @@ mod tests {
         fn start() -> Self {
             let fifo_dir = tempfile::tempdir().unwrap();
             let fifo = fifo_dir.path().join("never-written");
-            let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-            // SAFETY: a NUL-terminated path in a directory this test owns.
-            assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+            make_fifo(&fifo).unwrap();
             let mut sh = Command::new("/bin/sh")
                 .args([
                     "-c",
@@ -512,12 +479,16 @@ mod tests {
             i32::try_from(self.sh.id()).unwrap()
         }
 
-        /// Lets sh run `exec /bin/sleep` and returns once the exec is done. The kqueue is registered before sh is let go, so the event is not missed.
+        /// Lets sh run `exec /bin/sleep` and returns once the exec is done. The kqueue is registered before sh is let go, so the event is not missed; sh exiting without the exec fails the test instead of leaving it waiting.
         fn exec_sh(&mut self) {
-            let watch = ExecWatch::new(self.sh_pid());
+            let watch = ProcessWatch::new(self.sh_pid()).unwrap();
             self.stdin.write_all(b"\n").unwrap();
             self.stdin.flush().unwrap();
-            watch.wait();
+            assert_eq!(
+                watch.wait().unwrap(),
+                ProcessEvent::Exec,
+                "sh exited without running exec"
+            );
         }
 
         /// Kills sh and reaps it, so its pid no longer names it. The target stays, reparented to launchd.
@@ -532,21 +503,10 @@ mod tests {
         }
     }
 
-    /// Kills the child and returns once it has exited, without reaping it (`waitid` with `WNOWAIT`), so it stays a zombie until `Child::wait`.
+    /// Kills the child and returns once it has exited, without reaping it, so it stays a zombie until `Child::wait`.
     fn zombify(child: &mut Child) {
         child.kill().unwrap();
-        // SAFETY: an all-zero siginfo_t is a valid value to be overwritten.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        // SAFETY: waits for one child of this process, writing into `info`.
-        let rc = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                &mut info,
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        assert_eq!(rc, 0);
+        wait_exited_unreaped(child.id()).unwrap();
     }
 
     /// `/usr/bin/nc` connected to a socket this test listens on: a direct child of this test, so it stays a zombie when killed until it is reaped, and the accepted stream gives its audit token. The connection is made by nc itself, so its `exec` is done once it is accepted. Dropping the value kills and reaps it.
@@ -557,6 +517,7 @@ mod tests {
     }
 
     impl Connected {
+        /// Returns once nc's connection is accepted; fails instead of waiting on when nc exits without connecting.
         fn start() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("s");
@@ -575,6 +536,8 @@ mod tests {
                 stream: std::os::unix::net::UnixStream::pair().unwrap().0,
                 _dir: dir,
             };
+            let arrival = wait_connection_or_exit(listener.as_fd(), connected.pid()).unwrap();
+            assert_eq!(arrival, Arrival::Connection, "nc exited without connecting");
             connected.stream = listener.accept().unwrap().0;
             connected
         }
@@ -594,8 +557,7 @@ mod tests {
     impl Drop for Family {
         fn drop(&mut self) {
             // The group keeps sh's pid as its id while the target is in it, also after sh was reaped, so the signal does not reach another process.
-            // SAFETY: killpg only sends a signal.
-            unsafe { libc::killpg(self.sh_pid(), libc::SIGKILL) };
+            let _ = kill_process_group(self.sh_pid());
             let _ = self.sh.wait();
         }
     }
@@ -723,9 +685,8 @@ mod tests {
         for peer in [false, true] {
             let mut connected = Connected::start();
             let pid = connected.pid();
-            let peer_token = peer.then(|| {
-                crate::sys::peer::peer_token(std::os::fd::AsFd::as_fd(&connected.stream)).unwrap()
-            });
+            let peer_token =
+                peer.then(|| crate::sys::peer::peer_token(connected.stream.as_fd()).unwrap());
             let (records, truncated) = walk(Recorded::read(pid).unwrap(), 1);
             let verified = signatures(&records, &options, peer_token);
             zombify(&mut connected.child);

@@ -90,7 +90,7 @@ pub(crate) fn verify_chain(guests: &[Guest], budget: Option<Duration>) -> Vec<Co
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write};
     use std::path::{Path, PathBuf};
     use std::process::{Child, ChildStdin, Command, Stdio};
     use std::time::Duration;
@@ -140,16 +140,30 @@ mod tests {
         }
     }
 
+    // requirement の文字列は、どれも Security framework の requirement 言語としてコンパイルに通る。コンパイルは検証がその requirement を初めて問う時まで遅らせるので、通らない文字列があっても、それを問う署名 (証明書のあるもの) に当たるまで気づけない。気づいた時の結果は Failed(Other) で、そこまで検証に通っていた署名も通らなくなる。全部を 1 度ずつコンパイルして、Ok であることを確かめる。
+    #[test]
+    fn every_requirement_compiles() {
+        for requirement in Requirement::ALL {
+            let compiled = crate::sys::security::requirement(requirement.text());
+            assert!(
+                compiled.is_ok(),
+                "{requirement:?} does not compile: {:?}",
+                compiled.err()
+            );
+        }
+    }
+
     /// Set in the environment of a copy of this test binary that `wait_helper` keeps running.
     const WAIT: &str = "PROCLINE_SIGNING_TEST_WAIT";
 
-    // 単独のテストではない: 下のテストがこのテストのバイナリのコピーを子として起こす時 (WAIT を渡す)、ready を出してから標準入力が閉じるまで生き続ける役をする。普通に cargo test で走った時は何もせずに終わる。
+    // 単独のテストではない: 下のテストがこのテストのバイナリのコピーを子として起こす時 (WAIT を渡す)、ready を出してから標準入力が閉じるまで生き続ける役をする。普通に cargo test で走った時は何もせずに終わる。ready は libtest の出力の取り込み (print! の系統だけが対象) を通らないよう、標準出力に直接書く。
     #[test]
     fn wait_helper() {
         if std::env::var_os(WAIT).is_some() {
-            println!("ready");
-            let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
+            let mut stdout = std::io::stdout();
+            stdout.write_all(b"ready\n").unwrap();
+            stdout.flush().unwrap();
+            let _ = std::io::stdin().read_line(&mut String::new());
         }
     }
 
@@ -162,13 +176,13 @@ mod tests {
     }
 
     impl RunningCopy {
-        /// Returns once the copy printed `ready`, so it has finished starting.
+        /// Returns once the copy printed `ready`, so it has finished starting; fails, instead of waiting on, when it ends before that.
         fn start() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("copy");
             std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
             let mut child = Command::new(&path)
-                .args(["--exact", "signing::tests::wait_helper", "--nocapture"])
+                .args(["--exact", "signing::tests::wait_helper"])
                 .env_clear()
                 .env(WAIT, "1")
                 .stdin(Stdio::piped())

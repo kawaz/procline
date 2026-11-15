@@ -320,3 +320,52 @@ fn conditions_on_the_ancestors_do_not_count() {
     let decision = evaluate(&policy, &tool_under_terminal(Build::Protected, Build::Open));
     assert_eq!(adopted(&decision, "signed-under-terminal"), Some(true));
 }
+
+const DAY: u64 = 24 * 3600;
+
+// 評価の確かめ直しで、中のクラスに課す「7 日以内の until」は、grant を作った時刻 (created_at) から測る。grant を作る時と一覧から読み込む時の検査も created_at (作った時は now = created_at) から測るので、評価でも同じ基準で測り、期限の長さそのものを grant の作られた時点で決める。評価の now から測ると、作ってから時間が経った grant ほど「期限まで 7 日以内」に入って中の制約を満たすようになり、長い期限で作った grant が後から通ってしまう。
+// 保護のあるビルド (強、制限なし) で作った grant を 2 つ: age 30 日 (until = created_at + 30 日) と age 5 日 (until = created_at + 5 日)。どちらも作る時は強なので作れる。評価は認可で開くビルド (get-task-allow だけ、中) に当てる:
+// - created_at + 25 日に評価: 30 日の grant は until がまだ先で生きているが、created_at から 30 日は 7 日を超えるので too_weak。評価の now から測ると残り 5 日で 7 日以内になり、採用されてしまう。5 日の grant はこの時点で期限切れ。
+// - created_at + 3 日に評価: 5 日の grant は created_at から 5 日で 7 日以内なので採用される (中の制約を満たす grant は確かめ直しでも通る、という対照)。30 日の grant はこの時も too_weak。基準を created_at より後 (例えば 10 年後) にずらすと、30 日の grant も 7 日以内に見えて採用される。
+#[test]
+fn the_until_of_a_grant_is_measured_from_its_creation_when_evaluating() {
+    let vocab = vocabulary();
+    let mut policy = policy(&vocab, Vec::new(), Vec::new());
+    let protected = tool_under_terminal(Build::Protected, Build::Protected);
+    for (id, age) in [("thirty-days", "30d"), ("five-days", "5d")] {
+        let rule = policy
+            .rule_builder(
+                format!("rule-{id}"),
+                SubjectRef::Inline(Box::new(own("binary", signed_as(TEAM, TOOL)))),
+            )
+            .condition(ConditionUse::with_args("age", json!(age)))
+            .allow()
+            .build()
+            .unwrap();
+        let mut grant = policy
+            .grant(&rule, &policy.tag(&protected), &EvalContext::new(at(NOW)))
+            .unwrap();
+        assert_eq!(grant.created_at, at(NOW));
+        grant.id = id.to_owned();
+        policy.add_grant(grant);
+    }
+    let opened = tool_under_terminal(Build::Authorization, Build::Protected);
+    let evaluate_at = |secs: u64| {
+        policy.evaluate(
+            &policy.tag(&opened),
+            &Target("key:k1".to_owned()),
+            &EvalContext::new(at(secs)),
+        )
+    };
+
+    let later = evaluate_at(NOW + 25 * DAY);
+    assert_eq!(adopted(&later, "thirty-days"), Some(false));
+    assert_eq!(later.too_weak, ["thirty-days"]);
+    assert_eq!(later.expired, ["five-days"]);
+    assert_eq!(later.grant_id, None);
+
+    let soon = evaluate_at(NOW + 3 * DAY);
+    assert_eq!(adopted(&soon, "five-days"), Some(true));
+    assert_eq!(adopted(&soon, "thirty-days"), Some(false));
+    assert_eq!(soon.too_weak, ["thirty-days"]);
+}
