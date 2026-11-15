@@ -39,7 +39,7 @@ DESIGN-ja (DESIGN.md も同じ箇所):
 - 設計の柱 1「接続相手は audit token、祖先はプロセスごとに一意な ID で特定し、pid の再利用で取り違えない」
 - 「識別子」の表: audit token (強)、pid と起動時刻の備考 (pidversion で exec を検出する)、asid (強。audit token から取り、`os.login_session` の pin 値)
 - 識別子の後の段落: audit token、unique\_id、pid と起動時刻が個体識別の `process` 1 項目に畳まれる (対象の行の `process` は token の pid で決めた個体)
-- 「プロセスの属性」の uid・gid の取り方: `LOCAL_PEERCRED`、audit token (接続相手)。`LOCAL_PEERCRED` の uid は接続の時の値で、token の資格情報と時点が違う (findings の組 6)。コードは `LOCAL_PEERCRED` を使わず、token の pid の `kinfo_proc` から取っている
+- 「プロセスの属性」の uid・gid: 接続相手の行は、token の pid の `kinfo_proc` から取った、収集した時点の実効 uid (`LOCAL_PEERCRED` の接続の時の uid は使わない。findings の組 6)
 - 「プロセスの属性」のコード署名と「署名の検証と信頼の印」の手順 1: 接続相手の SecCode は audit token で得る
 - 「収集の整合性」の 1〜3
 - 「部品」の表と「grant」の「承認の瞬間の接続相手」

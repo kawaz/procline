@@ -61,7 +61,7 @@ grant の形:
 /// この condition の観測値。EvalContext::capture が評価の最初に 1 回だけ観測し、評価の途中で変わらない
 pub struct Observed<'a> {
     pub now: SystemTime,
-    pub value: Option<&'a Value>,   // observe() の Ok の中身。Ok(None) なら None
+    pub value: Result<Option<&'a Value>, &'a ObserveError>,   // observe() の結果そのまま。Ok(None) は観測するものが無い、Err は観測の失敗
 }
 
 trait Condition {
@@ -114,6 +114,7 @@ pub struct Decision {
     pub updated_grant: Option<Grant>,    // advance で変わった grant の新版。アプリはこれを署名して書いてから add_grant で差し替え、値を渡す
     pub expired: Vec<String>,            // この評価で失効が確定した grant の id(DR-0008)
     pub undecidable: Vec<String>,        // 判定できない grant の id(途切れた列、観測の失敗。DR-0008)
+    pub too_weak: Vec<String>,           // 当たったが、対象のプロセスの保護の状態で決め直したクラスでは制約を満たさないので採用しなかった allow の grant の id(DR-0012)
 }
 impl Policy {
     pub fn evaluate(&self, tagged: &TaggedChain, target: &Target, ctx: &EvalContext) -> Decision;     // advance あり。新版を返すだけで、メモリ上の grant は変えない。アプリは evaluate → 永続化 → add_grant を直列化する

@@ -51,5 +51,5 @@ peer pid=70241 (token pid=70241 pidversion=13294785) action=rename
 
 ## 未観測
 
-- setuid の接続相手 (実効 uid が root で、実行ファイルを利用者が読めないもの) を audit token で参照した場合。ユーザ権限で、setuid のプロセスに自分のソケットへ接続させる手段が無かった。pid での参照は、別の観測 (別リポ pam-passkey の findings `2026-11-15-running-code-identity.md`) で通常の方法が 100013、`kSecGuestAttributeDynamicCode` つきが成功だった
+- setuid の接続相手 (実効 uid が root で、実行ファイルを利用者が読めないもの) を audit token で参照した場合。ユーザ権限でも、そういう接続相手を作る手段はある: 接続した後に setuid のプログラムを exec すれば、相手の token の euid が 0 になる ([相手側の端を最後に使ったプロセスの観測](./2026-11-15-socketpair-peer-after-fork-exec.md) の組 6)。この findings の観測 (token を読んだ後の exec と、署名の検証) は、setuid の相手ではまだ行っていない。pid での参照は、別の観測 (別リポ pam-passkey の findings `2026-11-15-running-code-identity.md`) で通常の方法が 100013、`kSecGuestAttributeDynamicCode` つきが成功だった
 - Developer ID や app bundle の接続相手 (試験のクライアントは ad-hoc 署名の単体のバイナリだけ)

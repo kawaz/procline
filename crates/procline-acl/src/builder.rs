@@ -199,7 +199,7 @@ impl<'p> RuleBuilder<'p> {
         self
     }
 
-    /// Checks the keys of the subject and the conditions against the vocabulary, the names of tags and subjects against the list, the validity of the values (`Matcher::validate`, `Condition::validate_args`), and the strength of an `allow` rule against the policy's `AllowConstraints`, and returns the static rule. The strength is decided without a process (`path` counts as `Medium`). Of the scopes, the presence of lifetime conditions and the length of `age` are checked here; the time of an `until` is checked by `Policy::grant` against the time of granting.
+    /// Checks the keys of the subject and the conditions against the vocabulary, the names of tags and subjects against the list, the validity of the values (`Matcher::validate`, `Condition::validate_args`), and the strength of an `allow` rule against the policy's `AllowConstraints`, and returns the static rule. The strength is decided without a process, as the class when the process is protected (the upper bound; `path` counts as `Strong`). Of the scopes, the presence of lifetime conditions and the length of `age` are checked here; the time of an `until` is checked by `Policy::grant` against the time of granting.
     ///
     /// A `ScopeOption::UntilWithin` is met here by an `age` no longer than it, or by any `until`, whose time `Policy::grant` measures.
     pub fn build(self) -> Result<Rule, BuildError> {

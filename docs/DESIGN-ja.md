@@ -62,7 +62,7 @@ macOS を先に実装し、Linux は後から足せる形にします。Linux �
 
 | 項目 | 取り方(macOS) | 強さ |
 | --- | --- | --- |
-| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。代表名 `name` (`getpwuid_r` / `getgrgid_r` の結果) と、その ID に解決される全部の名前 `names` を持つ。全部の名前は passwd / group の全走査が要り 1 回の収集で約 16 ms かかるので `CollectOptions.all_names` で選ぶ。1 つの ID に名前が複数あるのは Open Directory で uid が重複している場合) | `LOCAL_PEERCRED`、audit token(接続相手)、`kinfo_proc`(祖先。所属グループは `cr_groups` の最大 16 件で、先頭が実効 gid) | 弱 |
+| uid、gid、所属グループ(照合は数値。表示用に名前も持つ。代表名 `name` (`getpwuid_r` / `getgrgid_r` の結果) と、その ID に解決される全部の名前 `names` を持つ。全部の名前は passwd / group の全走査が要り 1 回の収集で約 16 ms かかるので `CollectOptions.all_names` で選ぶ。1 つの ID に名前が複数あるのは Open Directory で uid が重複している場合) | `kinfo_proc` の `cr_uid`(実効 uid)と `cr_groups`(最大 16 件で、先頭が実効 gid)。接続相手も祖先も同じで、収集した時点の値。`LOCAL_PEERCRED` の uid は接続の時の値のまま変わらず、audit token の資格情報とは時点が違う(接続の後に setuid のプログラムを exec すると、token の euid は 0 になり `LOCAL_PEERCRED` の uid は元のまま。[findings](findings/2026-11-15-socketpair-peer-after-fork-exec.md))ので使わない | 弱 |
 | コード署名(検証の結果。成功した時だけ識別子、cdhash、署名者の証明書チェーン、証明書の根と種類、Team ID、公証、entitlements、カーネルの動的な status の hardened runtime・platform binary・debugged) | `SecCodeCopyGuestWithAttributes`(接続相手は audit token、祖先は pid。読めないか差し替えられた時は `kSecGuestAttributeDynamicCode` を足して検証し直す)、`SecCodeCheckValidity`(requirement つき)、`SecCodeCopySigningInformation` | 強(検証に成功し、保護ありのときだけ。「署名の検証と信頼の印」「強さ: クラスと深さ」) |
 | 実行パス。所有者(root か)と利用者の書き込み可否も取る(クラスの判定に使う。ファイル自体かパス上のいずれかのディレクトリに書ければ「書ける」) | `proc_pidpath` | 強(root 所有で利用者が書けない場所で、保護あり)、中(利用者が書ける場所、または認可で開く)、弱(保護が開いている) |
 | 実行ファイルの digest | 実行パスのファイルの内容の sha256 | 中(パスと同じ。exec 後にファイルを置き換えられると稼働中の像と食い違う。Linux は `/proc/<pid>/exe` が稼働中の inode を指すが、Linux の収集は保護の状態をまだ持たないので、持つまでは弱として扱う)。保護が開いていれば弱 |
@@ -664,10 +664,13 @@ JSON では、バイト列(証明書の DER など)を base64url(padding なし)
 // 収集(procline-macos)
 // procline コマンド(crates/procline-cli)は collect_pid で集めた列を JSON で出す(procline <pid>)
 let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
-    env: EnvPolicy::Allowlist(&["PWD", "SSH_CONNECTION"]),
+    env: EnvPolicy::Allowlist(vec!["PWD".into(), "SSH_CONNECTION".into()]),
     icon: true,
     digest: false,                                   // 実行ファイルの digest(既定は取らない)
     bundle: true,                                    // 表示用の ProcessInfo.bundle(.app の Info.plist を読む。切れば None)
+    signature: true,                                 // コード署名の検証(切れば code_signing は None)
+    signature_budget: None,                          // Option<Duration>。予算を超えたら、検証を始めていないプロセスは NotChecked
+    all_names: false,                                // uid / gid に解決される全部の名前(NamedId.names)
     max_ancestors: 32,
     redaction: Redaction::default(),                 // env の伏せ字(対象の判定と伏せ方の 2 関数)の差し替え
 })?;
@@ -679,7 +682,6 @@ let chain: ProcessChain = collect_peer(&stream, &CollectOptions {
 // p.code_signing: Option<CodeSigning>(None は収集しなかった)。CodeSigning { Verified(VerifiedSignature), Failed(FailureReason), Unsigned, NotChecked }。FailureReason { Replaced, Missing, Other }
 // VerifiedSignature { identifier, cdhash, signer: Signer, runtime: RuntimeState, entitlements, bundle_id, verified_from: VerifiedFrom }。Signer { AdHoc { linker_signed }, Certificate { chain, root: Root } }。Root { Apple { team_id }, AppleIssued { team_id, kind: CertificateKind }, Other }。CertificateKind { DeveloperId { notarized }, MacAppStore, Development, Other }。RuntimeState { hardened_runtime, platform_binary, debugged }(カーネルの動的な status)。VerifiedFrom { Disk, RunningCode }
 // code_signing.mark(): Apple / DeveloperIdNotarized / DeveloperId / MacAppStore / Development / AppleIssuedOther / OtherCertificate / Adhoc / Failed / Unsigned / NotChecked。VerifiedSignature::team_id() は根が Apple か AppleIssued の時だけ値を返す
-// CollectOptions.signature_budget: Option<Duration>。予算を超えたら、検証を始めていないプロセスは NotChecked
 // ProcessInfo は digest: Option<String> と path_meta: Option<PathMeta> を持つ。PathMeta { owner_uid: u32, writable_by_user: bool }(path のクラスの判定に使う)
 // ProcessInfo.responsible: Option<ProcessIdentity>。責任プロセスは pid でなく個体の識別で持つ
 // VerifiedSignature.bundle_id: Option<String>(kSecCodeInfoPList 由来。照合に使い、BinaryPin.bundle_id の照合元)。ProcessInfo.bundle(実行パスから .app を遡って読む)は表示用。CollectOptions.bundle: bool で読むかを選ぶ。読むのは通常のファイルだけで、トップレベルの辞書の直下の値だけを拾う。ファイルの大きさ(1 MiB)、event の数、読み取りの量のどれかの上限を超えれば None
@@ -704,8 +706,8 @@ for item in procline_acl_macos::os_items() {         // os.* の項目(os.sessio
 // matcher の項目、寿命型、状態型を同じ register で足す。key の重複と名前空間の違反はエラー
 vocab.register(Item::matcher_fn("app.workspace", Strength::Weak, |p, v| ...))?;  // クラスが値によらず一定の項目は、クラスを明示してクロージャで登録する
 // クラスが値で変わる項目は Matcher trait を実装し、Item::matcher(key, impl) で登録する
-//   matches(&self, target: &MatchTarget, value) -> bool(MatchTarget { info: &ProcessInfo, boot_uuid: &str } = 収集済みスナップショットの 1 プロセス。照合中に OS は呼ばない。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は上限。grant の作成と評価で照合したプロセスで決め直す)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)。value に値の列(AnyOf)は来ない(語彙が要素に分けて渡す)
-//   resolve(&self, value: &MatchValue, target: &MatchTarget) -> Result<MatchValue, ResolveError>(placeholder を実値に。ResolveError::ValueUnavailable { field: Option<String> })
+//   matches(&self, target: MatchTarget, value) -> bool(MatchTarget { info: &ProcessInfo, boot_uuid: &str } = 収集済みスナップショットの 1 プロセス。照合中に OS は呼ばない。項目に祖先は見せず、chain 由来で要るのは boot_uuid だけ)/ class(&self, value, process: Option<&ProcessInfo>) -> Strength(process が無い build / 読み込みでは、プロセスで決まる項目は上限。grant の作成と評価で照合したプロセスで決め直す)/ validate(&self, value: &MatchValue) -> Result<(), String>(値の妥当性。読み込みと builder が呼ぶ)。value に値の列(AnyOf)は来ない(語彙が要素に分けて渡す)
+//   resolve(&self, value: &MatchValue, target: MatchTarget) -> Result<MatchValue, ResolveError>(placeholder を実値に。ResolveError::ValueUnavailable { field: Option<String> })
 // vocab.class(key, &value, process: Option<&ProcessInfo>) -> Option<Strength>: 項目が値(とプロセス)から決めたクラス。値の列は要素の最弱(未登録の key と条件の項目は None)
 vocab.register(Item::condition("app.unlock", CwUnlock::new(&vault)))?;           // Condition を実装した値(寿命型)
 // 状態型も同じ Item::condition(...) で register に渡す。寿命型か状態型かは Condition::kind が返す
