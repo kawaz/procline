@@ -10,7 +10,7 @@ origin: 自リポ TODO (pam-passkey のセッションからの起票)
 
 ## 概要
 
-pam-passkey は収集と署名の検証だけを使い (DESIGN-ja「構成」: 「pam-passkey は収集だけ」)、helper (ユーザ権限、hardened runtime の Developer ID 署名) が procline を使う方針になった。procline-macos は `os.*` の語彙の提供のために procline-acl に依存し、設計ではアイコンのために AppKit を使う。収集だけの利用者にも、ACL の crate (と、アイコンが実装されれば AppKit) が入る。
+収集と署名の検証だけを使うプロセス (ユーザ権限、hardened runtime の Developer ID 署名) がある。procline-macos は `os.*` の語彙の提供のために procline-acl に依存し、設計ではアイコンのために AppKit を使う。収集だけの利用者にも、ACL の crate (と、アイコンが実装されれば AppKit) が入る。
 
 ## 背景 (事実)
 
