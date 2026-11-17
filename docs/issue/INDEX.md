@@ -1,17 +1,17 @@
 このファイルは local-issue が各 issue の frontmatter から生成する。手で編集しない (編集しても次の生成で戻る)。
 
-| date | category | status | issue | blocked_by |
-|---|---|---|---|---|
-| 2026-11-17 | design | open | [deny で自分を締め出す事故への注意書きと、足す前に結果を試せる口](./2026-11-17-deny-lockout-caution-and-dry-run.md) |  |
-| 2026-11-17 | design | open | [env を照合の項目に足す (弱い条件として)](./2026-11-17-env-matcher-item.md) |  |
-| 2026-11-17 | design | open | [強さの判定を、判定の関数・強さ・理由・コードの 4 つ 1 組で持つ](./2026-11-17-strength-reason-codes.md) |  |
-| 2026-11-16 | design | open | [OS に依らない収集結果の型 (Identity) が、macOS の識別子 (audit_token、asid) を …](./2026-11-16-os-specific-identifiers-in-core-types.md) |  |
-| 2026-11-15 | bug | open | [entitlements の辞書を JSON にする変換が入れ子の深さを抑えていない](./2026-11-15-entitlements-dict-recursion-depth.md) |  |
-| 2026-11-15 | design | open | [署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる](./2026-11-15-grant-and-list-rollback.md) |  |
-| 2026-11-15 | design | open | [引き継いだコードのレビューで残した点 (裁定や設計の後で決めるもの)](./2026-11-15-handoff-review-followups.md) |  |
-| 2026-11-15 | design | open | [収集だけを使う利用者が、ACL とアイコンを持ち込まずに済む入口が要るか決める](./2026-11-15-minimal-collect-entry.md) |  |
-| 2026-11-15 | design | open | [procline を CLI からも使えるようにする (収集の出力と、subject での照合)](./2026-11-15-procline-cli.md) |  |
-| 2026-11-15 | design | open | [種類が Other の Apple 発行の証明書では、CodeDirectory の Team ID が leaf の …](./2026-11-15-team-id-for-other-apple-issued-certificates.md) |  |
-| 2026-11-09 | design | open | [消費型 condition を表す印を Condition trait に足すか決める](./2026-11-09-consumable-condition-marker.md) |  |
-| 2026-11-09 | tech-memo | open | [os.session の各段階の事象固有の値を macOS 実機で確かめる](./2026-11-09-os-session-event-values.md) |  |
-| 2026-11-08 | task | open | [grant 永続化のベンチ (advance ごとの署名 + 書き込みコスト)](./2026-11-08-grant-persist-bench.md) |  |
+| date | category | status | issue | title | blocked_by |
+|---|---|---|---|---|---|
+| 2026-11-17 | design | open | [deny-lockout-caution-and-dry-run](./2026-11-17-deny-lockout-caution-and-dry-run.md) | deny で自分を締め出す事故への注意書きと、足す前に結果を試せる口 |  |
+| 2026-11-17 | design | open | [env-matcher-item](./2026-11-17-env-matcher-item.md) | env を照合の項目に足す (弱い条件として) |  |
+| 2026-11-17 | design | open | [strength-reason-codes](./2026-11-17-strength-reason-codes.md) | 強さの判定を、判定の関数・強さ・理由・コードの 4 つ 1 組で持つ |  |
+| 2026-11-16 | design | open | [os-specific-identifiers-in-core-types](./2026-11-16-os-specific-identifiers-in-core-types.md) | OS に依らない収集結果の型 (Identity) が、macOS の識別子 (audit_token、asid) を field に持つ |  |
+| 2026-11-15 | bug | open | [entitlements-dict-recursion-depth](./2026-11-15-entitlements-dict-recursion-depth.md) | entitlements の辞書を JSON にする変換が入れ子の深さを抑えていない |  |
+| 2026-11-15 | design | open | [grant-and-list-rollback](./2026-11-15-grant-and-list-rollback.md) | 署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる |  |
+| 2026-11-15 | design | open | [handoff-review-followups](./2026-11-15-handoff-review-followups.md) | 引き継いだコードのレビューで残した点 (裁定や設計の後で決めるもの) |  |
+| 2026-11-15 | design | open | [minimal-collect-entry](./2026-11-15-minimal-collect-entry.md) | 収集だけを使う利用者が、ACL とアイコンを持ち込まずに済む入口が要るか決める |  |
+| 2026-11-15 | design | open | [procline-cli](./2026-11-15-procline-cli.md) | procline を CLI からも使えるようにする (収集の出力と、subject での照合) |  |
+| 2026-11-15 | design | open | [team-id-for-other-apple-issued-certificates](./2026-11-15-team-id-for-other-apple-issued-certificates.md) | 種類が Other の Apple 発行の証明書では、CodeDirectory の Team ID が leaf の OU と照らされない場合がある |  |
+| 2026-11-09 | design | open | [consumable-condition-marker](./2026-11-09-consumable-condition-marker.md) | 消費型 condition を表す印を Condition trait に足すか決める |  |
+| 2026-11-09 | tech-memo | open | [os-session-event-values](./2026-11-09-os-session-event-values.md) | os.session の各段階の事象固有の値を macOS 実機で確かめる |  |
+| 2026-11-08 | task | open | [grant-persist-bench](./2026-11-08-grant-persist-bench.md) | grant 永続化のベンチ (advance ごとの署名 + 書き込みコスト) |  |

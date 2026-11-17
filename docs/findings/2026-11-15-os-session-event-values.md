@@ -92,6 +92,8 @@
 - ロック中は、`CGSessionCopyCurrentDictionary` に `CGSSessionScreenIsLocked` と `CGSSessionScreenLockedTime` が現れ、後者はロックした時刻。IORegistry の root の `CGSSessionScreenLockedTime` は無いままだった
 - 解錠の通知を受けた時点では、`IOConsoleLocked` は false に戻っていたが、`CGSessionCopyCurrentDictionary` のロックの key はまだ残っていた。解錠からしばらく経った状態 (記録の開始の行) では無い。いつ消えるかは測っていない
 - 解錠の時刻を持つ値は、どの時点にも無かった
+- 記録を 2 日続け、ロック 5 回と解錠 5 回を受けた。解錠の通知を受けた時点の値は揃わなかった: `IOConsoleLocked` は 4 回が false で 1 回は true のまま、`CGSessionCopyCurrentDictionary` のロックの key は 3 回が残り 2 回は消えていた。解錠の通知の直後に読む値は、解錠が済んだ状態を表すとは限らない
+- この 2 日の間、スリープは一度も記録されなかった (`kern.waketime` と `kern.sleeptime` は 0 のまま、電源の通知も無い)
 
 観測から言えること: OS の状態として読めるのは「今ロック中か」(`IOConsoleLocked`) と、ロック中の「ロックした時刻」。解錠の時刻は読めず、解錠は通知で知るしかない。通知を受けていなかった間の解錠の時刻を、後から OS に問う方法は、試した中に無い。
 
