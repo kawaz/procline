@@ -108,7 +108,7 @@ impl<'v> Policy<'v> {
         todo!()
     }
 
-    /// Adds a grant to the ones evaluation looks at, replacing the grant with the same id. Call it once the application has stored the grant (a new one from `grant`, an `updated_grant`, or one read back by `load_grant`).
+    /// Adds a grant to the ones evaluation looks at, replacing the grant with the same id. Call it once the application has stored the grant (a new one from `grant`, an `updated_grant`, or one read back by `load_grant`). Adding a `Deny` grant that is too broad rejects the user's own operations, including the ones that fix the permissions; check that it does not lock them out.
     pub fn add_grant(&mut self, grant: Grant) {
         match self.grants.iter_mut().find(|held| held.id == grant.id) {
             Some(held) => *held = grant,

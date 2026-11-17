@@ -491,6 +491,8 @@ There are two entry points for evaluation. `evaluate` runs through step 3 and on
 - The app removes the grants in `evaluate`'s `expired` with `Policy::remove_grant` and from storage. A grant whose `uses` reached 0 also has its expiry settled on the next evaluation and appears here.
 - When `undecidable` is non-empty, whether to let an allow pass while there is an undecidable deny is decided by the app. The crate returns the facts.
 
+A `deny` is stronger than an `allow`, so a `deny` that is too broad also rejects the user's own operations (including the ones that fix the permissions). Which operations amount to locking oneself out is decided by how the app is built, and the API cannot fully prevent it. When adding a `deny`, the app and the user should check that it does not lock them out. Whether to show a deny on the approval screen is outside procline's responsibility.
+
 ## scope: Grant Lifetime
 
 Lifetime conditions (hereafter scopes) pin the epoch at that moment when a grant is created; on every evaluation the current epoch is compared with the pinned value, and if they differ the grant expires permanently. This means "during this particular unlock" rather than "while unlocked", so locking once and unlocking again does not revive the grant.

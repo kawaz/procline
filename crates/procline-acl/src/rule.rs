@@ -18,6 +18,7 @@ pub struct Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     Allow,
+    /// Rejects, and wins over `Allow` and `Ask`. A `Deny` that is too broad also rejects the user's own operations, including the ones that fix the permissions, and locks them out; the application and the user should check this before adding one.
     Deny,
     Ask,
 }

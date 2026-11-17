@@ -34,5 +34,5 @@ procline の API でこれを防ぐことには限界がある (どの操作が�
 
 ## 受け入れ条件
 
-- [ ] 注意書きを DESIGN (ja/en) と doc に書く
+- [x] 注意書きを DESIGN (ja/en) と doc に書く
 - [ ] 試す口を API と CLI に足す
