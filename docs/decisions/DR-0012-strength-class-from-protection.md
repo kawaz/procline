@@ -52,7 +52,7 @@ macOS 26.5.2 で、同じ uid の root でないプロセスから試験プロ�
 | `binary` の署名由来の field (`team_id`、`signing_id`、`bundle_id`、`cdhash`) | 強 | 中 | 弱 |
 | `binary` の `digest` だけ | 中 | 中 | 弱 |
 | `path` (root 所有で利用者が書けない場所) | 強 | 中 | 弱 |
-| `path` (利用者が書ける場所) | 中 | 中 | 弱 |
+| `path` (利用者が書ける場所。所有者と書き込み可否が取れなかった時も同じ) | 中 | 中 | 弱 |
 | `process` | 強 | 中 | 弱 |
 | `name`、`cwd`、`argv`、`uid`、`gid`、`tty` | 弱 | 弱 | 弱 |
 | 責任プロセス | 中 | 中 | 中 |

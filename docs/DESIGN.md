@@ -458,7 +458,7 @@ The class of `binary`, `path` and `process` is decided by the protection state o
 - The class is decided by the item from the value (`Matcher::class(value, process)`). It also accepts rule values containing placeholders, and decides by which fields they are placed in (`{"binary": {"team_id": true}}` is Strong when protected). `process` is the process being matched; it is passed when creating a grant and at evaluation, and is absent (`None`) at rule build and at load time.
 - At rule build and load time, where there is no process, the constraints are checked with the upper bound (protected, a root-owned location the user cannot write to). When creating a grant and at evaluation, the actual class is decided with the matched process (checking again at evaluation is in "Evaluation").
 - The class of `binary` is the strongest among the fields present in the value.
-- The class of `path` is decided by the attributes the collection side (procline-macos) obtains per path (the owner and whether the user can write to it, `PathMeta`) and by the protection state. "A location the user can write to" means the user can write to (replace) the file itself or any directory on the path.
+- The class of `path` is decided by the attributes the collection side (procline-macos) obtains per path (the owner and whether the user can write to it, `PathMeta`) and by the protection state. "A location the user can write to" means the user can write to (replace) the file itself or any directory on the path. When the owner and the writability could not be obtained, the path is treated the same as a location the user can write to.
 - `uid` and `gid` are Weak because every process with the same uid satisfies them, so they identify nothing.
 - The class of a list of values is the weakest among the classes of its elements. A process passes if it matches any one of them, so the class falls to the weaker side (`{"binary": [{"team_id": "AAAAAAAAAA"}, {"digest": "sha256:…"}]}` is Medium). Several definitions of a tag are the same: the strength of a tag used as a condition is the weakest of its definitions ("Rule Creation and Strength Constraints").
 - Which item has which class is held by the vocabulary (the implementations of the registered items). Items in the collection result do not carry a strength.
@@ -809,7 +809,7 @@ let preview = policy.resolve_subject(&rule.subject, &tagged)?;  // the Subject w
 
 // Applying a rule to create a grant (pins the subject's placeholders and each condition. Saved rules use the same entry point)
 let grant = policy.grant(&rule, &tagged, &ctx)?;     // &self. Only returns the grant, pinned and with an id assigned; does not put it into memory
-// GrantError: ValueUnavailable { key, field: Option<String> } (no value to fill a placeholder), pin failure (Unobservable / InvalidArgs), validity violation of a value, ScopeTooWeak (constraint violation. The absolute time of until and the class of path are judged here)
+// GrantError: ValueUnavailable { key, field: Option<String> } (no value to fill a placeholder), pin failure (Unobservable / InvalidArgs), validity violation of a value, ScopeTooWeak (constraint violation. The absolute time of until and the classes of binary, path and process, which the matched process decides, are judged here)
 // the app signs and persists the grant, and puts it in after the write succeeds
 policy.add_grant(grant);
 ```

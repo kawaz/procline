@@ -881,7 +881,7 @@ pub enum GrantError {
         key: String,
         field: Option<String>,
     },
-    /// The `allow` rule does not satisfy the `AllowConstraints` for the class of its strength, decided from the matched process (`path`) or by an `until` beyond the allowed time from now.
+    /// The `allow` rule does not satisfy the `AllowConstraints` for the class of its strength, decided from the matched process (`binary`, `path`, `process`) or by an `until` beyond the allowed time from now.
     ScopeTooWeak {
         class: Strength,
     },

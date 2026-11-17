@@ -458,7 +458,7 @@ register(key, impl)
 - クラスは項目が値から決めます(`Matcher::class(value, process)`)。rule の placeholder 入りの値も受け、どの field に置かれているかで決めます(`{"binary": {"team_id": true}}` は保護ありなら強)。`process` は照合する相手のプロセスで、grant を作るときと評価のときには渡り、rule の build と読み込みのときには無い(`None`)。
 - プロセスが無い rule の build 時と読み込み時は、上限(保護あり、root 所有で利用者が書けない場所)で制約を検査します。grant を作るときと評価のときに、照合したプロセスで実際のクラスを決めます(評価で確かめ直すことは「評価」)。
 - `binary` のクラスは値にある field のうち最も強いものです。
-- `path` のクラスは、収集側(procline-macos)が path ごとに取る属性(所有者と利用者の書き込み可否、`PathMeta`)と保護の状態で決まります。「利用者が書ける場所」は、ファイル自体か、パス上のいずれかのディレクトリに利用者が書ける(差し替えられる)ことを指します。
+- `path` のクラスは、収集側(procline-macos)が path ごとに取る属性(所有者と利用者の書き込み可否、`PathMeta`)と保護の状態で決まります。「利用者が書ける場所」は、ファイル自体か、パス上のいずれかのディレクトリに利用者が書ける(差し替えられる)ことを指します。所有者と書き込み可否が取れなかった時も、利用者が書ける場所と同じに扱います。
 - `uid` と `gid` が弱なのは、同じ uid の全プロセスが満たすので、何も特定しないためです。
 - 値の列のクラスは、要素のクラスのうち最も弱いものです。列のどれか 1 つに一致すれば通るので、弱い側に倒します(`{"binary": [{"team_id": "AAAAAAAAAA"}, {"digest": "sha256:…"}]}` は中)。タグの複数定義も同じで、タグを条件にしたときの強さは定義のうち最も弱いものです(「ルールの作成と強さの制約」)。
 - どの項目がどのクラスかは語彙(登録された項目の実装)が持ちます。収集結果の各項目は強さを持ちません。
@@ -809,7 +809,7 @@ let preview = policy.resolve_subject(&rule.subject, &tagged)?;  // SubjectRef (�
 
 // rule を適用して grant を作る(subject の placeholder と各 condition の pin。保存した rule も同じ入口)
 let grant = policy.grant(&rule, &tagged, &ctx)?;     // &self。pin して id を付けた grant を返すだけで、メモリには入れない
-// GrantError: ValueUnavailable { key, field: Option<String> }(placeholder を埋める値が無い)、pin の失敗(Unobservable / InvalidArgs)、値の妥当性の違反、ScopeTooWeak(制約の違反。until の絶対時刻と path のクラスはここで判定)
+// GrantError: ValueUnavailable { key, field: Option<String> }(placeholder を埋める値が無い)、pin の失敗(Unobservable / InvalidArgs)、値の妥当性の違反、ScopeTooWeak(制約の違反。until の絶対時刻と、照合したプロセスで決まる binary・path・process のクラスはここで判定)
 // アプリは grant を署名して永続化し、書けてから入れる
 policy.add_grant(grant);
 ```
