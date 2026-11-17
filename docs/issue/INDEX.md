@@ -2,6 +2,7 @@
 
 | date | category | status | issue | blocked_by |
 |---|---|---|---|---|
+| 2026-11-17 | design | open | [deny で自分を締め出す事故への注意書きと、足す前に結果を試せる口](./2026-11-17-deny-lockout-caution-and-dry-run.md) |  |
 | 2026-11-17 | design | open | [env を照合の項目に足す (弱い条件として)](./2026-11-17-env-matcher-item.md) |  |
 | 2026-11-17 | design | open | [強さの判定を、判定の関数・強さ・理由・コードの 4 つ 1 組で持つ](./2026-11-17-strength-reason-codes.md) |  |
 | 2026-11-16 | design | open | [OS に依らない収集結果の型 (Identity) が、macOS の識別子 (audit_token、asid) を …](./2026-11-16-os-specific-identifiers-in-core-types.md) |  |
