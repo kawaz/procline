@@ -2,6 +2,7 @@
 
 | date | category | status | issue | blocked_by |
 |---|---|---|---|---|
+| 2026-11-17 | design | open | [env を照合の項目に足す (弱い条件として)](./2026-11-17-env-matcher-item.md) |  |
 | 2026-11-16 | design | open | [OS に依らない収集結果の型 (Identity) が、macOS の識別子 (audit_token、asid) を …](./2026-11-16-os-specific-identifiers-in-core-types.md) |  |
 | 2026-11-15 | bug | open | [entitlements の辞書を JSON にする変換が入れ子の深さを抑えていない](./2026-11-15-entitlements-dict-recursion-depth.md) |  |
 | 2026-11-15 | design | open | [署名付きの grant と一覧が、古い署名済みのファイルに差し戻せる](./2026-11-15-grant-and-list-rollback.md) |  |
