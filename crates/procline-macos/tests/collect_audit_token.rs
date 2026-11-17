@@ -93,6 +93,24 @@ fn connect_then_exec_helper() {
     panic!("exec of /bin/cat failed: {err}");
 }
 
+/// `path` as a path short enough for a UNIX domain socket address: itself when it fits, else the same file relative to the current directory. The address holds about 100 bytes and the limit is on the string passed to `bind` / `connect`, while the temporary directory may be deep. A child that inherits the current directory can use the same path.
+fn socket_address(path: &std::path::Path) -> std::path::PathBuf {
+    // `sun_path` of `sockaddr_un` (`<sys/un.h>`) is 104 bytes on macOS, the terminating NUL included.
+    const SUN_PATH_LEN: usize = 104;
+    if path.as_os_str().len() < SUN_PATH_LEN {
+        return path.to_owned();
+    }
+    let cwd = std::env::current_dir().unwrap();
+    let mut up = std::path::PathBuf::new();
+    for base in cwd.ancestors() {
+        if let Ok(rest) = path.strip_prefix(base) {
+            return up.join(rest);
+        }
+        up.push("..");
+    }
+    path.to_owned()
+}
+
 /// Spawns `exe` (this test binary or a copy) running `helper`, connected to a new listener, and returns it with the accepted stream once the helper signalled readiness.
 fn spawn_connected(
     exe: &Path,
@@ -100,7 +118,7 @@ fn spawn_connected(
     path_var: &str,
 ) -> (Spawned, UnixStream, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let socket_path = dir.path().join("target.sock");
+    let socket_path = socket_address(&dir.path().join("target.sock"));
     let listener = UnixListener::bind(&socket_path).unwrap();
     let child = Spawned(
         Command::new(exe)

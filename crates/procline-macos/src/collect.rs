@@ -519,6 +519,24 @@ mod tests {
         wait_exited_unreaped(child.id()).unwrap();
     }
 
+    /// `path` as a path short enough for a UNIX domain socket address: itself when it fits, else the same file relative to the current directory. The address holds about 100 bytes and the limit is on the string passed to `bind` / `connect`, while the temporary directory may be deep. A child that inherits the current directory can use the same path.
+    fn socket_address(path: &std::path::Path) -> std::path::PathBuf {
+        // `sun_path` of `sockaddr_un` (`<sys/un.h>`) is 104 bytes on macOS, the terminating NUL included.
+        const SUN_PATH_LEN: usize = 104;
+        if path.as_os_str().len() < SUN_PATH_LEN {
+            return path.to_owned();
+        }
+        let cwd = std::env::current_dir().unwrap();
+        let mut up = std::path::PathBuf::new();
+        for base in cwd.ancestors() {
+            if let Ok(rest) = path.strip_prefix(base) {
+                return up.join(rest);
+            }
+            up.push("..");
+        }
+        path.to_owned()
+    }
+
     /// `/usr/bin/nc` connected to a socket this test listens on: a direct child of this test, so it stays a zombie when killed until it is reaped, and the accepted stream gives its audit token (the way this test, as a caller, gets a token to pass). The connection is made by nc itself, so its `exec` is done once it is accepted. Dropping the value kills and reaps it.
     struct Connected {
         child: Child,
@@ -530,7 +548,7 @@ mod tests {
         /// Returns once nc's connection is accepted; fails instead of waiting on when nc exits without connecting.
         fn start() -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("s");
+            let path = socket_address(&dir.path().join("s"));
             let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
             let child = Command::new("/usr/bin/nc")
                 .arg("-U")
