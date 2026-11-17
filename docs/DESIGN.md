@@ -15,6 +15,7 @@ A set of crates for collecting information about a process and its ancestors, an
 2. **Display and matching share the same types**: a rule can be built directly from the information shown on screen.
 3. **Every item has a strength**: conditions that identify the approved individual process or code (code signature, identification of the individual process) and conditions that any process with the same uid can satisfy (name, cwd, argv, uid) are distinguished by class when the item is registered, so that the app can constrain allows based only on conditions that identify nothing. The constraint values are given by the app; the crate holds only the checking mechanism.
 4. **Apps can extend the vocabulary**: matcher items, scopes (grant lifetimes), and conditions can be registered by an app in the same form as the built-in vocabulary.
+5. **Tell the caveats and the strength; do not forbid**: weak conditions (name, cwd, env and so on) can be written too, to prevent accidents or to scope casually. The crates return the strength of a condition and the facts behind it. Whether a weak condition is refused, or allowed with an explanation beside it, is the app's decision.
 
 **Scope**
 
